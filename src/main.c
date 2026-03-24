@@ -19,6 +19,18 @@ static AppSettings *app_settings = NULL;
 static void populate_dict_sidebar(void);      // forward declaration
 static void start_async_dict_loading(void);   // forward declaration
 
+static gboolean dict_list_filter_func(GtkListBoxRow *row, gpointer user_data) {
+    (void)user_data;
+    if (!search_entry) return TRUE;
+    const char *query = gtk_editable_get_text(GTK_EDITABLE(search_entry));
+    if (!query || strlen(query) == 0) return TRUE;
+
+    DictEntry *e = g_object_get_data(G_OBJECT(row), "dict-entry");
+    if (!e) return TRUE;
+    
+    return e->has_matches;
+}
+
 static void on_decide_policy(WebKitWebView *v, WebKitPolicyDecision *d, WebKitPolicyDecisionType t, gpointer user_data) {
     (void)v;
     if (t == WEBKIT_POLICY_DECISION_TYPE_NAVIGATION_ACTION) {
@@ -42,17 +54,23 @@ static void on_search_changed(GtkSearchEntry *entry, gpointer user_data) {
     (void)user_data;
     const char *query = gtk_editable_get_text(GTK_EDITABLE(entry));
 
-    // Store the last search query for theme refresh
+    if (last_search_query && strcmp(query, last_search_query) == 0) return;
+
     g_free(last_search_query);
     last_search_query = g_strdup(query);
 
     if (strlen(query) == 0) {
         webkit_web_view_load_html(web_view, "<h2>Diction</h2><p>Start typing to search...</p>", NULL);
+        // Clear matches and update filter
+        for (DictEntry *e = all_dicts; e; e = e->next) e->has_matches = FALSE;
+        gtk_list_box_invalidate_filter(dict_listbox);
         return;
     }
 
     GString *html_res = g_string_new("<html><body style='font-family: sans-serif; padding: 10px;'>");
     int found_count = 0;
+    // Reset matches for all dictionaries first
+    for (DictEntry *e = all_dicts; e; e = e->next) e->has_matches = FALSE;
 
     int dict_idx = 0;
     for (DictEntry *e = all_dicts; e; e = e->next, dict_idx++) {
@@ -113,12 +131,14 @@ static void on_search_changed(GtkSearchEntry *entry, gpointer user_data) {
                         "font-size: 0.85em; font-weight: bold; text-transform: uppercase; letter-spacing: 0.05em;'>"
                         "%s</div>",
                         dict_idx, bar_bg, bar_fg, bar_border, e->name);
+        
                     dict_header_shown = 1;
+                    e->has_matches = TRUE;
+                    found_count++;
                 }
 
                 g_string_append(html_res, rendered);
                 free(rendered);
-                found_count++;
             }
             
             res = splay_tree_successor(res);
@@ -127,7 +147,7 @@ static void on_search_changed(GtkSearchEntry *entry, gpointer user_data) {
 
     if (found_count > 0) {
         g_string_append(html_res, "</body></html>");
-        webkit_web_view_load_html(web_view, html_res->str, "file:///");
+        webkit_web_view_load_html(web_view, html_res->str, NULL);
     } else {
         // Theme-aware no results message
         int dark_mode = style_manager && adw_style_manager_get_dark(style_manager) ? 1 : 0;
@@ -140,6 +160,9 @@ static void on_search_changed(GtkSearchEntry *entry, gpointer user_data) {
         webkit_web_view_load_html(web_view, buf, "file:///");
     }
     g_string_free(html_res, TRUE);
+
+    // Update sidebar filter
+    gtk_list_box_invalidate_filter(dict_listbox);
 }
 
 static void on_dict_selected(GtkListBox *box, GtkListBoxRow *row, gpointer user_data) {
@@ -252,6 +275,7 @@ static void show_about_dialog(GSimpleAction *action, GVariant *parameter, gpoint
 }
 
 static void append_entry_to_sidebar(DictEntry *e) {
+    GtkWidget *row = gtk_list_box_row_new();
     GtkWidget *label = gtk_label_new(e->name);
     gtk_label_set_xalign(GTK_LABEL(label), 0.0);
     gtk_label_set_ellipsize(GTK_LABEL(label), PANGO_ELLIPSIZE_END);
@@ -260,7 +284,10 @@ static void append_entry_to_sidebar(DictEntry *e) {
     gtk_widget_set_margin_end(label, 8);
     gtk_widget_set_margin_top(label, 4);
     gtk_widget_set_margin_bottom(label, 4);
-    gtk_list_box_append(dict_listbox, label);
+    
+    gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), label);
+    g_object_set_data(G_OBJECT(row), "dict-entry", e);
+    gtk_list_box_append(dict_listbox, row);
 }
 
 static void populate_dict_sidebar(void) {
@@ -287,17 +314,39 @@ static gboolean on_dict_loaded_idle(gpointer user_data) {
         DictEntry *e = ld->entry;
         e->next = NULL;
 
-        // Append to global list
-        if (!all_dicts) {
-            all_dicts = e;
-        } else {
-            DictEntry *last = all_dicts;
-            while (last->next) last = last->next;
-            last->next = e;
+        // Check for duplicate in global list (might exist if reload/re-scan happened)
+        DictEntry *existing = NULL;
+        for (DictEntry *curr = all_dicts; curr; curr = curr->next) {
+            if (curr->path && strcmp(curr->path, e->path) == 0) {
+                existing = curr;
+                break;
+            }
         }
 
-        // Add to sidebar
-        append_entry_to_sidebar(e);
+        if (existing) {
+            // Already there, just update the loaded dict data
+            // (The sidebar row already points to this 'existing' entry)
+            if (existing->dict) dict_mmap_close(existing->dict);
+            existing->dict = e->dict;
+            if (e->name) {
+                free(existing->name);
+                existing->name = strdup(e->name);
+            }
+            // We can free the 'e' shell now as 'e->dict' is transferred
+            e->dict = NULL;
+            dict_loader_free(e);
+        } else {
+            // New unique entry
+            if (!all_dicts) {
+                all_dicts = e;
+            } else {
+                DictEntry *last = all_dicts;
+                while (last->next) last = last->next;
+                last->next = e;
+            }
+            // Add to sidebar
+            append_entry_to_sidebar(e);
+        }
 
         // Auto-select the very first dictionary
         if (all_dicts == e && !active_entry) {
@@ -411,6 +460,7 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
                                    GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
 
     dict_listbox = GTK_LIST_BOX(gtk_list_box_new());
+    gtk_list_box_set_filter_func(dict_listbox, dict_list_filter_func, NULL, NULL);
     gtk_list_box_set_selection_mode(dict_listbox, GTK_SELECTION_SINGLE);
     g_signal_connect(dict_listbox, "row-selected", G_CALLBACK(on_dict_selected), NULL);
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(sidebar_scroll), GTK_WIDGET(dict_listbox));

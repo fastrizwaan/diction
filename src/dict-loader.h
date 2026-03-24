@@ -1,5 +1,5 @@
 #pragma once
-
+#include <glib.h>
 #include "dict-mmap.h"
 #include <stddef.h>
 
@@ -18,6 +18,7 @@ typedef struct DictEntry {
     char *path;           /* Absolute path to the primary file */
     DictFormat format;
     DictMmap *dict;       /* The loaded, mapped, indexed dictionary */
+    gboolean has_matches; /* Set during search if this dict has matches */
     struct DictEntry *next;
 } DictEntry;
 

@@ -22,7 +22,7 @@ srcs = [
   'src/dict-mdx.c',
   'src/dict-bgl.c',
   'src/dict-ifo.c',
-  'src/dsl-render.c',
+  'src/dict-render.c',
   'src/ripemd128.c'
 ]
 

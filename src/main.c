@@ -4,7 +4,7 @@
 #include <sys/stat.h>
 #include "dict-mmap.h"
 #include "dict-loader.h"
-#include "dsl-render.h"
+#include "dict-render.h"
 
 static DictEntry *all_dicts = NULL;
 static DictEntry *active_entry = NULL;

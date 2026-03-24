@@ -370,24 +370,19 @@ static gboolean on_dict_loaded_idle(gpointer user_data) {
     return G_SOURCE_REMOVE;
 }
 
+static void on_dict_found_streaming(DictEntry *e, void *user_data) {
+    (void)user_data;
+    LoadIdleData *ld = g_new0(LoadIdleData, 1);
+    ld->entry = e;
+    ld->done  = FALSE;
+    g_idle_add(on_dict_loaded_idle, ld);
+}
+
 static gpointer dict_load_thread(gpointer user_data) {
     LoadThreadArgs *args = user_data;
 
     for (int i = 0; i < args->n_dirs; i++) {
-        DictEntry *dicts = dict_loader_scan_directory(args->dirs[i]);
-        // Walk the linked list and deliver each entry individually
-        DictEntry *e = dicts;
-        while (e) {
-            DictEntry *next = e->next;
-            e->next = NULL;
-
-            LoadIdleData *ld = g_new0(LoadIdleData, 1);
-            ld->entry = e;
-            ld->done  = FALSE;
-            g_idle_add(on_dict_loaded_idle, ld);
-
-            e = next;
-        }
+        dict_loader_scan_directory_streaming(args->dirs[i], on_dict_found_streaming, NULL);
     }
 
     // Signal completion

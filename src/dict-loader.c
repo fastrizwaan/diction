@@ -77,7 +77,8 @@ DictMmap* dict_load_any(const char *path, DictFormat fmt) {
 
 /* ── directory scanner ───────────────────────────────────── */
 
-static void scan_recursive(const char *dirpath, DictEntry **head) {
+static void scan_recursive(const char *dirpath, DictEntry **head, 
+                            DictLoaderCallback callback, void *user_data) {
     DIR *d = opendir(dirpath);
     if (!d) return;
 
@@ -93,7 +94,7 @@ static void scan_recursive(const char *dirpath, DictEntry **head) {
             /* Skip .files resource dirs like goldendict-ng does */
             if (!ends_with_ci(full, ".dsl.files") &&
                 !ends_with_ci(full, ".dsl.dz.files")) {
-                scan_recursive(full, head);
+                scan_recursive(full, head, callback, user_data);
             }
             free(full);
             continue;
@@ -105,16 +106,8 @@ static void scan_recursive(const char *dirpath, DictEntry **head) {
             continue;
         }
 
-        printf("[SCAN] Found %s dictionary: %s\n",
-               fmt == DICT_FORMAT_DSL ? "DSL" :
-               fmt == DICT_FORMAT_STARDICT ? "StarDict" :
-               fmt == DICT_FORMAT_MDX ? "MDict" :
-               fmt == DICT_FORMAT_BGL ? "BGL" : "?",
-               full);
-
         DictMmap *loaded = dict_load_any(full, fmt);
         if (!loaded) {
-            printf("[SCAN] Failed to load: %s\n", full);
             free(full);
             continue;
         }
@@ -128,8 +121,15 @@ static void scan_recursive(const char *dirpath, DictEntry **head) {
         entry->path = full;
         entry->format = fmt;
         entry->dict = loaded;
-        entry->next = *head;
-        *head = entry;
+
+        if (callback) {
+            callback(entry, user_data);
+        }
+
+        if (head) {
+            entry->next = *head;
+            *head = entry;
+        }
     }
 
     closedir(d);
@@ -137,15 +137,12 @@ static void scan_recursive(const char *dirpath, DictEntry **head) {
 
 DictEntry* dict_loader_scan_directory(const char *dirpath) {
     DictEntry *head = NULL;
-    printf("[LOADER] Scanning directory: %s\n", dirpath);
-    scan_recursive(dirpath, &head);
-
-    /* Count */
-    int count = 0;
-    for (DictEntry *e = head; e; e = e->next) count++;
-    printf("[LOADER] Loaded %d dictionaries.\n", count);
-
+    scan_recursive(dirpath, &head, NULL, NULL);
     return head;
+}
+
+void dict_loader_scan_directory_streaming(const char *dirpath, DictLoaderCallback callback, void *user_data) {
+    scan_recursive(dirpath, NULL, callback, user_data);
 }
 
 void dict_loader_free(DictEntry *head) {

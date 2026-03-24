@@ -22,9 +22,17 @@ typedef struct DictEntry {
     struct DictEntry *next;
 } DictEntry;
 
+/* Callback for streaming loader: called for each dictionary found */
+typedef void (*DictLoaderCallback)(DictEntry *entry, void *user_data);
+
 /* Scan a directory recursively for supported dictionary files.
- * Returns a linked list of DictEntry.  Caller owns the list. */
+ * Returns a linked list of DictEntry. Caller owns the list. */
 DictEntry* dict_loader_scan_directory(const char *dirpath);
+
+/* Streaming version: calls callback for each loaded dictionary */
+void dict_loader_scan_directory_streaming(const char *dirpath, 
+                                           DictLoaderCallback callback, 
+                                           void *user_data);
 
 /* Free all entries in a DictEntry linked list */
 void dict_loader_free(DictEntry *head);

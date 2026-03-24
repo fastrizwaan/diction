@@ -1,0 +1,4 @@
+- [ ] dark theme aware
+- [ ] extract all dictionaries to a specific directory so that they'll not required to be extracted everytime.
+- [ ] show text with ellipses in the sidebar.
+- [ ] image/audio links to work.

@@ -26,25 +26,143 @@ static void buf_append_str(StrBuf *b, const char *s) {
     buf_append(b, s, strlen(s));
 }
 
+// Color name mapping for dark mode (too dark -> lighter)
+static const char* get_dark_mode_color(const char *color_name) {
+    struct { const char *dark; const char *light; } map[] = {
+        {"darkblue", "dodgerblue"},
+        {"darkcyan", "cyan"},
+        {"darkviolet", "orchid"},
+        {"darkmagenta", "violet"},
+        {"darkred", "tomato"},
+        {"darkorange", "orange"},
+        {"darkgreen", "seagreen"},
+        {"darkolivegreen", "yellowgreen"},
+        {"darkslategray", "cadetblue"},
+        {"darkslategrey", "cadetblue"},
+        {"darkslateblue", "slateblue"},
+        {"navy", "steelblue"},
+        {NULL, NULL}
+    };
+    for (int i = 0; map[i].dark; i++) {
+        if (g_ascii_strcasecmp(color_name, map[i].dark) == 0) {
+            return map[i].light;
+        }
+    }
+    return color_name;
+}
 
-char* dsl_render_to_html(const char *dsl_text, size_t length, const char *headword, size_t hw_length, DictFormat format, const char *resource_dir) {
+// Color name mapping for light mode (too light -> darker)
+static const char* get_light_mode_color(const char *color_name) {
+    struct { const char *light; const char *dark; } map[] = {
+        {"ivory", "darkkhaki"},
+        {"lightgray", "gray"},
+        {"lightgrey", "gray"},
+        {"lightyellow", "goldenrod"},
+        {"white", "beige"},
+        {"yellow", "darkgoldenrod"},
+        {NULL, NULL}
+    };
+    for (int i = 0; map[i].light; i++) {
+        if (g_ascii_strcasecmp(color_name, map[i].light) == 0) {
+            return map[i].dark;
+        }
+    }
+    return color_name;
+}
+
+// Simple hex color lightening helper
+static void lighten_hex_color(char *output, const char *hex, size_t output_size) {
+    char *endptr;
+    unsigned long r = 0, g = 0, b = 0;
+
+    if (hex[0] != '#') {
+        g_strlcpy(output, hex, output_size);
+        return;
+    }
+
+    const char *c = hex + 1;
+    size_t len = strlen(c);
+
+    if (len == 3) {
+        char tmp[4] = {c[0], c[0], '\0'};
+        r = strtoul(tmp, &endptr, 16);
+        tmp[0] = c[1]; tmp[1] = c[1];
+        g = strtoul(tmp, &endptr, 16);
+        tmp[0] = c[2]; tmp[1] = c[2];
+        b = strtoul(tmp, &endptr, 16);
+    } else if (len >= 6) {
+        char tmp[3] = {c[0], c[1], '\0'};
+        r = strtoul(tmp, &endptr, 16);
+        tmp[0] = c[2]; tmp[1] = c[3];
+        g = strtoul(tmp, &endptr, 16);
+        tmp[0] = c[4]; tmp[1] = c[5];
+        b = strtoul(tmp, &endptr, 16);
+    } else {
+        g_strlcpy(output, hex, output_size);
+        return;
+    }
+
+    // Lighten by 30%
+    r = (size_t)(r + (255 - r) * 0.3);
+    g = (size_t)(g + (255 - g) * 0.3);
+    b = (size_t)(b + (255 - b) * 0.3);
+
+    g_snprintf(output, output_size, "#%02lx%02lx%02lx", r, g, b);
+}
+
+
+char* dsl_render_to_html(const char *dsl_text, size_t length, const char *headword, size_t hw_length, DictFormat format, const char *resource_dir, int dark_mode) {
     StrBuf b = {NULL, 0, 0};
-    
-    // Add GoldenDict-like styling
-    buf_append_str(&b, 
+
+    // Theme colors based on Python Diction's _build_theme_css
+    const char *body_color = dark_mode ? "#dddddd" : "#222222";
+    const char *bg_color = dark_mode ? "#1e1e1e" : "#ffffff";
+    const char *link_color = dark_mode ? "#89b4ff" : "#005bbb";
+    const char *trn_color = dark_mode ? "#89b4ff" : "#1a73e8";
+    const char *ex_color = dark_mode ? "#9ae59a" : "#5f6368";
+    const char *com_color = dark_mode ? "#9ae59a" : "#006600";
+    const char *pos_color = dark_mode ? "#9ae59a" : "#c90016";
+    const char *translit_color = dark_mode ? "#888888" : "#808080";
+    const char *heading_color = dark_mode ? "#89b4ff" : "#0b5394";
+    const char *border_color = dark_mode ? "#444444" : "#cccccc";
+
+    // Add GoldenDict-like styling with theme-aware colors
+    buf_append_str(&b,
         "<style>"
-        "body{font-family: sans-serif; line-height: 1.4; color: #333;}"
-        ".dict-link {color: #0b5394; text-decoration: none;}"
+        "body{font-family: system-ui, sans-serif; line-height: 1.4; color: ");
+    buf_append_str(&b, body_color);
+    buf_append_str(&b, "; background: ");
+    buf_append_str(&b, bg_color);
+    buf_append_str(&b, ";}"
+        ".dict-link {color: ");
+    buf_append_str(&b, link_color);
+    buf_append_str(&b, "; text-decoration: none;}"
         ".dict-link:hover {text-decoration: underline;}"
-        ".trn{color: #1a73e8;}"
-        ".ex{color: #5f6368; font-style: italic;}"
-        ".com{color: #006600;}"
-        ".pos{color: #c90016; font-weight: bold;}"
+        ".trn{color: ");
+    buf_append_str(&b, trn_color);
+    buf_append_str(&b, ";}"
+        ".ex{color: ");
+    buf_append_str(&b, ex_color);
+    buf_append_str(&b, "; font-style: italic;}"
+        ".com{color: ");
+    buf_append_str(&b, com_color);
+    buf_append_str(&b, ";}"
+        ".pos{color: ");
+    buf_append_str(&b, pos_color);
+    buf_append_str(&b, "; font-weight: bold;}"
+        ".translit{color: ");
+    buf_append_str(&b, translit_color);
+    buf_append_str(&b, "; font-style: italic;}"
         ".m-line{margin-top: 2px; margin-bottom: 2px;}"
+        "hr{border: none; border-top: 1px solid ");
+    buf_append_str(&b, border_color);
+    buf_append_str(&b, "; margin: 10px 0;}"
         "</style>"
     );
-    
-    buf_append_str(&b, "<h2 style='color:#0b5394; margin-bottom: 0.5em;'>");
+
+    buf_append_str(&b, "<h2 style='color:");
+    buf_append_str(&b, heading_color);
+    buf_append_str(&b, "; margin-bottom: 0.5em;'>");
     buf_append(&b, headword, hw_length);
     buf_append_str(&b, "</h2>\n<div>");
 
@@ -152,7 +270,30 @@ char* dsl_render_to_html(const char *dsl_text, size_t length, const char *headwo
                  if (tag_len > 2 && tag[0] == 'c' && tag[1] == ' ') {
                      if (!in_sound) {
                          buf_append_str(&b, "<span style='color:");
-                         buf_append(&b, tag + 2, tag_len - 2);
+
+                         // Extract color name/value
+                         char color_name[64];
+                         size_t color_len = tag_len - 2;
+                         if (color_len >= sizeof(color_name)) color_len = sizeof(color_name) - 1;
+                         memcpy(color_name, tag + 2, color_len);
+                         color_name[color_len] = '\0';
+
+                         // Apply theme-aware color adjustment
+                         const char *final_color = color_name;
+                         char adjusted_color[64];
+
+                         if (dark_mode) {
+                             final_color = get_dark_mode_color(color_name);
+                             // If it's a hex color, lighten it
+                             if (final_color == color_name && final_color[0] == '#') {
+                                 lighten_hex_color(adjusted_color, final_color, sizeof(adjusted_color));
+                                 final_color = adjusted_color;
+                             }
+                         } else {
+                             final_color = get_light_mode_color(color_name);
+                         }
+
+                         buf_append_str(&b, final_color);
                          buf_append_str(&b, "'>");
                      }
                  }
@@ -193,7 +334,12 @@ char* dsl_render_to_html(const char *dsl_text, size_t length, const char *headwo
                  
                  // Transcription [t]...[/t]
                  else if (tag_len == 1 && tag[0] == 't') {
-                     if (!in_sound) buf_append_str(&b, "<span style='color: #1e8e3e; font-family: sans-serif;'>");
+                     const char *t_color = dark_mode ? "#9ae59a" : "#1e8e3e";
+                     if (!in_sound) {
+                         buf_append_str(&b, "<span style='color: ");
+                         buf_append_str(&b, t_color);
+                         buf_append_str(&b, "; font-family: sans-serif;'>");
+                     }
                  }
                  else if (tag_len == 2 && tag[0] == '/' && tag[1] == 't') {
                      if (!in_sound) buf_append_str(&b, "</span>");
@@ -215,7 +361,12 @@ char* dsl_render_to_html(const char *dsl_text, size_t length, const char *headwo
                  
                  // Bullet [*]
                  else if (tag_len == 1 && tag[0] == '*') {
-                     if(!in_sound) buf_append_str(&b, "<span style='color: #888;'>• </span>");
+                     const char *bullet_color = dark_mode ? "#888888" : "#888888";
+                     if(!in_sound) {
+                         buf_append_str(&b, "<span style='color: ");
+                         buf_append_str(&b, bullet_color);
+                         buf_append_str(&b, ";'>• </span>");
+                     }
                  }
                  else if (tag_len == 2 && strncmp(tag, "/*", 2) == 0) { /* ignore */ }
                  
@@ -232,10 +383,13 @@ char* dsl_render_to_html(const char *dsl_text, size_t length, const char *headwo
                      // Potential transcription if unknown tag with no space (e.g. [frait])
                      int has_space = 0;
                      for(size_t j=0; j<tag_len; j++) if(isspace(tag[j])) has_space = 1;
-                     
+
                      if (!in_sound) {
                          if (!has_space && tag_len > 0 && tag[0] != '/') {
-                             buf_append_str(&b, "<span style='color: #1e8e3e;'>[");
+                             const char *trans_color = dark_mode ? "#9ae59a" : "#1e8e3e";
+                             buf_append_str(&b, "<span style='color: ");
+                             buf_append_str(&b, trans_color);
+                             buf_append_str(&b, ";'>[");
                              buf_append(&b, tag, tag_len);
                              buf_append_str(&b, "]</span>");
                          } else {
@@ -271,7 +425,10 @@ char* dsl_render_to_html(const char *dsl_text, size_t length, const char *headwo
                 size_t end = i + 1;
                 while (end < length && dsl_text[end] != '>' && (end - i < 10)) end++;
                 if (end < length && dsl_text[end] == '>') {
-                    buf_append_str(&b, "<b style='color: #c90016;'>&lt;");
+                    const char *sense_color = dark_mode ? "#9ae59a" : "#c90016";
+                    buf_append_str(&b, "<b style='color: ");
+                    buf_append_str(&b, sense_color);
+                    buf_append_str(&b, ";'>&lt;");
                     buf_append(&b, dsl_text + i + 1, end - i - 1);
                     buf_append_str(&b, "&gt;</b>");
                     i = end + 1;

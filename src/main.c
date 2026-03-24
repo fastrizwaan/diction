@@ -10,6 +10,9 @@ static DictEntry *all_dicts = NULL;
 static DictEntry *active_entry = NULL;
 static WebKitWebView *web_view = NULL;
 static GtkListBox *dict_listbox = NULL;
+static AdwStyleManager *style_manager = NULL;
+static GtkSearchEntry *search_entry = NULL;
+static char *last_search_query = NULL;
 
 static void on_decide_policy(WebKitWebView *v, WebKitPolicyDecision *d, WebKitPolicyDecisionType t, gpointer user_data) {
     (void)v;
@@ -33,6 +36,11 @@ static void on_decide_policy(WebKitWebView *v, WebKitPolicyDecision *d, WebKitPo
 static void on_search_changed(GtkSearchEntry *entry, gpointer user_data) {
     (void)user_data;
     const char *query = gtk_editable_get_text(GTK_EDITABLE(entry));
+
+    // Store the last search query for theme refresh
+    g_free(last_search_query);
+    last_search_query = g_strdup(query);
+
     if (strlen(query) == 0) {
         webkit_web_view_load_html(web_view, "<h2>Diction</h2><p>Start typing to search...</p>", NULL);
         return;
@@ -60,7 +68,7 @@ static void on_search_changed(GtkSearchEntry *entry, gpointer user_data) {
                     l++;
                 }
                 link_target[l] = '\0';
-                
+
                 SplayNode *red_res = splay_tree_search(e->dict->index, link_target);
                 if (red_res) {
                     def_ptr = e->dict->data + red_res->val_offset;
@@ -68,17 +76,25 @@ static void on_search_changed(GtkSearchEntry *entry, gpointer user_data) {
                 }
             }
 
+            // Get current theme
+            int dark_mode = style_manager && adw_style_manager_get_dark(style_manager) ? 1 : 0;
+
             char *rendered = dsl_render_to_html(
                 def_ptr, def_len,
                 e->dict->data + res->key_offset, res->key_length,
-                e->format, e->dict->resource_dir);
+                e->format, e->dict->resource_dir, dark_mode);
             if (rendered) {
+                // Theme-aware dict source bar colors
+                const char *bar_bg = dark_mode ? "#2d2d2d" : "#f0f0f0";
+                const char *bar_fg = dark_mode ? "#aaaaaa" : "#555555";
+                const char *bar_border = dark_mode ? "#444444" : "#dddddd";
+
                 g_string_append_printf(html_res,
-                    "<div id='dict-%d' class='dict-source' style='background: #f0f0f0; color: #555; "
-                    "padding: 4px 12px; margin: 20px -10px 10px -10px; border-bottom: 1px solid #ddd; "
+                    "<div id='dict-%d' class='dict-source' style='background: %s; color: %s; "
+                    "padding: 4px 12px; margin: 20px -10px 10px -10px; border-bottom: 1px solid %s; "
                     "font-size: 0.85em; font-weight: bold; text-transform: uppercase; letter-spacing: 0.05em;'>"
                     "%s</div>",
-                    dict_idx, e->name);
+                    dict_idx, bar_bg, bar_fg, bar_border, e->name);
                 g_string_append(html_res, rendered);
                 free(rendered);
                 found_count++;
@@ -90,10 +106,14 @@ static void on_search_changed(GtkSearchEntry *entry, gpointer user_data) {
         g_string_append(html_res, "</body></html>");
         webkit_web_view_load_html(web_view, html_res->str, "file:///");
     } else {
+        // Theme-aware no results message
+        int dark_mode = style_manager && adw_style_manager_get_dark(style_manager) ? 1 : 0;
+        const char *text_color = dark_mode ? "#aaaaaa" : "#666666";
+
         char buf[512];
         snprintf(buf, sizeof(buf),
-            "<div style='padding: 20px; color: #666; font-style: italic;'>"
-            "No exact match for <b>%s</b> in any dictionary.</div>", query);
+            "<div style='padding: 20px; color: %s; font-style: italic;'>"
+            "No exact match for <b>%s</b> in any dictionary.</div>", text_color, query);
         webkit_web_view_load_html(web_view, buf, "file:///");
     }
     g_string_free(html_res, TRUE);
@@ -105,9 +125,9 @@ static void on_dict_selected(GtkListBox *box, GtkListBoxRow *row, gpointer user_
     int idx = gtk_list_box_row_get_index(row);
 
     char js[256];
-    snprintf(js, sizeof(js), 
+    snprintf(js, sizeof(js),
         "var el = document.getElementById('dict-%d'); "
-        "if (el) { el.scrollIntoView({behavior: 'smooth', block: 'start'}); }", 
+        "if (el) { el.scrollIntoView({behavior: 'smooth', block: 'start'}); }",
         idx);
     webkit_web_view_evaluate_javascript(web_view, js, -1, NULL, NULL, NULL, NULL, NULL);
 
@@ -116,6 +136,49 @@ static void on_dict_selected(GtkListBox *box, GtkListBoxRow *row, gpointer user_
     if (e && e->dict) {
         active_entry = e;
     }
+}
+
+// Refresh the current search results when theme changes
+static void refresh_search_results(void) {
+    if (!search_entry) return;
+
+    const char *query = gtk_editable_get_text(GTK_EDITABLE(search_entry));
+    if (!query || strlen(query) == 0) {
+        // Refresh placeholder
+        int dark_mode = style_manager && adw_style_manager_get_dark(style_manager) ? 1 : 0;
+        const char *bg = dark_mode ? "#1e1e1e" : "#ffffff";
+        const char *fg = dark_mode ? "#dddddd" : "#222222";
+        char html[256];
+        snprintf(html, sizeof(html),
+            "<html><body style='font-family: sans-serif; background: %s; color: %s; "
+            "text-align: center; margin-top: 2em; opacity: 0.7;'>"
+            "<h2>Diction</h2><p>Start typing to search...</p></body></html>",
+            bg, fg);
+        webkit_web_view_load_html(web_view, html, NULL);
+        return;
+    }
+
+    // Re-run search with new theme
+    on_search_changed(search_entry, NULL);
+}
+
+// Theme change handler
+static void on_theme_changed(AdwStyleManager *manager, GParamSpec *pspec, gpointer user_data) {
+    (void)manager; (void)pspec; (void)user_data;
+
+    // Update webview background color
+    GdkRGBA bg_color;
+    int dark_mode = style_manager && adw_style_manager_get_dark(style_manager) ? 1 : 0;
+
+    if (dark_mode) {
+        gdk_rgba_parse(&bg_color, "#1e1e1e");
+    } else {
+        gdk_rgba_parse(&bg_color, "#ffffff");
+    }
+    webkit_web_view_set_background_color(web_view, &bg_color);
+
+    // Refresh current content
+    refresh_search_results();
 }
 
 static void populate_dict_sidebar(void) {
@@ -143,9 +206,9 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     GtkWidget *header = adw_header_bar_new();
     gtk_box_append(GTK_BOX(main_box), header);
 
-    GtkWidget *search_entry = gtk_search_entry_new();
-    gtk_widget_set_size_request(search_entry, 350, -1);
-    adw_header_bar_set_title_widget(ADW_HEADER_BAR(header), search_entry);
+    search_entry = GTK_SEARCH_ENTRY(gtk_search_entry_new());
+    gtk_widget_set_size_request(GTK_WIDGET(search_entry), 350, -1);
+    adw_header_bar_set_title_widget(ADW_HEADER_BAR(header), GTK_WIDGET(search_entry));
     g_signal_connect(search_entry, "search-changed", G_CALLBACK(on_search_changed), NULL);
 
     /* Horizontal pane: sidebar | webview */
@@ -167,7 +230,7 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
 
     /* Right: WebKit view */
     web_view = WEBKIT_WEB_VIEW(webkit_web_view_new());
-    
+
     /* Handle internal dict:// links */
     g_signal_connect(web_view, "decide-policy", G_CALLBACK(on_decide_policy), search_entry);
 
@@ -188,6 +251,20 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
         GtkListBoxRow *first = gtk_list_box_get_row_at_index(dict_listbox, 0);
         if (first) gtk_list_box_select_row(dict_listbox, first);
     }
+
+    // Initialize style manager for theme support
+    style_manager = adw_style_manager_get_default();
+    g_signal_connect(style_manager, "notify::dark", G_CALLBACK(on_theme_changed), NULL);
+
+    // Apply initial theme to webview
+    GdkRGBA bg_color;
+    int dark_mode = adw_style_manager_get_dark(style_manager) ? 1 : 0;
+    if (dark_mode) {
+        gdk_rgba_parse(&bg_color, "#1e1e1e");
+    } else {
+        gdk_rgba_parse(&bg_color, "#ffffff");
+    }
+    webkit_web_view_set_background_color(web_view, &bg_color);
 
     if (all_dicts) {
         webkit_web_view_load_html(web_view,

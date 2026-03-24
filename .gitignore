@@ -1,0 +1,17 @@
+flatpak/.flatpak-builder
+flatpak/repo
+flatpak/build-dir
+.flatpak-builder
+flatpak/*.flatpak
+
+.codegpt
+
+src/__pycache__
+build
+diction.egg-info
+src/diction.egg-info
+test
+epubreader
+__pycache__
+wordbook
+goldendict-ng

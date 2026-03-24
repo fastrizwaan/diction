@@ -185,6 +185,8 @@ static void populate_dict_sidebar(void) {
     for (DictEntry *e = all_dicts; e; e = e->next) {
         GtkWidget *label = gtk_label_new(e->name);
         gtk_label_set_xalign(GTK_LABEL(label), 0.0);
+        gtk_label_set_ellipsize(GTK_LABEL(label), PANGO_ELLIPSIZE_END);
+        gtk_widget_set_hexpand(label, TRUE);
         gtk_widget_set_margin_start(label, 8);
         gtk_widget_set_margin_end(label, 8);
         gtk_widget_set_margin_top(label, 4);

@@ -5,6 +5,7 @@
 #include "dict-mmap.h"
 #include "dict-loader.h"
 #include "dict-render.h"
+#include "settings.h"
 
 static DictEntry *all_dicts = NULL;
 static DictEntry *active_entry = NULL;
@@ -13,6 +14,7 @@ static GtkListBox *dict_listbox = NULL;
 static AdwStyleManager *style_manager = NULL;
 static GtkSearchEntry *search_entry = NULL;
 static char *last_search_query = NULL;
+static AppSettings *app_settings = NULL;
 
 static void on_decide_policy(WebKitWebView *v, WebKitPolicyDecision *d, WebKitPolicyDecisionType t, gpointer user_data) {
     (void)v;
@@ -181,6 +183,31 @@ static void on_theme_changed(AdwStyleManager *manager, GParamSpec *pspec, gpoint
     refresh_search_results();
 }
 
+static void show_settings_dialog(GSimpleAction *action, GVariant *parameter, gpointer user_data) {
+    (void)action; (void)parameter;
+    GtkWindow *window = gtk_application_get_active_window(GTK_APPLICATION(user_data));
+    if (window) {
+        GtkWidget *dialog = settings_dialog_new(window, app_settings);
+        adw_dialog_present(ADW_DIALOG(dialog), GTK_WIDGET(window));
+    }
+}
+
+static void show_about_dialog(GSimpleAction *action, GVariant *parameter, gpointer user_data) {
+    (void)action; (void)parameter;
+    GtkWindow *window = gtk_application_get_active_window(GTK_APPLICATION(user_data));
+    if (window) {
+        const char *developers[] = { "Diction Contributors", NULL };
+        AdwDialog *dialog = adw_about_dialog_new();
+        adw_about_dialog_set_application_name(ADW_ABOUT_DIALOG(dialog), "Diction");
+        adw_about_dialog_set_version(ADW_ABOUT_DIALOG(dialog), "0.1.0");
+        adw_about_dialog_set_developer_name(ADW_ABOUT_DIALOG(dialog), "Diction Contributors");
+        adw_about_dialog_set_developers(ADW_ABOUT_DIALOG(dialog), developers);
+        adw_about_dialog_set_copyright(ADW_ABOUT_DIALOG(dialog), "© 2024 Diction Contributors");
+        adw_about_dialog_set_license(ADW_ABOUT_DIALOG(dialog), "GPL-3.0-or-later");
+        adw_dialog_present(dialog, GTK_WIDGET(window));
+    }
+}
+
 static void populate_dict_sidebar(void) {
     for (DictEntry *e = all_dicts; e; e = e->next) {
         GtkWidget *label = gtk_label_new(e->name);
@@ -212,6 +239,18 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     gtk_widget_set_size_request(GTK_WIDGET(search_entry), 350, -1);
     adw_header_bar_set_title_widget(ADW_HEADER_BAR(header), GTK_WIDGET(search_entry));
     g_signal_connect(search_entry, "search-changed", G_CALLBACK(on_search_changed), NULL);
+
+    /* Settings button */
+    GtkWidget *settings_btn = gtk_menu_button_new();
+    gtk_menu_button_set_icon_name(GTK_MENU_BUTTON(settings_btn), "open-menu-symbolic");
+
+    GMenu *menu = g_menu_new();
+    g_menu_append(menu, "Preferences", "app.settings");
+    g_menu_append(menu, "About", "app.about");
+    gtk_menu_button_set_menu_model(GTK_MENU_BUTTON(settings_btn), G_MENU_MODEL(menu));
+    g_object_unref(menu);
+
+    adw_header_bar_pack_end(ADW_HEADER_BAR(header), settings_btn);
 
     /* Horizontal pane: sidebar | webview */
     GtkWidget *paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
@@ -258,6 +297,17 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     style_manager = adw_style_manager_get_default();
     g_signal_connect(style_manager, "notify::dark", G_CALLBACK(on_theme_changed), NULL);
 
+    // Apply saved theme preference
+    if (app_settings && app_settings->theme) {
+        if (strcmp(app_settings->theme, "light") == 0) {
+            adw_style_manager_set_color_scheme(style_manager, ADW_COLOR_SCHEME_FORCE_LIGHT);
+        } else if (strcmp(app_settings->theme, "dark") == 0) {
+            adw_style_manager_set_color_scheme(style_manager, ADW_COLOR_SCHEME_FORCE_DARK);
+        } else {
+            adw_style_manager_set_color_scheme(style_manager, ADW_COLOR_SCHEME_DEFAULT);
+        }
+    }
+
     // Apply initial theme to webview
     GdkRGBA bg_color;
     int dark_mode = adw_style_manager_get_dark(style_manager) ? 1 : 0;
@@ -283,6 +333,9 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
 }
 
 int main(int argc, char *argv[]) {
+    // Load settings first
+    app_settings = settings_load();
+
     /* Load dictionaries: accept a single file or a directory */
     if (argc > 1) {
         struct stat st;
@@ -305,13 +358,49 @@ int main(int argc, char *argv[]) {
                 }
             }
         }
+    } else {
+        /* No arguments: scan directories from settings */
+        if (app_settings && app_settings->dictionary_dirs->len > 0) {
+            for (guint i = 0; i < app_settings->dictionary_dirs->len; i++) {
+                const char *dir = g_ptr_array_index(app_settings->dictionary_dirs, i);
+                DictEntry *dicts = dict_loader_scan_directory(dir);
+                if (dicts) {
+                    // Append to list
+                    if (!all_dicts) {
+                        all_dicts = dicts;
+                    } else {
+                        DictEntry *last = all_dicts;
+                        while (last->next) last = last->next;
+                        last->next = dicts;
+                    }
+                }
+            }
+        }
     }
 
     AdwApplication *app = adw_application_new("org.diction.App", G_APPLICATION_DEFAULT_FLAGS);
+
+    // Add settings and about actions
+    GSimpleAction *settings_action = g_simple_action_new("settings", NULL);
+    g_signal_connect(settings_action, "activate", G_CALLBACK(show_settings_dialog), app);
+    g_action_map_add_action(G_ACTION_MAP(app), G_ACTION(settings_action));
+    g_object_unref(settings_action);
+
+    GSimpleAction *about_action = g_simple_action_new("about", NULL);
+    g_signal_connect(about_action, "activate", G_CALLBACK(show_about_dialog), app);
+    g_action_map_add_action(G_ACTION_MAP(app), G_ACTION(about_action));
+    g_object_unref(about_action);
+
     g_signal_connect(app, "activate", G_CALLBACK(on_activate), NULL);
 
     char *empty[] = { argv[0], NULL };
     int status = g_application_run(G_APPLICATION(app), 1, empty);
+
+    // Save settings on exit
+    if (app_settings) {
+        settings_save(app_settings);
+        settings_free(app_settings);
+    }
 
     g_object_unref(app);
     dict_loader_free(all_dicts);

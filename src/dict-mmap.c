@@ -8,6 +8,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <stdint.h>
+#include <utime.h>
+#include <glib.h>
 
 /* ── Multi-headword aware DSL parser ──────────────────────
  * DSL format allows N consecutive non-indented lines as headwords
@@ -19,6 +21,49 @@
  *   ē          ← headword 3
  *   	[b]...[/b]  ← definition (starts with space/tab)
  */
+
+// Cache directory helpers
+static const char* get_cache_base_dir(void) {
+    static const char *cache_dir = NULL;
+    if (!cache_dir) {
+        cache_dir = g_get_user_cache_dir();
+    }
+    return cache_dir;
+}
+
+static char* get_cache_dir_path(void) {
+    const char *base = get_cache_base_dir();
+    return g_build_filename(base, "diction", "dicts", NULL);
+}
+
+static char* get_cached_dict_path(const char *original_path) {
+    char *hash = g_compute_checksum_for_string(G_CHECKSUM_SHA1, original_path, -1);
+    const char *base = get_cache_base_dir();
+    char *path = g_build_filename(base, "diction", "dicts", hash, NULL);
+    g_free(hash);
+    return path;
+}
+
+static gboolean is_cache_valid(const char *cache_path, const char *original_path) {
+    struct stat cache_st, orig_st;
+
+    if (stat(cache_path, &cache_st) != 0) {
+        return FALSE;
+    }
+    if (stat(original_path, &orig_st) != 0) {
+        return FALSE;
+    }
+
+    // Cache is valid if it's newer than the original
+    return cache_st.st_mtime >= orig_st.st_mtime;
+}
+
+static gboolean ensure_cache_directory(void) {
+    char *cache_dir = get_cache_dir_path();
+    int ret = g_mkdir_with_parents(cache_dir, 0755);
+    g_free(cache_dir);
+    return ret == 0;
+}
 
 typedef struct {
     size_t offset;
@@ -190,128 +235,192 @@ DictMmap* dict_mmap_open(const char *path) {
         return NULL;
     }
 
+    // Ensure cache directory exists
+    ensure_cache_directory();
+
+    // Get cache path for this dictionary
+    char *cache_path = get_cached_dict_path(path);
+    gboolean cache_exists = (access(cache_path, F_OK) == 0);
+    gboolean cache_valid = cache_exists && is_cache_valid(cache_path, path);
+
     DictMmap *dict = (DictMmap*)calloc(1, sizeof(DictMmap));
     dict->fd = -1;
+    dict->tmp_file = NULL;
 
-    printf("Loading Dictionary: %s\n", path);
-    gzFile gz = gzopen(path, "rb");
-    if (!gz) {
-        free(dict);
-        return NULL;
-    }
-
-    // Determine encoding by reading first 4 bytes
-    unsigned char bom[4];
-    int bom_len = gzread(gz, bom, 4);
-    if (bom_len < 2) {
-        gzclose(gz);
-        free(dict);
-        return NULL;
-    }
-
-    int is_utf16le = 0;
-    int is_utf16be = 0;
-    int copy_offset = 0;
-    
-    if (bom[0] == 0xFF && bom[1] == 0xFE) {
-        is_utf16le = 1;
-        copy_offset = 2;
-    } else if (bom[0] == 0xFE && bom[1] == 0xFF) {
-        is_utf16be = 1;
-        copy_offset = 2;
-    } else if (bom_len >= 4 && bom[0] != 0 && bom[1] == 0 && bom[2] != 0 && bom[3] == 0) {
-        is_utf16le = 1;
-        copy_offset = 0;
-    } else if (bom_len >= 4 && bom[0] == 0 && bom[1] != 0 && bom[2] == 0 && bom[3] != 0) {
-        is_utf16be = 1;
-        copy_offset = 0;
-    } else if (bom_len >= 3 && bom[0] == 0xEF && bom[1] == 0xBB && bom[2] == 0xBF) {
-        copy_offset = 3;
-    }
-
-    dict->tmp_file = tmpfile();
-    if (!dict->tmp_file) {
-        gzclose(gz);
-        free(dict);
-        return NULL;
-    }
-    
-    // Write whatever we read past the BOM
-    if (bom_len > copy_offset) {
-        if (is_utf16le) {
-            unsigned char out[10];
-            size_t olen = convert_utf16le_to_utf8(bom + copy_offset, bom_len - copy_offset, out);
-            fwrite(out, 1, olen, dict->tmp_file);
-        } else if (is_utf16be) {
-            unsigned char out[10];
-            size_t olen = convert_utf16be_to_utf8(bom + copy_offset, bom_len - copy_offset, out);
-            fwrite(out, 1, olen, dict->tmp_file);
-        } else {
-            fwrite(bom + copy_offset, 1, bom_len - copy_offset, dict->tmp_file);
-        }
-    }
-
-    unsigned char in_buf[65536];
-    unsigned char out_buf[65536 * 2]; // UTF-8 can be larger than UTF-16
-    
-    // For UTF-16, we must handle boundary bytes gracefully (in case a chunk drops precisely between 2 framing bytes).
-    unsigned char pending_byte = 0;
-    int has_pending = 0;
-    int bytes_read;
-    
-    while ((bytes_read = gzread(gz, in_buf + has_pending, 65536 - has_pending)) > 0) {
-        int total = bytes_read + has_pending;
-        size_t process_len = total;
-        
-        if ((is_utf16le || is_utf16be) && (total % 2 != 0)) {
-            pending_byte = in_buf[total - 1];
-            has_pending = 1;
-            process_len = total - 1;
-        } else {
-            has_pending = 0;
+    if (cache_valid) {
+        // Use cached version directly
+        printf("Loading Dictionary from cache: %s\n", cache_path);
+        dict->fd = open(cache_path, O_RDONLY);
+        if (dict->fd < 0) {
+            g_free(cache_path);
+            free(dict);
+            return NULL;
         }
 
-        if (process_len > 0) {
+        struct stat st;
+        if (fstat(dict->fd, &st) < 0 || st.st_size == 0) {
+            close(dict->fd);
+            g_free(cache_path);
+            free(dict);
+            return NULL;
+        }
+        dict->size = st.st_size;
+
+        void *map = mmap(NULL, dict->size, PROT_READ, MAP_PRIVATE, dict->fd, 0);
+        if (map == MAP_FAILED) {
+            close(dict->fd);
+            g_free(cache_path);
+            free(dict);
+            return NULL;
+        }
+
+        dict->data = (const char*)map;
+    } else {
+        // Need to extract and convert
+        printf("Loading Dictionary: %s\n", path);
+        gzFile gz = gzopen(path, "rb");
+        if (!gz) {
+            g_free(cache_path);
+            free(dict);
+            return NULL;
+        }
+
+        // Determine encoding by reading first 4 bytes
+        unsigned char bom[4];
+        int bom_len = gzread(gz, bom, 4);
+        if (bom_len < 2) {
+            gzclose(gz);
+            g_free(cache_path);
+            free(dict);
+            return NULL;
+        }
+
+        int is_utf16le = 0;
+        int is_utf16be = 0;
+        int copy_offset = 0;
+
+        if (bom[0] == 0xFF && bom[1] == 0xFE) {
+            is_utf16le = 1;
+            copy_offset = 2;
+        } else if (bom[0] == 0xFE && bom[1] == 0xFF) {
+            is_utf16be = 1;
+            copy_offset = 2;
+        } else if (bom_len >= 4 && bom[0] != 0 && bom[1] == 0 && bom[2] != 0 && bom[3] == 0) {
+            is_utf16le = 1;
+            copy_offset = 0;
+        } else if (bom_len >= 4 && bom[0] == 0 && bom[1] != 0 && bom[2] == 0 && bom[3] != 0) {
+            is_utf16be = 1;
+            copy_offset = 0;
+        } else if (bom_len >= 3 && bom[0] == 0xEF && bom[1] == 0xBB && bom[2] == 0xBF) {
+            copy_offset = 3;
+        }
+
+        // Open cache file for writing
+        FILE *cache_file = fopen(cache_path, "wb");
+        if (!cache_file) {
+            gzclose(gz);
+            g_free(cache_path);
+            free(dict);
+            return NULL;
+        }
+
+        // Write whatever we read past the BOM
+        if (bom_len > copy_offset) {
             if (is_utf16le) {
-                size_t olen = convert_utf16le_to_utf8(in_buf, process_len, out_buf);
-                fwrite(out_buf, 1, olen, dict->tmp_file);
+                unsigned char out[10];
+                size_t olen = convert_utf16le_to_utf8(bom + copy_offset, bom_len - copy_offset, out);
+                fwrite(out, 1, olen, cache_file);
             } else if (is_utf16be) {
-                size_t olen = convert_utf16be_to_utf8(in_buf, process_len, out_buf);
-                fwrite(out_buf, 1, olen, dict->tmp_file);
+                unsigned char out[10];
+                size_t olen = convert_utf16be_to_utf8(bom + copy_offset, bom_len - copy_offset, out);
+                fwrite(out, 1, olen, cache_file);
             } else {
-                fwrite(in_buf, 1, process_len, dict->tmp_file);
+                fwrite(bom + copy_offset, 1, bom_len - copy_offset, cache_file);
             }
         }
-        
-        if (has_pending) {
-            in_buf[0] = pending_byte;
+
+        unsigned char in_buf[65536];
+        unsigned char out_buf[65536 * 2];
+
+        unsigned char pending_byte = 0;
+        int has_pending = 0;
+        int bytes_read;
+
+        while ((bytes_read = gzread(gz, in_buf + has_pending, 65536 - has_pending)) > 0) {
+            int total = bytes_read + has_pending;
+            size_t process_len = total;
+
+            if ((is_utf16le || is_utf16be) && (total % 2 != 0)) {
+                pending_byte = in_buf[total - 1];
+                has_pending = 1;
+                process_len = total - 1;
+            } else {
+                has_pending = 0;
+            }
+
+            if (process_len > 0) {
+                if (is_utf16le) {
+                    size_t olen = convert_utf16le_to_utf8(in_buf, process_len, out_buf);
+                    fwrite(out_buf, 1, olen, cache_file);
+                } else if (is_utf16be) {
+                    size_t olen = convert_utf16be_to_utf8(in_buf, process_len, out_buf);
+                    fwrite(out_buf, 1, olen, cache_file);
+                } else {
+                    fwrite(in_buf, 1, process_len, cache_file);
+                }
+            }
+
+            if (has_pending) {
+                in_buf[0] = pending_byte;
+            }
         }
+        gzclose(gz);
+        fflush(cache_file);
+        fclose(cache_file);
+
+        // Update cache file mtime to match source
+        struct stat src_st;
+        if (stat(path, &src_st) == 0) {
+            struct utimbuf times;
+            times.actime = src_st.st_mtime;
+            times.modtime = src_st.st_mtime;
+            utime(cache_path, &times);
+        }
+
+        // Now open the cached file
+        dict->fd = open(cache_path, O_RDONLY);
+        if (dict->fd < 0) {
+            g_free(cache_path);
+            free(dict);
+            return NULL;
+        }
+
+        struct stat st;
+        if (fstat(dict->fd, &st) < 0 || st.st_size == 0) {
+            close(dict->fd);
+            g_free(cache_path);
+            free(dict);
+            return NULL;
+        }
+        dict->size = st.st_size;
+
+        void *map = mmap(NULL, dict->size, PROT_READ, MAP_PRIVATE, dict->fd, 0);
+        if (map == MAP_FAILED) {
+            close(dict->fd);
+            g_free(cache_path);
+            free(dict);
+            return NULL;
+        }
+
+        dict->data = (const char*)map;
     }
-    gzclose(gz);
-    fflush(dict->tmp_file);
-    
-    dict->fd = fileno(dict->tmp_file);
-    
-    struct stat st;
-    if (fstat(dict->fd, &st) < 0 || st.st_size == 0) {
-        fclose(dict->tmp_file);
-        free(dict);
-        return NULL;
-    }
-    dict->size = st.st_size;
-    
-    void *map = mmap(NULL, dict->size, PROT_READ, MAP_PRIVATE, dict->fd, 0);
-    if (map == MAP_FAILED) {
-        fclose(dict->tmp_file);
-        free(dict);
-        return NULL;
-    }
-    
-    dict->data = (const char*)map;
+
+    g_free(cache_path);
+
     printf("[DEBUG] First 256 bytes mapped (size: %zu):\n%.256s\n", dict->size, dict->data);
     dict->index = splay_tree_new(dict->data, dict->size);
     parse_dsl_into_tree(dict);
-    
+
     return dict;
 }
 
@@ -319,8 +428,7 @@ void dict_mmap_close(DictMmap *dict) {
     if (dict) {
         splay_tree_free(dict->index);
         if (dict->data) munmap((void*)dict->data, dict->size);
-        if (dict->tmp_file) fclose(dict->tmp_file);
-        else if (dict->fd >= 0) close(dict->fd);
+        if (dict->fd >= 0) close(dict->fd);
         if (dict->resource_dir) free(dict->resource_dir);
         free(dict);
     }

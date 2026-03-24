@@ -21,6 +21,43 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <stdint.h>
+#include <utime.h>
+#include <fcntl.h>
+#include <glib.h>
+
+/* Cache helpers */
+static const char* get_cache_base_dir(void) {
+    static const char *cache_dir = NULL;
+    if (!cache_dir) cache_dir = g_get_user_cache_dir();
+    return cache_dir;
+}
+
+static char* get_cache_dir_path(void) {
+    const char *base = get_cache_base_dir();
+    return g_build_filename(base, "diction", "dicts", NULL);
+}
+
+static char* get_cached_dict_path(const char *original_path) {
+    char *hash = g_compute_checksum_for_string(G_CHECKSUM_SHA1, original_path, -1);
+    const char *base = get_cache_base_dir();
+    char *path = g_build_filename(base, "diction", "dicts", hash, NULL);
+    g_free(hash);
+    return path;
+}
+
+static gboolean is_cache_valid(const char *cache_path, const char *original_path) {
+    struct stat cache_st, orig_st;
+    if (stat(cache_path, &cache_st) != 0 || stat(original_path, &orig_st) != 0)
+        return FALSE;
+    return cache_st.st_mtime >= orig_st.st_mtime;
+}
+
+static gboolean ensure_cache_directory(void) {
+    char *cache_dir = get_cache_dir_path();
+    int ret = g_mkdir_with_parents(cache_dir, 0755);
+    g_free(cache_dir);
+    return ret == 0;
+}
 
 static uint32_t read_u32be(const unsigned char *p) {
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
@@ -116,51 +153,180 @@ DictMmap* parse_stardict(const char *ifo_path) {
 
     printf("[IFO] idx: %s, dict: %s (dz=%d)\n", idx_path, dict_path, dict_is_dz);
 
-    /* Load and decompress .dict into a tmpfile for mmap */
-    FILE *tmp = tmpfile();
-    if (!tmp) {
-        free(idx_path); free(dict_path);
-        return NULL;
+    // Ensure cache directory exists
+    ensure_cache_directory();
+
+    // Get cache path for this dictionary (based on .ifo path)
+    char *cache_path = get_cached_dict_path(ifo_path);
+    gboolean cache_exists = (access(cache_path, F_OK) == 0);
+    gboolean cache_valid = cache_exists && is_cache_valid(cache_path, ifo_path);
+
+    int cache_fd = -1;
+    const char *dict_data = NULL;
+    size_t dict_size = 0;
+
+    if (cache_valid) {
+        // Use cached version directly
+        printf("[IFO] Loading from cache: %s\n", cache_path);
+        cache_fd = open(cache_path, O_RDONLY);
+        if (cache_fd < 0) {
+            g_free(cache_path);
+            free(idx_path); free(dict_path);
+            return NULL;
+        }
+
+        struct stat st;
+        if (fstat(cache_fd, &st) < 0 || st.st_size == 0) {
+            close(cache_fd);
+            g_free(cache_path);
+            free(idx_path); free(dict_path);
+            return NULL;
+        }
+        dict_size = st.st_size;
+        dict_data = mmap(NULL, dict_size, PROT_READ, MAP_PRIVATE, cache_fd, 0);
+        if (dict_data == MAP_FAILED) {
+            close(cache_fd);
+            g_free(cache_path);
+            free(idx_path); free(dict_path);
+            return NULL;
+        }
+    } else {
+        // Need to extract and convert
+        printf("[IFO] Building cache from source files\n");
+
+        // Open cache file for writing
+        FILE *cache_file = fopen(cache_path, "wb");
+        if (!cache_file) {
+            g_free(cache_path);
+            free(idx_path); free(dict_path);
+            return NULL;
+        }
+
+        gzFile gz = gzopen(dict_path, "rb");
+        if (!gz) {
+            fclose(cache_file);
+            g_free(cache_path);
+            free(idx_path); free(dict_path);
+            return NULL;
+        }
+
+        // Read entire dict data into heap
+        size_t dict_data_cap = 1024 * 1024;
+        unsigned char *dict_raw = malloc(dict_data_cap);
+        size_t dict_raw_len = 0;
+        unsigned char buf[65536];
+        int n;
+        while ((n = gzread(gz, buf, sizeof(buf))) > 0) {
+            if (dict_raw_len + n > dict_data_cap) {
+                dict_data_cap *= 2;
+                dict_raw = realloc(dict_raw, dict_data_cap);
+            }
+            memcpy(dict_raw + dict_raw_len, buf, n);
+            dict_raw_len += n;
+        }
+        gzclose(gz);
+
+        // Read .idx file
+        FILE *idx_file = fopen(idx_path, "rb");
+        if (!idx_file) {
+            free(dict_raw);
+            fclose(cache_file);
+            g_free(cache_path);
+            free(idx_path); free(dict_path);
+            return NULL;
+        }
+
+        fseek(idx_file, 0, SEEK_END);
+        long idx_size = ftell(idx_file);
+        fseek(idx_file, 0, SEEK_SET);
+
+        unsigned char *idx_data = malloc(idx_size);
+        if (fread(idx_data, 1, idx_size, idx_file) != (size_t)idx_size) {
+            free(idx_data);
+            free(dict_raw);
+            fclose(cache_file);
+            g_free(cache_path);
+            free(idx_path); free(dict_path);
+            return NULL;
+        }
+        fclose(idx_file);
+
+        // Write interleaved "headword\ndef\n" into cache file
+        const unsigned char *ip = idx_data;
+        const unsigned char *ie = idx_data + idx_size;
+
+        while (ip < ie) {
+            const unsigned char *hw_start = ip;
+            while (ip < ie && *ip != '\0') ip++;
+            size_t hw_len = ip - hw_start;
+            if (ip >= ie) break;
+            ip++; /* skip null */
+
+            if (ip + 8 > ie) break;
+            uint32_t def_offset = read_u32be(ip); ip += 4;
+            uint32_t def_size = read_u32be(ip); ip += 4;
+
+            /* Write headword line */
+            fwrite(hw_start, 1, hw_len, cache_file);
+            fwrite("\n", 1, 1, cache_file);
+
+            /* Write definition */
+            if (def_offset + def_size <= dict_raw_len) {
+                fwrite(dict_raw + def_offset, 1, def_size, cache_file);
+            }
+            fwrite("\n", 1, 1, cache_file);
+        }
+
+        free(dict_raw);
+        free(idx_data);
+        fflush(cache_file);
+        fclose(cache_file);
+
+        // Update cache file mtime to match source
+        struct stat src_st;
+        if (stat(ifo_path, &src_st) == 0) {
+            struct utimbuf times;
+            times.actime = src_st.st_mtime;
+            times.modtime = src_st.st_mtime;
+            utime(cache_path, &times);
+        }
+
+        // Now open the cached file
+        cache_fd = open(cache_path, O_RDONLY);
+        if (cache_fd < 0) {
+            g_free(cache_path);
+            free(idx_path); free(dict_path);
+            return NULL;
+        }
+
+        struct stat st;
+        if (fstat(cache_fd, &st) < 0 || st.st_size == 0) {
+            close(cache_fd);
+            g_free(cache_path);
+            free(idx_path); free(dict_path);
+            return NULL;
+        }
+        dict_size = st.st_size;
+        dict_data = mmap(NULL, dict_size, PROT_READ, MAP_PRIVATE, cache_fd, 0);
+        if (dict_data == MAP_FAILED) {
+            close(cache_fd);
+            g_free(cache_path);
+            free(idx_path); free(dict_path);
+            return NULL;
+        }
     }
 
-    gzFile gz = gzopen(dict_path, "rb");
-    if (!gz) {
-        fclose(tmp);
-        free(idx_path); free(dict_path);
-        return NULL;
-    }
-
-    unsigned char buf[65536];
-    int n;
-    while ((n = gzread(gz, buf, sizeof(buf))) > 0) {
-        fwrite(buf, 1, n, tmp);
-    }
-    gzclose(gz);
-    fflush(tmp);
-
-    int tmp_fd = fileno(tmp);
-    if (fstat(tmp_fd, &st) < 0 || st.st_size == 0) {
-        fclose(tmp);
-        free(idx_path); free(dict_path);
-        return NULL;
-    }
-
-    void *dict_map = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, tmp_fd, 0);
-    if (dict_map == MAP_FAILED) {
-        fclose(tmp);
-        free(idx_path); free(dict_path);
-        return NULL;
-    }
+    g_free(cache_path);
 
     /* Build DictMmap */
     DictMmap *dict = calloc(1, sizeof(DictMmap));
-    dict->fd = tmp_fd;
-    dict->tmp_file = tmp;
-    dict->data = (const char *)dict_map;
-    dict->size = st.st_size;
+    dict->fd = cache_fd;
+    dict->tmp_file = NULL;
+    dict->data = dict_data;
+    dict->size = dict_size;
     dict->index = splay_tree_new(dict->data, dict->size);
 
-    /* Read .idx file and parse entries */
+    /* Read .idx file and parse entries for indexing */
     FILE *idx_file = fopen(idx_path, "rb");
     if (!idx_file) {
         fprintf(stderr, "[IFO] Failed to open .idx: %s\n", idx_path);
@@ -184,119 +350,7 @@ DictMmap* parse_stardict(const char *ifo_path) {
     }
     fclose(idx_file);
 
-    /* Parse .idx: each entry is:
-     *   null-terminated UTF-8 headword
-     *   4-byte BE offset into .dict
-     *   4-byte BE size of definition
-     *
-     * We can't store the headword offset from .idx (different buffer),
-     * so we need to find the headword in the .dict data or do something
-     * creative. The headword ISN'T stored in .dict — only definitions.
-     *
-     * For StarDict, sametypesequence often starts with 'm' (text) or 'h' (html).
-     * The definition data IS in our mmap'd dict buffer.
-     *
-     * Problem: the headword string is in the .idx file, not in .dict.
-     * Solution: We need to create a combined buffer that interleaves
-     * headwords and definitions. Let's rebuild the tmpfile with
-     * headword\n + definition for each entry.
-     */
-
-    /* Rewrite: build a new tmpfile with "headword\ndef_body" blocks */
-    munmap((void *)dict->data, dict->size);
-    fseek(tmp, 0, SEEK_SET);
-    if (ftruncate(tmp_fd, 0) != 0) {
-        perror("[IFO] ftruncate");
-    }
-
-    /* First pass: figure out all entries from .idx */
-    const unsigned char *ip = idx_data;
-    const unsigned char *ie = idx_data + idx_size;
-    int entry_count = 0;
-
-    /* We need to iterate .idx twice: once to rebuild, once to index.
-     * Let's do it in one pass: read .dict data, build combined buffer. */
-
-    /* Read .dict data from the gzip again or directly from our mapped copy.
-     * We already have the data in the original mmap, but we unmapped it.
-     * Re-open and read: */
-
-    /* Actually, let's re-read the dict via gzopen */
-    gz = gzopen(dict_path, "rb");
-    if (!gz) {
-        free(idx_data);
-        fclose(tmp);
-        free(dict); free(idx_path); free(dict_path);
-        return NULL;
-    }
-
-    /* Read entire dict data into heap temporarily */
-    size_t dict_data_cap = 1024 * 1024;
-    unsigned char *dict_raw = malloc(dict_data_cap);
-    size_t dict_raw_len = 0;
-    while ((n = gzread(gz, buf, sizeof(buf))) > 0) {
-        if (dict_raw_len + n > dict_data_cap) {
-            dict_data_cap *= 2;
-            dict_raw = realloc(dict_raw, dict_data_cap);
-        }
-        memcpy(dict_raw + dict_raw_len, buf, n);
-        dict_raw_len += n;
-    }
-    gzclose(gz);
-
-    /* Now write interleaved "headword\ndef\n" into tmpfile */
-    ip = idx_data;
-    while (ip < ie) {
-        const unsigned char *hw_start = ip;
-        while (ip < ie && *ip != '\0') ip++;
-        size_t hw_len = ip - hw_start;
-        if (ip >= ie) break;
-        ip++; /* skip null */
-
-        if (ip + 8 > ie) break;
-        uint32_t def_offset = read_u32be(ip); ip += 4;
-        uint32_t def_size = read_u32be(ip); ip += 4;
-
-        /* Write headword line */
-        size_t hw_file_offset = ftell(tmp);
-        fwrite(hw_start, 1, hw_len, tmp);
-        fwrite("\n", 1, 1, tmp);
-
-        /* Write definition */
-        size_t def_file_offset = ftell(tmp);
-        if (def_offset + def_size <= dict_raw_len) {
-            fwrite(dict_raw + def_offset, 1, def_size, tmp);
-        }
-        fwrite("\n", 1, 1, tmp);
-
-        entry_count++;
-        (void)hw_file_offset;
-        (void)def_file_offset;
-    }
-
-    free(dict_raw);
-    fflush(tmp);
-
-    /* Re-mmap the combined file */
-    if (fstat(tmp_fd, &st) < 0 || st.st_size == 0) {
-        free(idx_data); fclose(tmp);
-        free(dict); free(idx_path); free(dict_path);
-        return NULL;
-    }
-
-    dict_map = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, tmp_fd, 0);
-    if (dict_map == MAP_FAILED) {
-        free(idx_data); fclose(tmp);
-        free(dict); free(idx_path); free(dict_path);
-        return NULL;
-    }
-
-    dict->data = (const char *)dict_map;
-    dict->size = st.st_size;
-    splay_tree_free(dict->index);
-    dict->index = splay_tree_new(dict->data, dict->size);
-
-    /* Second pass: index the combined file into SplayTree */
+    /* Index the cached file into SplayTree */
     const char *dp = dict->data;
     const char *de = dp + dict->size;
     int indexed = 0;
@@ -308,8 +362,7 @@ DictMmap* parse_stardict(const char *ifo_path) {
         size_t hw_len = dp - hw_start;
         if (dp < de) dp++; /* skip \n */
 
-        /* Definition: everything until next headword (non-indented)
-         * Actually, in our format it's just one line/block followed by \n */
+        /* Definition */
         const char *def_start = dp;
         while (dp < de && *dp != '\n') dp++;
         size_t def_len = dp - def_start;
@@ -327,6 +380,6 @@ DictMmap* parse_stardict(const char *ifo_path) {
     free(idx_path);
     free(dict_path);
 
-    printf("[IFO] Indexed %d StarDict entries\n", indexed);
+    printf("[IFO] Indexed %d StarDict entries (cached)\n", indexed);
     return dict;
 }

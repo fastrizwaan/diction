@@ -13,6 +13,7 @@ if not webkit_dep.found()
   webkit_dep = dependency('webkit2gtk-4.1')
 endif
 zlib_dep = dependency('zlib')
+json_dep = dependency('json-glib-1.0')
 
 srcs = [
   'src/main.c',
@@ -23,10 +24,12 @@ srcs = [
   'src/dict-bgl.c',
   'src/dict-ifo.c',
   'src/dict-render.c',
-  'src/ripemd128.c'
+  'src/ripemd128.c',
+  'src/settings.c',
+  'src/settings-dialog.c'
 ]
 
 executable('diction', srcs,
-  dependencies: [ gtk_dep, adw_dep, webkit_dep, zlib_dep ],
+  dependencies: [ gtk_dep, adw_dep, webkit_dep, zlib_dep, json_dep ],
   install: true,
 )

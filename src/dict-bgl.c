@@ -26,6 +26,42 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <utime.h>
+#include <glib.h>
+
+/* Cache helpers */
+static const char* get_cache_base_dir(void) {
+    static const char *cache_dir = NULL;
+    if (!cache_dir) cache_dir = g_get_user_cache_dir();
+    return cache_dir;
+}
+
+static char* get_cache_dir_path(void) {
+    const char *base = get_cache_base_dir();
+    return g_build_filename(base, "diction", "dicts", NULL);
+}
+
+static char* get_cached_dict_path(const char *original_path) {
+    char *hash = g_compute_checksum_for_string(G_CHECKSUM_SHA1, original_path, -1);
+    const char *base = get_cache_base_dir();
+    char *path = g_build_filename(base, "diction", "dicts", hash, NULL);
+    g_free(hash);
+    return path;
+}
+
+static gboolean is_cache_valid(const char *cache_path, const char *original_path) {
+    struct stat cache_st, orig_st;
+    if (stat(cache_path, &cache_st) != 0 || stat(original_path, &orig_st) != 0)
+        return FALSE;
+    return cache_st.st_mtime >= orig_st.st_mtime;
+}
+
+static gboolean ensure_cache_directory(void) {
+    char *cache_dir = get_cache_dir_path();
+    int ret = g_mkdir_with_parents(cache_dir, 0755);
+    g_free(cache_dir);
+    return ret == 0;
+}
 
 /* Read a big-endian integer of 1-4 bytes from a buffer */
 static unsigned int read_be(const unsigned char *p, int bytes) {
@@ -63,37 +99,99 @@ DictMmap* parse_bgl_file(const char *path) {
     gzFile gz = gzdopen(fd_dup, "rb");
     if (!gz) { close(fd_dup); return NULL; }
 
-    /* Decompress entire stream into a tmpfile for mmap */
-    FILE *tmp = tmpfile();
-    if (!tmp) { gzclose(gz); return NULL; }
+    // Ensure cache directory exists
+    ensure_cache_directory();
 
-    unsigned char buf[65536];
-    int n;
-    while ((n = gzread(gz, buf, sizeof(buf))) > 0) {
-        fwrite(buf, 1, n, tmp);
-    }
-    gzclose(gz);
-    fflush(tmp);
+    // Get cache path for this dictionary
+    char *cache_path = get_cached_dict_path(path);
+    gboolean cache_exists = (access(cache_path, F_OK) == 0);
+    gboolean cache_valid = cache_exists && is_cache_valid(cache_path, path);
 
-    /* mmap the decompressed data */
-    int tmp_fd = fileno(tmp);
-    struct stat st;
-    if (fstat(tmp_fd, &st) < 0 || st.st_size == 0) {
-        fclose(tmp);
-        return NULL;
+    int cache_fd = -1;
+    const char *dict_data = NULL;
+    size_t dict_size = 0;
+
+    if (cache_valid) {
+        // Use cached version directly
+        printf("[BGL] Loading from cache: %s\n", cache_path);
+        cache_fd = open(cache_path, O_RDONLY);
+        if (cache_fd < 0) {
+            g_free(cache_path);
+            return NULL;
+        }
+
+        struct stat st;
+        if (fstat(cache_fd, &st) < 0 || st.st_size == 0) {
+            close(cache_fd);
+            g_free(cache_path);
+            return NULL;
+        }
+        dict_size = st.st_size;
+        dict_data = mmap(NULL, dict_size, PROT_READ, MAP_PRIVATE, cache_fd, 0);
+        if (dict_data == MAP_FAILED) {
+            close(cache_fd);
+            g_free(cache_path);
+            return NULL;
+        }
+    } else {
+        // Need to extract and convert
+        printf("[BGL] Building cache from source: %s\n", path);
+
+        // Open cache file for writing
+        FILE *cache_file = fopen(cache_path, "wb");
+        if (!cache_file) {
+            gzclose(gz);
+            g_free(cache_path);
+            return NULL;
+        }
+
+        unsigned char buf[65536];
+        int n;
+        while ((n = gzread(gz, buf, sizeof(buf))) > 0) {
+            fwrite(buf, 1, n, cache_file);
+        }
+        gzclose(gz);
+        fflush(cache_file);
+        fclose(cache_file);
+
+        // Update cache file mtime to match source
+        struct stat src_st;
+        if (stat(path, &src_st) == 0) {
+            struct utimbuf times;
+            times.actime = src_st.st_mtime;
+            times.modtime = src_st.st_mtime;
+            utime(cache_path, &times);
+        }
+
+        // Now open the cached file
+        cache_fd = open(cache_path, O_RDONLY);
+        if (cache_fd < 0) {
+            g_free(cache_path);
+            return NULL;
+        }
+
+        struct stat st;
+        if (fstat(cache_fd, &st) < 0 || st.st_size == 0) {
+            close(cache_fd);
+            g_free(cache_path);
+            return NULL;
+        }
+        dict_size = st.st_size;
+        dict_data = mmap(NULL, dict_size, PROT_READ, MAP_PRIVATE, cache_fd, 0);
+        if (dict_data == MAP_FAILED) {
+            close(cache_fd);
+            g_free(cache_path);
+            return NULL;
+        }
     }
 
-    void *map = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, tmp_fd, 0);
-    if (map == MAP_FAILED) {
-        fclose(tmp);
-        return NULL;
-    }
+    g_free(cache_path);
 
     DictMmap *dict = calloc(1, sizeof(DictMmap));
-    dict->fd = tmp_fd;
-    dict->tmp_file = tmp;
-    dict->data = (const char *)map;
-    dict->size = st.st_size;
+    dict->fd = cache_fd;
+    dict->tmp_file = NULL;
+    dict->data = dict_data;
+    dict->size = dict_size;
     dict->index = splay_tree_new(dict->data, dict->size);
 
     /* Parse the block stream */

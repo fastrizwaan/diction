@@ -6,7 +6,7 @@
 
 typedef struct DictMmap {
     int fd;
-    FILE *tmp_file;
+    FILE *tmp_file;  // Used for temporary decompression (NULL for cached dicts)
     const char *data;
     size_t size;
     SplayTree *index;

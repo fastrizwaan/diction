@@ -326,315 +326,267 @@ static void mdx_extract_mdd_resources(const char *mdd_path, const char *dest_dir
     free(resources); free(kbis); fclose(f);
 }
 
-typedef struct { long h_off; size_t h_len; long d_off; size_t d_len; } TreeEntry;
+typedef struct { int64_t h_off; uint64_t h_len; int64_t d_off; uint64_t d_len; } TreeEntry;
 
 static void insert_balanced(SplayTree *t, TreeEntry *e, int start, int end) {
     if (start > end) return;
     int mid = start + (end - start) / 2;
     if (e[mid].h_len > 0)
-        splay_tree_insert(t, e[mid].h_off, e[mid].h_len, e[mid].d_off, e[mid].d_len);
+        splay_tree_insert(t, (size_t)e[mid].h_off, (size_t)e[mid].h_len, (size_t)e[mid].d_off, (size_t)e[mid].d_len);
     insert_balanced(t, e, start, mid - 1);
     insert_balanced(t, e, mid + 1, end);
 }
 
 DictMmap *parse_mdx_file(const char *path) {
-    // Ensure cache directory exists
     ensure_cache_directory();
 
-    // Get cache path for this dictionary
     char *cache_path = get_cached_dict_path(path);
-    gboolean cache_exists = (access(cache_path, F_OK) == 0);
-    gboolean cache_valid = cache_exists && is_cache_valid(cache_path, path);
+    gboolean cache_valid = (access(cache_path, F_OK) == 0) &&
+                           is_cache_valid(cache_path, path);
 
     int cache_fd = -1;
     const char *dict_data = NULL;
     size_t dict_size = 0;
     char *title = NULL;
 
-    // We need to peek at the XML header anyway to get Title/EngineVersion/Encoding
+    /* ── read header ── */
     FILE *fh = fopen(path, "rb");
     int is_v2 = 0, num_size = 4, encoding_is_utf16 = 0, encrypted = 0;
+    uint32_t header_text_size = 0;
+
     if (fh) {
         unsigned char buf4[4];
         if (fread(buf4, 1, 4, fh) == 4) {
-            uint32_t header_text_size = ru32be(buf4);
+            header_text_size = ru32be(buf4);
             if (header_text_size <= 10*1024*1024) {
                 unsigned char *header_raw = malloc(header_text_size);
-                if (header_raw) {
-                    fread(header_raw, 1, header_text_size, fh);
-                    size_t ascii_len = header_text_size / 2;
-                    char *ascii_hdr = malloc(ascii_len + 1);
-                    if (ascii_hdr) {
-                        for (size_t i = 0; i < ascii_len; i++) ascii_hdr[i] = header_raw[i * 2];
-                        ascii_hdr[ascii_len] = '\0';
-                        
-                        // Extract Title
-                        const char *tp = strstr(ascii_hdr, "Title=\"");
-                        if (tp) {
-                            const char *ts = tp + 7;
-                            const char *te = strchr(ts, '\"');
-                            if (te) title = strndup(ts, te - ts);
-                        }
-                        
-                        char *vp = strstr(ascii_hdr, "GeneratedByEngineVersion=\"");
-                        if (vp) { double ver = atof(vp + 24); is_v2 = (ver >= 2.0); num_size = is_v2 ? 8 : 4; }
-                        char *ep = strstr(ascii_hdr, "Encoding=\"");
-                        if (ep && (strstr(ep + 10, "UTF-16") || strstr(ep + 10, "utf-16"))) encoding_is_utf16 = 1;
-                        char *xp = strstr(ascii_hdr, "Encrypted=\"");
-                        if (xp) encrypted = atoi(xp + 11);
-                        free(ascii_hdr);
-                    }
-                    free(header_raw);
+                fread(header_raw, 1, header_text_size, fh);
+
+                size_t ascii_len = header_text_size / 2;
+                char *ascii_hdr = malloc(ascii_len + 1);
+                for (size_t i = 0; i < ascii_len; i++)
+                    ascii_hdr[i] = header_raw[i * 2];
+                ascii_hdr[ascii_len] = '\0';
+
+                const char *tp = strstr(ascii_hdr, "Title=\"");
+                if (tp) {
+                    const char *ts = tp + 7;
+                    const char *te = strchr(ts, '"');
+                    if (te) title = strndup(ts, te - ts);
                 }
+
+                char *vp = strstr(ascii_hdr, "GeneratedByEngineVersion=\"");
+                if (vp) {
+                    const char *vptr = strchr(vp, '\"');
+                    if (vptr) {
+                        double ver = atof(vptr + 1);
+                        is_v2 = (ver >= 2.0);
+                        num_size = is_v2 ? 8 : 4;
+                    }
+                }
+
+                char *ep = strstr(ascii_hdr, "Encoding=\"");
+                if (ep && (strstr(ep, "UTF-16") || strstr(ep, "utf-16"))) encoding_is_utf16 = 1;
+
+                char *xp = strstr(ascii_hdr, "Encrypted=\"");
+                if (xp) encrypted = atoi(xp + 11);
+
+                free(ascii_hdr);
+                free(header_raw);
             }
         }
-        // Keep fh open if we need to parse source, otherwise close later
     }
 
+    /* ───────────────────────────── */
+    /* FAST PATH: use cache directly */
+    /* ───────────────────────────── */
     if (cache_valid) {
-        // Use cached version directly
-        printf("[MDX] Loading from cache: %s (Title: %s)\n", cache_path, title ? title : "None");
         if (fh) fclose(fh);
-        
+
         cache_fd = open(cache_path, O_RDONLY);
-        if (cache_fd < 0) {
+        struct stat st;
+        if (fstat(cache_fd, &st) != 0 || st.st_size < 16) {
+            close(cache_fd);
             g_free(cache_path);
-            if (title) free(title);
             return NULL;
         }
 
-        struct stat st;
-        if (fstat(cache_fd, &st) < 0 || st.st_size == 0) {
-            close(cache_fd);
-            g_free(cache_path);
-            if (title) free(title);
-            return NULL;
-        }
         dict_size = st.st_size;
         dict_data = mmap(NULL, dict_size, PROT_READ, MAP_PRIVATE, cache_fd, 0);
-        if (dict_data == MAP_FAILED) {
-            close(cache_fd);
-            g_free(cache_path);
-            if (title) free(title);
-            return NULL;
-        }
 
         DictMmap *dict = calloc(1, sizeof(DictMmap));
         dict->fd = cache_fd;
-        dict->tmp_file = NULL;
         dict->data = dict_data;
         dict->size = dict_size;
         dict->name = title;
         dict->index = splay_tree_new(dict->data, dict->size);
 
-        // Build index from cached data (interleaved headword/newline/definition/newline)
-        const char *dp = dict->data;
-        const char *de = dp + dict->size;
-        int indexed = 0;
-
-        while (dp < de) {
-            const char *hw_start = dp;
-            while (dp < de && *dp != '\n') dp++;
-            size_t hw_len = dp - hw_start;
-            if (dp < de) dp++; // skip newline
-
-            if (hw_len == 0 && dp >= de) break;
-            if (hw_len == 0) continue;
-
-            const char *def_start = dp;
-            while (dp < de && *dp != '\n') dp++;
-            size_t def_len = dp - def_start;
-            if (dp < de) dp++; // skip newline
-
-            if (def_len > 0) {
-                splay_tree_insert(dict->index, hw_start - dict->data, hw_len, def_start - dict->data, def_len);
-                indexed++;
-            }
+        /* FAST LOADING: read index array from end of file */
+        uint64_t count = *(uint64_t*)dict->data;
+        size_t index_off = (size_t)(dict->size - count * sizeof(TreeEntry));
+        if (index_off >= 8) {
+            TreeEntry *tree_entries = (TreeEntry*)(dict->data + index_off);
+            insert_balanced(dict->index, tree_entries, 0, (int)count - 1);
         }
 
-        printf("[MDX] Indexed %d cached entries\n", indexed);
-        dict->resource_dir = NULL;
         g_free(cache_path);
         return dict;
     }
 
-    // Need to parse and cache
-    if (!fh) { g_free(cache_path); if (title) free(title); return NULL; }
-    printf("[MDX] Building cache from source: %s\n", path);
+    /* ───────────────────────────── */
+    /* BUILD CACHE (ZERO-COPY)       */
+    /* ───────────────────────────── */
 
-    fseek(fh, 4, SEEK_CUR);
+    FILE *cache = fopen(cache_path, "wb");
+    if (!cache) {
+        if (fh) fclose(fh);
+        g_free(cache_path);
+        return NULL;
+    }
+
+    uint64_t zero_count = 0;
+    fwrite(&zero_count, 8, 1, cache); 
+
+    fseek(fh, 4 + header_text_size + 4, SEEK_SET); // skip HeaderLen + Header + Checksum
+
     int kbh_size = is_v2 ? (num_size * 5) : (num_size * 4);
     unsigned char *kbh = malloc(kbh_size);
-    if (!kbh) { fclose(fh); g_free(cache_path); if (title) free(title); return NULL; }
     fread(kbh, 1, kbh_size, fh);
+
     const unsigned char *kp = kbh;
     uint64_t num_key_blocks = read_num(&kp, num_size);
     uint64_t num_entries = read_num(&kp, num_size);
-    uint64_t kb_info_decomp_size = is_v2 ? read_num(&kp, num_size) : 0;
-    uint64_t kb_info_comp_size = read_num(&kp, num_size);
+    uint64_t kbi_decomp = is_v2 ? read_num(&kp, num_size) : 0;
+    uint64_t kbi_comp = read_num(&kp, num_size);
     uint64_t kb_data_size = read_num(&kp, num_size);
     free(kbh);
+
     if (is_v2) fseek(fh, 4, SEEK_CUR);
-    long kb_info_file_pos = ftell(fh);
-    unsigned char *kb_info_raw = malloc(kb_info_comp_size);
-    if (!kb_info_raw) { fclose(fh); g_free(cache_path); if (title) free(title); return NULL; }
-    fread(kb_info_raw, 1, kb_info_comp_size, fh);
-    long kb_data_file_pos = ftell(fh);
-    typedef struct { uint64_t comp, decomp; } KBInfo;
-    KBInfo *kb_infos = calloc(num_key_blocks + 1, sizeof(KBInfo));
-    size_t kb_count = 0;
-    if (is_v2) {
-        if (encrypted & 2) mdx_decrypt_key_block_info(kb_info_raw, kb_info_comp_size);
-        size_t dlen = 0;
-        unsigned char *data = mdx_block_decompress(kb_info_raw, kb_info_comp_size, kb_info_decomp_size, &dlen);
-        if (data) {
-            const unsigned char *ip = data, *ie = data + dlen;
-            while (ip < ie && kb_count < num_key_blocks) {
-                ip += num_size;
-                uint32_t hs = read_u8or16(&ip, 1); ip += (encoding_is_utf16 ? (hs+1)*2 : (hs+1));
-                uint32_t ts = read_u8or16(&ip, 1); ip += (encoding_is_utf16 ? (ts+1)*2 : (ts+1));
-                kb_infos[kb_count].comp = read_num(&ip, num_size);
-                kb_infos[kb_count].decomp = read_num(&ip, num_size);
-                kb_count++;
-            }
-            free(data);
-        }
-    } else {
-        const unsigned char *ip = kb_info_raw, *ie = kb_info_raw + kb_info_comp_size;
-        while (ip < ie && kb_count < num_key_blocks) {
+    unsigned char *kbi_raw = malloc(kbi_comp);
+    fread(kbi_raw, 1, kbi_comp, fh);
+
+    TreeEntry *tree_entries = calloc(num_entries, sizeof(TreeEntry));
+    size_t valid_count = 0;
+
+    if (is_v2 && (encrypted & 2)) mdx_decrypt_key_block_info(kbi_raw, kbi_comp);
+    size_t kbi_dlen = 0;
+    unsigned char *kbi_data = mdx_block_decompress(kbi_raw, kbi_comp, kbi_decomp, &kbi_dlen);
+    free(kbi_raw);
+
+    if (kbi_data) {
+        const unsigned char *ip = kbi_data, *ie = kbi_data + kbi_dlen;
+        while (ip < ie && valid_count < num_entries) {
             ip += num_size;
-            uint32_t hs = read_u8or16(&ip, 0); ip += (hs+1);
-            uint32_t ts = read_u8or16(&ip, 0); ip += (ts+1);
-            kb_infos[kb_count].comp = read_num(&ip, num_size);
-            kb_infos[kb_count].decomp = read_num(&ip, num_size);
-            kb_count++;
-        }
-    }
-    free(kb_info_raw);
-    typedef struct { char *word; uint64_t offset; } HwEntry;
-    HwEntry *hw_entries = calloc(num_entries + 1, sizeof(HwEntry));
-    size_t hw_count = 0;
-    fseek(fh, kb_data_file_pos, SEEK_SET);
-    for (size_t bi = 0; bi < kb_count; bi++) {
-        unsigned char *comp = malloc(kb_infos[bi].comp);
-        if (!comp) continue;
-        fread(comp, 1, kb_infos[bi].comp, fh);
-        size_t dlen = 0;
-        unsigned char *data = mdx_block_decompress(comp, kb_infos[bi].comp, kb_infos[bi].decomp, &dlen);
-        free(comp);
-        if (!data) continue;
-        const unsigned char *hp = data, *he = data + dlen;
-        while (hp < he && hw_count < num_entries) {
-            uint64_t id = (num_size == 8) ? ru64be(hp) : ru32be(hp);
-            hp += num_size;
-            char word[1024];
-            if (encoding_is_utf16) {
-                const unsigned char *ws = hp;
-                while (hp + 1 < he && !(hp[0] == 0 && hp[1] == 0)) hp += 2;
-                utf16le_to_utf8(ws, hp - ws, word, sizeof(word)-1);
-                if (hp + 1 < he) hp += 2;
-            } else {
-                const unsigned char *ws = hp;
-                while (hp < he && *hp != '\0') hp++;
-                size_t wl = hp - ws; if (wl > 1023) wl = 1023;
-                memcpy(word, ws, wl); word[wl] = '\0';
-                if (hp < he) hp++;
+            uint32_t head_size = read_u8or16(&ip, is_v2); ip += (encoding_is_utf16 ? (head_size+1)*2 : (head_size+1));
+            uint32_t tail_size = read_u8or16(&ip, is_v2); ip += (encoding_is_utf16 ? (tail_size+1)*2 : (tail_size+1));
+            uint64_t comp_size = read_num(&ip, num_size);
+            uint64_t decomp_size = read_num(&ip, num_size);
+
+            long next_kb = ftell(fh) + comp_size;
+            unsigned char *kb_comp = malloc(comp_size);
+            if (fread(kb_comp, 1, comp_size, fh) == comp_size) {
+                size_t kb_dlen = 0;
+                unsigned char *kb_data = mdx_block_decompress(kb_comp, comp_size, decomp_size, &kb_dlen);
+                if (kb_data) {
+                    const unsigned char *kp_ent = kb_data, *ke_ent = kb_data + kb_dlen;
+                    while (kp_ent < ke_ent && valid_count < num_entries) {
+                        uint64_t id = read_num(&kp_ent, num_size);
+                        char word[1024];
+                        if (encoding_is_utf16) {
+                            const unsigned char *ws = kp_ent;
+                            while (kp_ent + 1 < ke_ent && !(kp_ent[0] == 0 && kp_ent[1] == 0)) kp_ent += 2;
+                            utf16le_to_utf8(ws, kp_ent - ws, word, sizeof(word)-1);
+                            if (kp_ent + 1 < ke_ent) kp_ent += 2;
+                        } else {
+                            const unsigned char *ws = kp_ent;
+                            while (kp_ent < ke_ent && *kp_ent != '\0') kp_ent++;
+                            size_t wl = kp_ent - ws; if (wl > 1023) wl = 1023;
+                            memcpy(word, ws, wl); word[wl] = '\0';
+                            if (kp_ent < ke_ent) kp_ent++;
+                        }
+                        size_t wlen = strlen(word);
+                        long hw_off = ftell(cache);
+                        fwrite(word, 1, wlen, cache);
+                        fwrite("\n", 1, 1, cache);
+
+                        tree_entries[valid_count].h_off = (int64_t)hw_off;
+                        tree_entries[valid_count].h_len = (uint64_t)wlen;
+                        tree_entries[valid_count].d_off = (int64_t)id;
+                        valid_count++;
+                    }
+                    free(kb_data);
+                }
             }
-            hw_entries[hw_count].word = strdup(word);
-            hw_entries[hw_count].offset = id;
-            hw_count++;
+            free(kb_comp);
+            fseek(fh, next_kb, SEEK_SET);
         }
-        free(data);
+        free(kbi_data);
     }
-    free(kb_infos);
-    long rec_pos = kb_info_file_pos + (long)kb_info_comp_size + (long)kb_data_size;
-    fseek(fh, rec_pos, SEEK_SET);
-    unsigned char rbh[64]; if (fread(rbh, 1, num_size * 4, fh) != (size_t)(num_size * 4)) { }
+
+    fseek(fh, 4 + header_text_size + 4 + kbh_size + (is_v2?4:0) + kbi_comp + kb_data_size, SEEK_SET);
+
+    unsigned char rbh[64];
+    fread(rbh, 1, num_size * 4, fh);
     const unsigned char *rp = rbh;
     uint64_t nrb = read_num(&rp, num_size);
     read_num(&rp, num_size);
     read_num(&rp, num_size);
-    typedef struct { uint64_t comp, decomp; } RBInfo;
-    RBInfo *rb_infos = calloc(nrb + 1, sizeof(RBInfo));
+
+    typedef struct { uint64_t comp, decomp; } RB;
+    RB *rbs = calloc(nrb, sizeof(RB));
+    uint64_t total_decomp = 0;
     for (uint64_t i = 0; i < nrb; i++) {
-        unsigned char pair[16]; if(fread(pair, 1, num_size * 2, fh) != (size_t)(num_size * 2)) break;
-        const unsigned char *ppp = pair;
-        rb_infos[i].comp = read_num(&ppp, num_size);
-        rb_infos[i].decomp = read_num(&ppp, num_size);
+        unsigned char tmp[16];
+        fread(tmp, 1, num_size * 2, fh);
+        const unsigned char *ppb = tmp;
+        rbs[i].comp = read_num(&ppb, num_size);
+        rbs[i].decomp = read_num(&ppb, num_size);
+        total_decomp += rbs[i].decomp;
     }
 
-    FILE *cache_file = fopen(cache_path, "wb");
-    if (!cache_file) {
-        fclose(fh); free(rb_infos);
-        for(size_t i=0; i<hw_count; i++) free(hw_entries[i].word);
-        free(hw_entries); g_free(cache_path); if (title) free(title);
-        return NULL;
-    }
-
-    uint64_t doff = 0;
+    unsigned char *dict_rec_data = malloc(total_decomp);
+    uint64_t co = 0;
     for (uint64_t i = 0; i < nrb; i++) {
-        unsigned char *comp = malloc(rb_infos[i].comp);
-        if (!comp) continue;
-        fread(comp, 1, rb_infos[i].comp, fh);
-        size_t dlen = 0;
-        unsigned char *data = mdx_block_decompress(comp, rb_infos[i].comp, rb_infos[i].decomp, &dlen);
+        unsigned char *comp = malloc(rbs[i].comp);
+        if (fread(comp, 1, rbs[i].comp, fh) == rbs[i].comp) {
+            size_t dlen = 0;
+            unsigned char *data = mdx_block_decompress(comp, rbs[i].comp, rbs[i].decomp, &dlen);
+            if (data) { memcpy(dict_rec_data + co, data, dlen); co += dlen; free(data); }
+        }
         free(comp);
-        if (data) { fwrite(data, 1, dlen, cache_file); doff += dlen; free(data); }
     }
-    fclose(fh); free(rb_infos);
+    free(rbs);
 
-    long cache_pos = ftell(cache_file);
-    size_t def_data_size = cache_pos;
-    void *def_data = malloc(def_data_size);
-    if (!def_data) {
-        fclose(cache_file);
-        for(size_t i=0; i<hw_count; i++) free(hw_entries[i].word);
-        free(hw_entries); g_free(cache_path); if (title) free(title);
-        return NULL;
-    }
+    for (size_t i = 0; i < valid_count; i++) {
+        uint64_t start = (uint64_t)tree_entries[i].d_off;
+        uint64_t end = (i + 1 < valid_count) ? (uint64_t)tree_entries[i+1].d_off : total_decomp;
 
-    FILE *def_read = fopen(cache_path, "rb");
-    fread(def_data, 1, def_data_size, def_read);
-    fclose(def_read);
-
-    // Reuse cache file to write interleaved data
-    fseek(cache_file, 0, SEEK_SET);
-    TreeEntry *tree_entries = calloc(hw_count + 1, sizeof(TreeEntry));
-    for (size_t i = 0; i < hw_count; i++) {
-        uint64_t d_start = hw_entries[i].offset;
-        uint64_t d_end = (i + 1 < hw_count) ? hw_entries[i+1].offset : def_data_size;
-        if (d_start < def_data_size && d_end <= def_data_size && d_end > d_start) {
-            tree_entries[i].h_off = ftell(cache_file);
-            tree_entries[i].h_len = strlen(hw_entries[i].word);
-            fwrite(hw_entries[i].word, 1, tree_entries[i].h_len, cache_file);
-            fwrite("\n", 1, 1, cache_file);
-            tree_entries[i].d_off = ftell(cache_file);
-            tree_entries[i].d_len = (size_t)(d_end - d_start);
-            fwrite((unsigned char *)def_data + d_start, 1, tree_entries[i].d_len, cache_file);
-            fwrite("\n", 1, 1, cache_file);
+        if (end > start && end <= total_decomp) {
+            long def_off = ftell(cache);
+            fwrite(dict_rec_data + start, 1, (size_t)(end - start), cache);
+            fwrite("\n", 1, 1, cache);
+            tree_entries[i].d_off = (int64_t)def_off;
+            tree_entries[i].d_len = (uint64_t)(end - start);
+        } else {
+            tree_entries[i].d_len = 0;
         }
     }
-    free(def_data);
-    fflush(cache_file);
-    fclose(cache_file);
+    free(dict_rec_data);
 
-    // Update cache mtime
-    struct stat src_st;
-    if (stat(path, &src_st) == 0) {
-        struct utimbuf times;
-        times.actime = src_st.st_mtime;
-        times.modtime = src_st.st_mtime;
-        utime(cache_path, &times);
-    }
+    /* Write index array at end of file */
+    fwrite(tree_entries, sizeof(TreeEntry), valid_count, cache);
+
+    fseek(cache, 0, SEEK_SET);
+    uint64_t final_cnt = (uint64_t)valid_count;
+    fwrite(&final_cnt, 8, 1, cache);
+    
+    fclose(cache);
+    fclose(fh);
 
     cache_fd = open(cache_path, O_RDONLY);
-    if (cache_fd < 0) {
-        for(size_t i=0; i<hw_count; i++) free(hw_entries[i].word);
-        free(hw_entries); free(tree_entries); g_free(cache_path);
-        return NULL;
-    }
-    struct stat st; fstat(cache_fd, &st);
-    dict_size = st.st_size;
+    struct stat st_final;
+    fstat(cache_fd, &st_final);
+    dict_size = st_final.st_size;
     dict_data = mmap(NULL, dict_size, PROT_READ, MAP_PRIVATE, cache_fd, 0);
 
     DictMmap *dict = calloc(1, sizeof(DictMmap));
@@ -643,23 +595,10 @@ DictMmap *parse_mdx_file(const char *path) {
     dict->size = dict_size;
     dict->name = title;
     dict->index = splay_tree_new(dict->data, dict->size);
-    insert_balanced(dict->index, tree_entries, 0, (int)hw_count - 1);
-    
-    // Extract resources
-    char *mdd_path = g_strdup(path);
-    size_t pl = strlen(mdd_path);
-    if (pl > 4) strcpy(mdd_path + pl - 3, "mdd");
-    if (g_file_test(mdd_path, G_FILE_TEST_EXISTS)) {
-        char *hash = g_compute_checksum_for_string(G_CHECKSUM_SHA1, path, -1);
-        char *root = g_build_filename(g_get_user_cache_dir(), "diction", "resources", hash, NULL);
-        g_mkdir_with_parents(root, 0755);
-        dict->resource_dir = g_strdup(root);
-        mdx_extract_mdd_resources(mdd_path, root, is_v2, num_size, encoding_is_utf16, encrypted);
-        g_free(hash); g_free(root);
-    }
-    g_free(mdd_path);
+
+    insert_balanced(dict->index, tree_entries, 0, (int)valid_count - 1);
+    free(tree_entries);
     g_free(cache_path);
-    for (size_t i = 0; i < hw_count; i++) free(hw_entries[i].word);
-    free(hw_entries); free(tree_entries);
+
     return dict;
 }

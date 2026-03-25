@@ -15,4 +15,5 @@ typedef struct DictMmap {
 } DictMmap;
 
 DictMmap* dict_mmap_open(const char *path);
+DictMmap* parse_mdx_file(const char *path);
 void dict_mmap_close(DictMmap *dict);

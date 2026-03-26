@@ -3,6 +3,14 @@
 #include "splay-tree.h"
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdint.h>
+
+typedef struct {
+    int64_t h_off;
+    uint64_t h_len;
+    int64_t d_off;
+    uint64_t d_len;
+} TreeEntry;
 
 typedef struct DictMmap {
     int fd;
@@ -17,3 +25,4 @@ typedef struct DictMmap {
 DictMmap* dict_mmap_open(const char *path);
 DictMmap* parse_mdx_file(const char *path);
 void dict_mmap_close(DictMmap *dict);
+void insert_balanced(SplayTree *t, TreeEntry *e, int start, int end);

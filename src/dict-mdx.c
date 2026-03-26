@@ -326,16 +326,6 @@ static void mdx_extract_mdd_resources(const char *mdd_path, const char *dest_dir
     free(resources); free(kbis); fclose(f);
 }
 
-typedef struct { int64_t h_off; uint64_t h_len; int64_t d_off; uint64_t d_len; } TreeEntry;
-
-static void insert_balanced(SplayTree *t, TreeEntry *e, int start, int end) {
-    if (start > end) return;
-    int mid = start + (end - start) / 2;
-    if (e[mid].h_len > 0)
-        splay_tree_insert(t, (size_t)e[mid].h_off, (size_t)e[mid].h_len, (size_t)e[mid].d_off, (size_t)e[mid].d_len);
-    insert_balanced(t, e, start, mid - 1);
-    insert_balanced(t, e, mid + 1, end);
-}
 
 DictMmap *parse_mdx_file(const char *path) {
     ensure_cache_directory();

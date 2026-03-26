@@ -11,6 +11,15 @@
 #include <utime.h>
 #include <glib.h>
 
+void insert_balanced(SplayTree *t, TreeEntry *e, int start, int end) {
+    if (start > end) return;
+    int mid = start + (end - start) / 2;
+    if (e[mid].h_len > 0)
+        splay_tree_insert(t, (size_t)e[mid].h_off, (size_t)e[mid].h_len, (size_t)e[mid].d_off, (size_t)e[mid].d_len);
+    insert_balanced(t, e, start, mid - 1);
+    insert_balanced(t, e, mid + 1, end);
+}
+
 /* ── Multi-headword aware DSL parser ──────────────────────
  * DSL format allows N consecutive non-indented lines as headwords
  * followed by indented definition lines.  ALL headwords share the
@@ -70,7 +79,7 @@ typedef struct {
     size_t length;
 } HwSpan;
 
-static void parse_dsl_into_tree(DictMmap *dict) {
+static size_t parse_dsl_into_tree(DictMmap *dict, TreeEntry **out_entries) {
     const char *p   = dict->data;
     const char *end = p + dict->size;
 
@@ -82,7 +91,10 @@ static void parse_dsl_into_tree(DictMmap *dict) {
     size_t def_offset = 0;
     size_t def_len    = 0;
     int    in_def     = 0;
-    int    word_count = 0;
+    size_t word_count = 0;
+
+    TreeEntry *entries = NULL;
+    size_t entry_cap = 0;
 
     /* Flush: insert every collected headword with the current def block */
     #define FLUSH_HEADWORDS() do {                                       \
@@ -90,7 +102,17 @@ static void parse_dsl_into_tree(DictMmap *dict) {
             for (size_t _i = 0; _i < hw_count; _i++) {                  \
                 splay_tree_insert(dict->index,                           \
                     hws[_i].offset, hws[_i].length,                      \
-                    def_offset, def_len);                                 \
+                    def_offset, def_len);                                \
+                if (out_entries) {                                       \
+                    if (word_count >= entry_cap) {                       \
+                        entry_cap = (entry_cap == 0) ? 1024 : entry_cap * 2; \
+                        entries = realloc(entries, entry_cap * sizeof(TreeEntry)); \
+                    }                                                    \
+                    entries[word_count].h_off = (int64_t)hws[_i].offset; \
+                    entries[word_count].h_len = (uint64_t)hws[_i].length; \
+                    entries[word_count].d_off = (int64_t)def_offset;    \
+                    entries[word_count].d_len = (uint64_t)def_len;      \
+                }                                                        \
                 word_count++;                                            \
             }                                                            \
         }                                                                \
@@ -181,7 +203,9 @@ static void parse_dsl_into_tree(DictMmap *dict) {
     #undef FLUSH_HEADWORDS
 
     free(hws);
-    printf("[DEBUG] parse_dsl_into_tree: indexed %d headwords.\n", word_count);
+    if (out_entries) *out_entries = entries;
+    printf("[DEBUG] parse_dsl_into_tree: indexed %zu headwords.\n", word_count);
+    return word_count;
 }
 
 static size_t convert_utf16le_to_utf8(const unsigned char *in_buf, size_t in_len, unsigned char *out_buf) {
@@ -275,7 +299,7 @@ DictMmap* dict_mmap_open(const char *path) {
         }
 
         struct stat st;
-        if (fstat(dict->fd, &st) < 0 || st.st_size == 0) {
+        if (fstat(dict->fd, &st) < 0 || st.st_size < 8) {
             close(dict->fd);
             g_free(cache_path);
             free(dict);
@@ -292,6 +316,50 @@ DictMmap* dict_mmap_open(const char *path) {
         }
 
         dict->data = (const char*)map;
+        dict->index = splay_tree_new(dict->data, dict->size);
+
+        // Fast load: read index from end
+        uint64_t count = *(uint64_t*)dict->data;
+        int need_index = (count == 0);
+        
+        if (count > 0) {
+            size_t index_size = count * sizeof(TreeEntry);
+            if (dict->size > index_size + 8) {
+                TreeEntry *entries = (TreeEntry*)(dict->data + (dict->size - index_size));
+                insert_balanced(dict->index, entries, 0, (int)count - 1);
+                printf("[DSL] Fast-loaded %lu entries from cache.\n", (unsigned long)count);
+            } else {
+                need_index = 1;
+            }
+        }
+
+        if (need_index) {
+            printf("[DSL] Cache exists but lacks index. Performing auto-upgrade...\n");
+            TreeEntry *entries = NULL;
+            size_t word_count = parse_dsl_into_tree(dict, &entries);
+
+            if (word_count > 0 && entries) {
+                // Re-open O_RDWR to upgrade cache
+                int fd_rw = open(cache_path, O_RDWR);
+                if (fd_rw >= 0) {
+                    lseek(fd_rw, 0, SEEK_END);
+                    write(fd_rw, entries, word_count * sizeof(TreeEntry));
+                    lseek(fd_rw, 0, SEEK_SET);
+                    uint64_t final_cnt = (uint64_t)word_count;
+                    write(fd_rw, &final_cnt, 8);
+                    close(fd_rw);
+
+                    // Re-mmap the newly appended file part
+                    munmap((void*)dict->data, dict->size);
+                    struct stat st_new;
+                    fstat(dict->fd, &st_new);
+                    dict->size = st_new.st_size;
+                    dict->data = mmap(NULL, dict->size, PROT_READ, MAP_PRIVATE, dict->fd, 0);
+                    printf("[DSL] Auto-upgraded cache for %s (%lu entries).\n", path, (unsigned long)word_count);
+                }
+                free(entries);
+            }
+        }
     } else {
         // Need to extract and convert
         printf("Loading Dictionary: %s\n", path);
@@ -302,11 +370,25 @@ DictMmap* dict_mmap_open(const char *path) {
             return NULL;
         }
 
+        // Open cache file for writing
+        FILE *cache_file = fopen(cache_path, "wb");
+        if (!cache_file) {
+            gzclose(gz);
+            g_free(cache_path);
+            free(dict);
+            return NULL;
+        }
+
+        // Write placeholder for count
+        uint64_t zero_count = 0;
+        fwrite(&zero_count, 8, 1, cache_file);
+
         // Determine encoding by reading first 4 bytes
         unsigned char bom[4];
         int bom_len = gzread(gz, bom, 4);
         if (bom_len < 2) {
             gzclose(gz);
+            fclose(cache_file);
             g_free(cache_path);
             free(dict);
             return NULL;
@@ -330,15 +412,6 @@ DictMmap* dict_mmap_open(const char *path) {
             copy_offset = 0;
         } else if (bom_len >= 3 && bom[0] == 0xEF && bom[1] == 0xBB && bom[2] == 0xBF) {
             copy_offset = 3;
-        }
-
-        // Open cache file for writing
-        FILE *cache_file = fopen(cache_path, "wb");
-        if (!cache_file) {
-            gzclose(gz);
-            g_free(cache_path);
-            free(dict);
-            return NULL;
         }
 
         // Write whatever we read past the BOM
@@ -405,7 +478,7 @@ DictMmap* dict_mmap_open(const char *path) {
         }
 
         // Now open the cached file
-        dict->fd = open(cache_path, O_RDONLY);
+        dict->fd = open(cache_path, O_RDWR);
         if (dict->fd < 0) {
             g_free(cache_path);
             free(dict);
@@ -421,7 +494,7 @@ DictMmap* dict_mmap_open(const char *path) {
         }
         dict->size = st.st_size;
 
-        void *map = mmap(NULL, dict->size, PROT_READ, MAP_PRIVATE, dict->fd, 0);
+        void *map = mmap(NULL, dict->size, PROT_READ | PROT_WRITE, MAP_SHARED, dict->fd, 0);
         if (map == MAP_FAILED) {
             close(dict->fd);
             g_free(cache_path);
@@ -430,13 +503,31 @@ DictMmap* dict_mmap_open(const char *path) {
         }
 
         dict->data = (const char*)map;
+        dict->index = splay_tree_new(dict->data, dict->size);
+
+        TreeEntry *entries = NULL;
+        size_t count = parse_dsl_into_tree(dict, &entries);
+
+        if (count > 0 && entries) {
+            // Append entries to cache file
+            lseek(dict->fd, 0, SEEK_END);
+            write(dict->fd, entries, count * sizeof(TreeEntry));
+
+            // Update count at beginning
+            lseek(dict->fd, 0, SEEK_SET);
+            uint64_t final_count = (uint64_t)count;
+            write(dict->fd, &final_count, 8);
+
+            free(entries);
+        }
+
+        // Remap as read-only for final use
+        munmap(map, dict->size);
+        struct stat st_final;
+        fstat(dict->fd, &st_final);
+        dict->size = st_final.st_size;
+        dict->data = mmap(NULL, dict->size, PROT_READ, MAP_PRIVATE, dict->fd, 0);
     }
-
-    g_free(cache_path);
-
-    printf("[DEBUG] First 256 bytes mapped (size: %zu):\n%.256s\n", dict->size, dict->data);
-    dict->index = splay_tree_new(dict->data, dict->size);
-    parse_dsl_into_tree(dict);
 
     return dict;
 }

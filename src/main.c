@@ -404,6 +404,17 @@ static void show_about_dialog(GSimpleAction *action, GVariant *parameter, gpoint
     }
 }
 
+static void on_sidebar_tab_toggled(GtkToggleButton *btn, gpointer user_data) {
+    (void)user_data;
+    if (gtk_toggle_button_get_active(btn)) {
+        AdwViewStack *stack = g_object_get_data(G_OBJECT(btn), "stack-widget");
+        const char *name = g_object_get_data(G_OBJECT(btn), "stack-name");
+        if (stack && name) {
+            adw_view_stack_set_visible_child_name(stack, name);
+        }
+    }
+}
+
 static void append_entry_to_sidebar(DictEntry *e) {
     GtkWidget *row = gtk_list_box_row_new();
     GtkWidget *label = gtk_label_new(e->name);
@@ -628,13 +639,56 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(history_scroll), GTK_WIDGET(history_listbox));
     adw_view_stack_add_titled_with_icon(sidebar_stack, history_scroll, "history", "History", "document-open-recent-symbolic");
 
+    /* Placeholder Tabs to match Python UI */
+    GtkWidget *fav_label = gtk_label_new("Favorites (Not implemented)");
+    adw_view_stack_add_titled_with_icon(sidebar_stack, fav_label, "favorites", "Favorites", "starred-symbolic");
+    
+    GtkWidget *groups_label = gtk_label_new("Groups (Not implemented)");
+    adw_view_stack_add_titled_with_icon(sidebar_stack, groups_label, "groups", "Groups", "folder-symbolic");
+
     gtk_box_append(GTK_BOX(sidebar_vbox), GTK_WIDGET(sidebar_stack));
 
-    /* Sidebar View Switcher Bar */
-    GtkWidget *switcher_bar = adw_view_switcher_bar_new();
-    adw_view_switcher_bar_set_stack(ADW_VIEW_SWITCHER_BAR(switcher_bar), sidebar_stack);
-    adw_view_switcher_bar_set_reveal(ADW_VIEW_SWITCHER_BAR(switcher_bar), TRUE);
-    gtk_box_append(GTK_BOX(sidebar_vbox), switcher_bar);
+    /* Custom Bottom Tabs (Python style) */
+    GtkWidget *tabs_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_widget_set_margin_top(tabs_box, 2);
+    gtk_widget_set_margin_bottom(tabs_box, 3);
+    gtk_widget_set_margin_start(tabs_box, 2);
+    gtk_widget_set_margin_end(tabs_box, 2);
+    gtk_widget_set_halign(tabs_box, GTK_ALIGN_FILL);
+    gtk_widget_add_css_class(tabs_box, "linked");
+
+    const char *tabs[][3] = {
+        {"system-search-symbolic", "search", "Search"},
+        {"starred-symbolic", "favorites", "Favorites"},
+        {"document-open-recent-symbolic", "history", "History"},
+        {"folder-symbolic", "groups", "Groups"},
+        {"accessories-dictionary-symbolic", "dictionaries", "Dictionaries"}
+    };
+
+    GtkWidget *first_btn = NULL;
+    for (int i = 0; i < 5; i++) {
+        GtkWidget *btn = gtk_toggle_button_new();
+        gtk_button_set_icon_name(GTK_BUTTON(btn), tabs[i][0]);
+        gtk_widget_set_tooltip_text(btn, tabs[i][2]);
+        gtk_widget_add_css_class(btn, "flat");
+        gtk_widget_set_hexpand(btn, TRUE);
+        
+        if (i == 0) {
+            first_btn = btn;
+            gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(btn), TRUE);
+        } else {
+            gtk_toggle_button_set_group(GTK_TOGGLE_BUTTON(btn), GTK_TOGGLE_BUTTON(first_btn));
+        }
+
+        g_object_set_data_full(G_OBJECT(btn), "stack-name", g_strdup(tabs[i][1]), g_free);
+        g_object_set_data(G_OBJECT(btn), "stack-widget", sidebar_stack);
+        
+        g_signal_connect(btn, "toggled", G_CALLBACK(on_sidebar_tab_toggled), NULL);
+
+        gtk_box_append(GTK_BOX(tabs_box), btn);
+    }
+    gtk_widget_add_css_class(tabs_box, "sidebar-tabs");
+    gtk_box_append(GTK_BOX(sidebar_vbox), tabs_box);
 
     adw_overlay_split_view_set_sidebar(ADW_OVERLAY_SPLIT_VIEW(split_view), sidebar_vbox);
 
@@ -686,9 +740,11 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
 
     GtkCssProvider *css_provider = gtk_css_provider_new();
     gtk_css_provider_load_from_string(css_provider,
-        "viewswitcher > box { padding: 0; margin: 0; background: transparent; }"
-        "viewswitcher button { padding: 4px; margin: 0; min-height: 0; min-width: 0; }"
-        "viewswitcher button label { font-size: 0px; opacity: 0; margin: 0; padding: 0; }"
+        ".sidebar-tabs { border-top: 0px solid alpha(@theme_fg_color, 0.1); }"
+        ".sidebar-tabs button { padding-left: 12px; padding-right: 12px; padding-top: 8px; padding-bottom: 8px; margin-left:  0.5px; margin-right: 0.5px; min-height: 0; min-width: 0; border: none; border-radius: 10px; }"
+        ".sidebar-tabs button image { opacity: 0.7; }"
+        ".sidebar-tabs button:checked { background: alpha(@theme_fg_color, 0.1); }"
+        ".sidebar-tabs button:checked image { opacity: 1.0; }"
         ".navigation-sidebar { background: transparent; }"
         ".navigation-sidebar listitem:hover, .navigation-sidebar row:hover { background: alpha(@theme_fg_color, 0.05); }"
         ".navigation-sidebar listitem:selected, .navigation-sidebar row:selected { background: alpha(@theme_fg_color, 0.1); color: inherit; }"

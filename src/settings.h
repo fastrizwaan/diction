@@ -47,3 +47,8 @@ void settings_remove_dictionary(AppSettings *settings, const char *id);
 void settings_move_dictionary(AppSettings *settings, const char *id, int direction);
 void settings_create_group(AppSettings *settings, const char *name, GPtrArray *dict_ids);
 void settings_remove_group(AppSettings *settings, const char *id);
+char* settings_make_dictionary_id(const char *path);
+DictConfig* settings_find_dictionary_by_id(AppSettings *settings, const char *id);
+DictConfig* settings_find_dictionary_by_path(AppSettings *settings, const char *path);
+void settings_upsert_dictionary(AppSettings *settings, const char *name, const char *path, const char *source);
+void settings_prune_directory_dictionaries(AppSettings *settings, GHashTable *loaded_paths);

@@ -25,11 +25,17 @@ static void ensure_config_dir(void) {
     g_free(dir);
 }
 
+char* settings_make_dictionary_id(const char *path) {
+    char *checksum = g_compute_checksum_for_string(G_CHECKSUM_SHA1, path ? path : "", -1);
+    char *id = g_strndup(checksum ? checksum : "", 12);
+    g_free(checksum);
+    return id;
+}
+
 // Dictionary config helpers
 static DictConfig* dict_config_new(const char *name, const char *path, const char *source) {
     DictConfig *cfg = g_new0(DictConfig, 1);
-    cfg->id = g_compute_checksum_for_string(G_CHECKSUM_SHA1, path, -1);
-    cfg->id = g_strndup(cfg->id, 12);
+    cfg->id = settings_make_dictionary_id(path);
     cfg->name = g_strdup(name);
     cfg->path = g_strdup(path);
     cfg->enabled = 1;
@@ -63,6 +69,92 @@ static void dict_group_free(DictGroup *grp) {
         g_free(grp->name);
         g_ptr_array_free(grp->members, TRUE);
         g_free(grp);
+    }
+}
+
+static void settings_strip_dict_from_groups(AppSettings *settings, const char *dict_id) {
+    if (!settings || !dict_id) {
+        return;
+    }
+
+    for (guint i = 0; i < settings->dictionary_groups->len; i++) {
+        DictGroup *grp = g_ptr_array_index(settings->dictionary_groups, i);
+        for (gint j = (gint)grp->members->len - 1; j >= 0; j--) {
+            const char *member = g_ptr_array_index(grp->members, (guint)j);
+            if (g_strcmp0(member, dict_id) == 0) {
+                g_ptr_array_remove_index(grp->members, (guint)j);
+            }
+        }
+    }
+}
+
+DictConfig* settings_find_dictionary_by_id(AppSettings *settings, const char *id) {
+    if (!settings || !id) {
+        return NULL;
+    }
+
+    for (guint i = 0; i < settings->dictionaries->len; i++) {
+        DictConfig *cfg = g_ptr_array_index(settings->dictionaries, i);
+        if (g_strcmp0(cfg->id, id) == 0) {
+            return cfg;
+        }
+    }
+
+    return NULL;
+}
+
+DictConfig* settings_find_dictionary_by_path(AppSettings *settings, const char *path) {
+    if (!settings || !path) {
+        return NULL;
+    }
+
+    for (guint i = 0; i < settings->dictionaries->len; i++) {
+        DictConfig *cfg = g_ptr_array_index(settings->dictionaries, i);
+        if (g_strcmp0(cfg->path, path) == 0) {
+            return cfg;
+        }
+    }
+
+    return NULL;
+}
+
+void settings_upsert_dictionary(AppSettings *settings, const char *name, const char *path, const char *source) {
+    if (!settings || !path || !*path) {
+        return;
+    }
+
+    DictConfig *cfg = settings_find_dictionary_by_path(settings, path);
+    if (cfg) {
+        if (name && *name) {
+            g_free(cfg->name);
+            cfg->name = g_strdup(name);
+        }
+        if (source && *source && g_strcmp0(cfg->source, "manual") != 0) {
+            g_free(cfg->source);
+            cfg->source = g_strdup(source);
+        }
+        return;
+    }
+
+    g_ptr_array_add(settings->dictionaries, dict_config_new(name ? name : path, path, source));
+}
+
+void settings_prune_directory_dictionaries(AppSettings *settings, GHashTable *loaded_paths) {
+    if (!settings) {
+        return;
+    }
+
+    for (gint i = (gint)settings->dictionaries->len - 1; i >= 0; i--) {
+        DictConfig *cfg = g_ptr_array_index(settings->dictionaries, (guint)i);
+        if (g_strcmp0(cfg->source, "directory") != 0) {
+            continue;
+        }
+        if (loaded_paths && g_hash_table_contains(loaded_paths, cfg->path)) {
+            continue;
+        }
+
+        settings_strip_dict_from_groups(settings, cfg->id);
+        g_ptr_array_remove_index(settings->dictionaries, (guint)i);
     }
 }
 
@@ -250,19 +342,14 @@ void settings_remove_directory(AppSettings *settings, const char *path) {
 }
 
 void settings_add_dictionary(AppSettings *settings, const char *name, const char *path) {
-    // Check if already exists
-    for (guint i = 0; i < settings->dictionaries->len; i++) {
-        DictConfig *cfg = g_ptr_array_index(settings->dictionaries, i);
-        if (strcmp(cfg->path, path) == 0)
-            return;
-    }
-    g_ptr_array_add(settings->dictionaries, dict_config_new(name, path, "manual"));
+    settings_upsert_dictionary(settings, name, path, "manual");
 }
 
 void settings_remove_dictionary(AppSettings *settings, const char *id) {
     for (guint i = 0; i < settings->dictionaries->len; i++) {
         DictConfig *cfg = g_ptr_array_index(settings->dictionaries, i);
         if (strcmp(cfg->id, id) == 0) {
+            settings_strip_dict_from_groups(settings, cfg->id);
             // g_ptr_array_remove_index calls dict_config_free via the array's destroy func
             g_ptr_array_remove_index(settings->dictionaries, i);
             return;

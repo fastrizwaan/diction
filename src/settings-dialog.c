@@ -15,6 +15,7 @@ typedef struct {
     GtkWidget *move_down_btn;
     GtkWidget *create_group_btn;
     char *selected_dict_id;
+    GHashTable *group_selection_ids;
     AdwStyleManager *style_manager; // for live theme apply
     void (*reload_callback)(void *); // called on rescan
     void *reload_user_data;
@@ -169,6 +170,7 @@ static gboolean on_remove_dictionary_idle(gpointer user_data) {
 static void on_remove_dictionary_clicked(GtkButton *btn, DictRemoveData *d) {
     (void)btn;
     settings_remove_dictionary(d->data->settings, d->id);
+    g_hash_table_remove(d->data->group_selection_ids, d->id);
     g_free(d->data->selected_dict_id);
     d->data->selected_dict_id = NULL;
     g_idle_add(on_remove_dictionary_idle, d->data);
@@ -203,9 +205,26 @@ static void on_dict_row_selected(GtkListBox *list, GtkListBoxRow *row, SettingsD
     refresh_move_buttons(data);
 }
 
+static void on_group_select_toggled(GtkCheckButton *btn, gpointer user_data) {
+    SettingsDialogData *data = user_data;
+    const char *dict_id = g_object_get_data(G_OBJECT(btn), "dict-id");
+    if (!dict_id) {
+        return;
+    }
+
+    if (gtk_check_button_get_active(btn)) {
+        g_hash_table_add(data->group_selection_ids, g_strdup(dict_id));
+    } else {
+        g_hash_table_remove(data->group_selection_ids, dict_id);
+    }
+
+    refresh_move_buttons(data);
+}
+
 static void refresh_move_buttons(SettingsDialogData *data) {
     int has_selection = (data->selected_dict_id != NULL);
     int can_move_up = 0, can_move_down = 0;
+    int has_group_selection = data->group_selection_ids && g_hash_table_size(data->group_selection_ids) > 0;
     
     if (has_selection) {
         for (guint i = 0; i < data->settings->dictionaries->len; i++) {
@@ -220,7 +239,7 @@ static void refresh_move_buttons(SettingsDialogData *data) {
     
     gtk_widget_set_sensitive(data->move_up_btn, has_selection && can_move_up);
     gtk_widget_set_sensitive(data->move_down_btn, has_selection && can_move_down);
-    gtk_widget_set_sensitive(data->create_group_btn, has_selection);
+    gtk_widget_set_sensitive(data->create_group_btn, has_group_selection);
 }
 
 // Group callbacks
@@ -253,17 +272,25 @@ static void on_create_group_response(AdwAlertDialog *dialog, const char *respons
         const char *name = gtk_editable_get_text(GTK_EDITABLE(entry));
         if (name && strlen(name) > 0) {
             GPtrArray *ids = g_ptr_array_new();
-            g_ptr_array_add(ids, (gpointer)data->selected_dict_id);
+            GHashTableIter iter;
+            gpointer key = NULL;
+            g_hash_table_iter_init(&iter, data->group_selection_ids);
+            while (g_hash_table_iter_next(&iter, &key, NULL)) {
+                g_ptr_array_add(ids, key);
+            }
             settings_create_group(data->settings, name, ids);
             g_ptr_array_free(ids, FALSE);
+            g_hash_table_remove_all(data->group_selection_ids);
             update_group_list(data);
+            update_dict_list(data);
+            refresh_move_buttons(data);
         }
     }
 }
 
 static void on_create_group_from_selected(GtkButton *btn, SettingsDialogData *data) {
     (void)btn;
-    if (!data->selected_dict_id) return;
+    if (!data->group_selection_ids || g_hash_table_size(data->group_selection_ids) == 0) return;
 
     AdwDialog *dialog = adw_alert_dialog_new("Create Group", NULL);
     adw_alert_dialog_set_body(ADW_ALERT_DIALOG(dialog), "Enter a name for the new dictionary group:");
@@ -330,6 +357,16 @@ static void update_dict_list(SettingsDialogData *data) {
         gtk_list_box_remove(data->dict_list, child);
     }
 
+    if (data->settings->dictionaries->len == 0) {
+        GtkWidget *row = adw_action_row_new();
+        adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row), "No dictionaries available");
+        adw_action_row_set_subtitle(ADW_ACTION_ROW(row), "Add a dictionary file or rescan configured directories.");
+        gtk_widget_set_sensitive(row, FALSE);
+        gtk_list_box_append(data->dict_list, GTK_WIDGET(row));
+        refresh_move_buttons(data);
+        return;
+    }
+
     for (guint i = 0; i < data->settings->dictionaries->len; i++) {
         DictConfig *cfg = g_ptr_array_index(data->settings->dictionaries, i);
 
@@ -337,6 +374,15 @@ static void update_dict_list(SettingsDialogData *data) {
         adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row), cfg->name);
         adw_action_row_set_subtitle(ADW_ACTION_ROW(row), cfg->path);
         g_object_set_data_full(G_OBJECT(row), "dict-id", g_strdup(cfg->id), g_free);
+
+        GtkWidget *group_check = gtk_check_button_new();
+        gtk_widget_set_valign(group_check, GTK_ALIGN_CENTER);
+        gtk_widget_set_tooltip_text(group_check, "Select dictionary for group creation");
+        gtk_check_button_set_active(GTK_CHECK_BUTTON(group_check),
+            g_hash_table_contains(data->group_selection_ids, cfg->id));
+        g_object_set_data_full(G_OBJECT(group_check), "dict-id", g_strdup(cfg->id), g_free);
+        g_signal_connect(group_check, "toggled", G_CALLBACK(on_group_select_toggled), data);
+        adw_action_row_add_prefix(ADW_ACTION_ROW(row), group_check);
 
         GtkWidget *switch_widget = gtk_switch_new();
         gtk_switch_set_active(GTK_SWITCH(switch_widget), cfg->enabled);
@@ -373,6 +419,15 @@ static void update_group_list(SettingsDialogData *data) {
         gtk_list_box_remove(data->group_list, child);
     }
 
+    if (data->settings->dictionary_groups->len == 0) {
+        GtkWidget *row = adw_action_row_new();
+        adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row), "No custom groups");
+        adw_action_row_set_subtitle(ADW_ACTION_ROW(row), "Tick one or more dictionaries above, then create a group.");
+        gtk_widget_set_sensitive(row, FALSE);
+        gtk_list_box_append(data->group_list, GTK_WIDGET(row));
+        return;
+    }
+
     for (guint i = 0; i < data->settings->dictionary_groups->len; i++) {
         DictGroup *grp = g_ptr_array_index(data->settings->dictionary_groups, i);
 
@@ -401,7 +456,13 @@ static void update_group_list(SettingsDialogData *data) {
 
 static void on_dialog_closed(SettingsDialogData *data) {
     settings_save(data->settings);
+    if (data->reload_callback) {
+        data->reload_callback(data->reload_user_data);
+    }
     g_free(data->selected_dict_id);
+    if (data->group_selection_ids) {
+        g_hash_table_unref(data->group_selection_ids);
+    }
     g_free(data);
 }
 
@@ -430,6 +491,7 @@ GtkWidget* settings_dialog_new(GtkWindow *parent, AppSettings *settings,
                                void (*reload_callback)(void *), void *reload_user_data) {
     SettingsDialogData *data = g_new0(SettingsDialogData, 1);
     data->settings = settings;
+    data->group_selection_ids = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     data->style_manager = style_manager;
     data->reload_callback = reload_callback;
     data->reload_user_data = reload_user_data;

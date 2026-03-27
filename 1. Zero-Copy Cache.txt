@@ -1,0 +1,6 @@
+1. Zero-Copy Cache Format
+Streaming Headwords: During the initial parse of MDX Key Blocks, headwords are now written directly to the cache file. This avoids thousands of small heap allocations (strdup) and memory fragmentation.
+Appended Index: The TreeEntry array (containing file offsets and lengths) is now appended to the end of the cache file. This allows for near-instant loading from cache using 
+mmap
+ without needing to scan the file for separators.
+Definition Mapping: Definitions are now extracted from a single contiguous decompressed record buffer and written sequentially to the cache file, followed by updating their actual file positions in the index.

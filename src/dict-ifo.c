@@ -1,21 +1,15 @@
-/* dict-ifo.c — StarDict .ifo + .idx + .dict(.dz) parser
+/* dict-ifo.c — StarDict .ifo + .idx(.gz) + .dict(.dz) parser
  *
- * StarDict uses three files:
- *   .ifo  — plain-text metadata (wordcount, idxfilesize, sametypesequence)
- *   .idx  — binary index: for each entry: null-terminated headword +
- *            4-byte BE offset + 4-byte BE size pointing into .dict
- *   .dict — concatenated definitions (may be .dict.dz = dictzip)
- *
- * We parse .ifo for metadata, then .idx to build the SplayTree,
- * and mmap .dict data.
- *
- * Reference: goldendict-ng/src/dict/stardict.cc
+ * This keeps article bytes structured in the on-disk cache instead of
+ * flattening entries into line-based text. That preserves multiline content,
+ * typed resources, and HTML articles more faithfully.
  */
 
 #include "dict-mmap.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <zlib.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -24,8 +18,8 @@
 #include <utime.h>
 #include <fcntl.h>
 #include <glib.h>
+#include <ctype.h>
 
-/* Cache helpers */
 static const char* get_cache_base_dir(void) {
     static const char *cache_dir = NULL;
     if (!cache_dir) cache_dir = g_get_user_cache_dir();
@@ -45,13 +39,6 @@ static char* get_cached_dict_path(const char *original_path) {
     return path;
 }
 
-static gboolean is_cache_valid(const char *cache_path, const char *original_path) {
-    struct stat cache_st, orig_st;
-    if (stat(cache_path, &cache_st) != 0 || stat(original_path, &orig_st) != 0)
-        return FALSE;
-    return cache_st.st_mtime >= orig_st.st_mtime;
-}
-
 static gboolean ensure_cache_directory(void) {
     char *cache_dir = get_cache_dir_path();
     int ret = g_mkdir_with_parents(cache_dir, 0755);
@@ -59,18 +46,314 @@ static gboolean ensure_cache_directory(void) {
     return ret == 0;
 }
 
+static gboolean is_cache_valid_for_sources(const char *cache_path, const char **sources, size_t source_count) {
+    struct stat cache_st;
+    if (stat(cache_path, &cache_st) != 0) {
+        return FALSE;
+    }
+
+    for (size_t i = 0; i < source_count; i++) {
+        struct stat src_st;
+        if (stat(sources[i], &src_st) != 0 || cache_st.st_mtime < src_st.st_mtime) {
+            return FALSE;
+        }
+    }
+
+    return TRUE;
+}
+
+static void sync_cache_mtime(const char *cache_path, const char **sources, size_t source_count) {
+    time_t latest = 0;
+
+    for (size_t i = 0; i < source_count; i++) {
+        struct stat src_st;
+        if (stat(sources[i], &src_st) == 0 && src_st.st_mtime > latest) {
+            latest = src_st.st_mtime;
+        }
+    }
+
+    if (latest > 0) {
+        struct utimbuf times;
+        times.actime = latest;
+        times.modtime = latest;
+        utime(cache_path, &times);
+    }
+}
+
 static uint32_t read_u32be(const unsigned char *p) {
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
            ((uint32_t)p[2] << 8) | p[3];
 }
 
-/* Parse a .ifo file and extract wordcount and idxfilesize */
+static gboolean ends_with_ci(const char *s, const char *suffix) {
+    size_t sl = strlen(s), xl = strlen(suffix);
+    if (sl < xl) return FALSE;
+    return strcasecmp(s + sl - xl, suffix) == 0;
+}
+
+static char *find_existing_sibling(const char *base_path, const char * const *suffixes, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        char *candidate = g_strconcat(base_path, suffixes[i], NULL);
+        if (g_file_test(candidate, G_FILE_TEST_EXISTS)) {
+            return candidate;
+        }
+        g_free(candidate);
+    }
+
+    return NULL;
+}
+
+static char *find_stardict_resource_dir(const char *ifo_path) {
+    size_t base_len = strlen(ifo_path) - 4;
+    char *base = g_strndup(ifo_path, base_len);
+    const char *suffixes[] = { ".files", ".dict.files", ".ifo.files" };
+    char *result = find_existing_sibling(base, suffixes, G_N_ELEMENTS(suffixes));
+    g_free(base);
+    return result;
+}
+
+static gboolean load_file_bytes_plain(const char *path, unsigned char **data_out, size_t *size_out) {
+    gboolean ok = FALSE;
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        return FALSE;
+    }
+
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return FALSE;
+    }
+
+    long size = ftell(f);
+    if (size < 0 || fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return FALSE;
+    }
+
+    unsigned char *data = g_malloc(size > 0 ? (size_t)size : 1);
+    if (size > 0 && fread(data, 1, (size_t)size, f) != (size_t)size) {
+        g_free(data);
+        fclose(f);
+        return FALSE;
+    }
+
+    *data_out = data;
+    *size_out = (size_t)size;
+    ok = TRUE;
+    fclose(f);
+    return ok;
+}
+
+static gboolean load_file_bytes_gzip(const char *path, unsigned char **data_out, size_t *size_out) {
+    gzFile gz = gzopen(path, "rb");
+    if (!gz) {
+        return FALSE;
+    }
+
+    size_t cap = 1024 * 1024;
+    size_t len = 0;
+    unsigned char *data = g_malloc(cap);
+    unsigned char buf[65536];
+
+    for (;;) {
+        int n = gzread(gz, buf, sizeof(buf));
+        if (n < 0) {
+            g_free(data);
+            gzclose(gz);
+            return FALSE;
+        }
+        if (n == 0) {
+            break;
+        }
+
+        if (len + (size_t)n > cap) {
+            while (len + (size_t)n > cap) {
+                cap *= 2;
+            }
+            data = g_realloc(data, cap);
+        }
+
+        memcpy(data + len, buf, (size_t)n);
+        len += (size_t)n;
+    }
+
+    gzclose(gz);
+    *data_out = data;
+    *size_out = len;
+    return TRUE;
+}
+
+static gboolean load_file_bytes_auto(const char *path, unsigned char **data_out, size_t *size_out) {
+    if (ends_with_ci(path, ".gz") || ends_with_ci(path, ".dz")) {
+        return load_file_bytes_gzip(path, data_out, size_out);
+    }
+    return load_file_bytes_plain(path, data_out, size_out);
+}
+
+static void append_html_escaped_text(GString *out, const char *data, size_t size) {
+    for (size_t i = 0; i < size; i++) {
+        switch (data[i]) {
+            case '&':
+                g_string_append(out, "&amp;");
+                break;
+            case '<':
+                g_string_append(out, "&lt;");
+                break;
+            case '>':
+                g_string_append(out, "&gt;");
+                break;
+            case '"':
+                g_string_append(out, "&quot;");
+                break;
+            case '\n':
+                g_string_append(out, "<br/>");
+                break;
+            case '\r':
+                break;
+            default:
+                g_string_append_c(out, data[i]);
+                break;
+        }
+    }
+}
+
+static void append_stardict_resource_html(GString *article, char type, const char *data, size_t size) {
+    while (size > 0 && data[size - 1] == '\0') {
+        size--;
+    }
+
+    switch (type) {
+        case 'h':
+            g_string_append_len(article, data, size);
+            break;
+        case 'm':
+        case 'l':
+        case 'g':
+        case 't':
+        case 'y':
+            append_html_escaped_text(article, data, size);
+            break;
+        case 'x':
+            g_string_append(article, "<pre class=\"sdct_x\">");
+            append_html_escaped_text(article, data, size);
+            g_string_append(article, "</pre>");
+            break;
+        case 'w':
+            append_html_escaped_text(article, data, size);
+            break;
+        default:
+            append_html_escaped_text(article, data, size);
+            break;
+    }
+}
+
+static gboolean append_stardict_article(GString *article,
+                                        const unsigned char *data,
+                                        size_t size,
+                                        const char *sametypesequence) {
+    const unsigned char *ptr = data;
+    size_t remaining = size;
+
+    if (sametypesequence && *sametypesequence) {
+        size_t seq_len = strlen(sametypesequence);
+
+        for (size_t i = 0; i < seq_len && remaining > 0; i++) {
+            char type = sametypesequence[i];
+            gboolean last = (i + 1 == seq_len);
+
+            if (islower((unsigned char)type)) {
+                size_t entry_size = 0;
+                if (last) {
+                    entry_size = remaining;
+                } else {
+                    while (entry_size < remaining && ptr[entry_size] != '\0') {
+                        entry_size++;
+                    }
+                    if (entry_size == remaining) {
+                        return FALSE;
+                    }
+                }
+
+                append_stardict_resource_html(article, type, (const char *)ptr, entry_size);
+                ptr += entry_size;
+                remaining -= entry_size;
+
+                if (!last && remaining > 0) {
+                    ptr++;
+                    remaining--;
+                }
+            } else if (isupper((unsigned char)type)) {
+                size_t entry_size = 0;
+                if (last) {
+                    entry_size = remaining;
+                } else {
+                    if (remaining < 4) {
+                        return FALSE;
+                    }
+                    entry_size = read_u32be(ptr);
+                    ptr += 4;
+                    remaining -= 4;
+                    if (entry_size > remaining) {
+                        return FALSE;
+                    }
+                }
+
+                append_stardict_resource_html(article, type, (const char *)ptr, entry_size);
+                ptr += entry_size;
+                remaining -= entry_size;
+            } else {
+                return FALSE;
+            }
+        }
+
+        return TRUE;
+    }
+
+    while (remaining > 0) {
+        char type = (char)*ptr++;
+        remaining--;
+
+        if (islower((unsigned char)type)) {
+            size_t entry_size = 0;
+            while (entry_size < remaining && ptr[entry_size] != '\0') {
+                entry_size++;
+            }
+            if (entry_size == remaining) {
+                return FALSE;
+            }
+
+            append_stardict_resource_html(article, type, (const char *)ptr, entry_size);
+            ptr += entry_size + 1;
+            remaining -= entry_size + 1;
+        } else if (isupper((unsigned char)type)) {
+            if (remaining < 4) {
+                return FALSE;
+            }
+
+            uint32_t entry_size = read_u32be(ptr);
+            ptr += 4;
+            remaining -= 4;
+            if (entry_size > remaining) {
+                return FALSE;
+            }
+
+            append_stardict_resource_html(article, type, (const char *)ptr, entry_size);
+            ptr += entry_size;
+            remaining -= entry_size;
+        } else {
+            return FALSE;
+        }
+    }
+
+    return TRUE;
+}
+
 static int parse_ifo_metadata(const char *ifo_path,
-                               uint32_t *wordcount,
-                               uint32_t *idxfilesize,
-                               char *sametypesequence,
-                               size_t sts_len,
-                               char **bookname) {
+                              uint32_t *wordcount,
+                              uint32_t *idxfilesize,
+                              char *sametypesequence,
+                              size_t sts_len,
+                              char **bookname) {
     FILE *f = fopen(ifo_path, "r");
     if (!f) return -1;
 
@@ -80,313 +363,253 @@ static int parse_ifo_metadata(const char *ifo_path,
     sametypesequence[0] = '\0';
     if (bookname) *bookname = NULL;
 
-    /* First line should be "StarDict's dict ifo file" */
-    if (!fgets(line, sizeof(line), f)) { fclose(f); return -1; }
+    if (!fgets(line, sizeof(line), f)) {
+        fclose(f);
+        return -1;
+    }
     if (strncmp(line, "StarDict's dict ifo file", 24) != 0) {
         fclose(f);
         return -1;
     }
 
     while (fgets(line, sizeof(line), f)) {
-        /* Remove trailing newline */
         char *nl = strchr(line, '\n');
         if (nl) *nl = '\0';
         nl = strchr(line, '\r');
         if (nl) *nl = '\0';
 
         if (strncmp(line, "wordcount=", 10) == 0) {
-            *wordcount = (uint32_t)atol(line + 10);
+            *wordcount = (uint32_t)g_ascii_strtoull(line + 10, NULL, 10);
         } else if (strncmp(line, "idxfilesize=", 12) == 0) {
-            *idxfilesize = (uint32_t)atol(line + 12);
+            *idxfilesize = (uint32_t)g_ascii_strtoull(line + 12, NULL, 10);
         } else if (strncmp(line, "sametypesequence=", 17) == 0) {
-            strncpy(sametypesequence, line + 17, sts_len - 1);
-            sametypesequence[sts_len - 1] = '\0';
+            g_strlcpy(sametypesequence, line + 17, sts_len);
         } else if (strncmp(line, "bookname=", 9) == 0 && bookname) {
-            *bookname = strdup(line + 9);
+            *bookname = g_strdup(line + 9);
         }
     }
+
     fclose(f);
     return 0;
 }
 
+static gboolean build_stardict_cache(FILE *cache_file,
+                                     const unsigned char *idx_data,
+                                     size_t idx_size,
+                                     const unsigned char *dict_raw,
+                                     size_t dict_raw_len,
+                                     const char *sametypesequence,
+                                     TreeEntry **entries_out,
+                                     size_t *entry_count_out) {
+    const unsigned char *ip = idx_data;
+    const unsigned char *ie = idx_data + idx_size;
+    size_t cap = 4096;
+    size_t count = 0;
+    TreeEntry *entries = g_new0(TreeEntry, cap);
+
+    while (ip < ie) {
+        const unsigned char *hw_start = ip;
+        while (ip < ie && *ip != '\0') ip++;
+        if (ip >= ie) {
+            break;
+        }
+
+        size_t hw_len = ip - hw_start;
+        ip++;
+
+        if (ip + 8 > ie) {
+            break;
+        }
+
+        uint32_t def_offset = read_u32be(ip);
+        uint32_t def_size = read_u32be(ip + 4);
+        ip += 8;
+
+        if (def_offset > dict_raw_len || def_size > dict_raw_len - def_offset) {
+            continue;
+        }
+
+        GString *article = g_string_new("");
+        if (!append_stardict_article(article, dict_raw + def_offset, def_size, sametypesequence)) {
+            g_string_assign(article, "");
+            append_html_escaped_text(article, (const char *)dict_raw + def_offset, def_size);
+        }
+
+        long hw_off = ftell(cache_file);
+        fwrite(hw_start, 1, hw_len, cache_file);
+        fwrite("\n", 1, 1, cache_file);
+
+        long def_off = ftell(cache_file);
+        fwrite(article->str, 1, article->len, cache_file);
+        fwrite("\n", 1, 1, cache_file);
+
+        if (count == cap) {
+            cap *= 2;
+            entries = g_realloc(entries, cap * sizeof(TreeEntry));
+        }
+
+        entries[count].h_off = hw_off;
+        entries[count].h_len = hw_len;
+        entries[count].d_off = def_off;
+        entries[count].d_len = article->len;
+        count++;
+
+        g_string_free(article, TRUE);
+    }
+
+    *entries_out = entries;
+    *entry_count_out = count;
+    return TRUE;
+}
+
+static DictMmap *open_cached_stardict(const char *cache_path, char *bookname, char *resource_dir) {
+    int fd = open(cache_path, O_RDONLY);
+    if (fd < 0) {
+        g_free(bookname);
+        g_free(resource_dir);
+        return NULL;
+    }
+
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size < 16) {
+        close(fd);
+        g_free(bookname);
+        g_free(resource_dir);
+        return NULL;
+    }
+
+    const char *data = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (data == MAP_FAILED) {
+        close(fd);
+        g_free(bookname);
+        g_free(resource_dir);
+        return NULL;
+    }
+
+    DictMmap *dict = calloc(1, sizeof(DictMmap));
+    dict->fd = fd;
+    dict->data = data;
+    dict->size = st.st_size;
+    dict->name = bookname;
+    dict->resource_dir = resource_dir;
+    dict->index = splay_tree_new(dict->data, dict->size);
+
+    uint64_t count = *(const uint64_t *)dict->data;
+    size_t index_off = (size_t)(dict->size - count * sizeof(TreeEntry));
+    if (index_off >= 8) {
+        TreeEntry *tree_entries = (TreeEntry *)(dict->data + index_off);
+        insert_balanced(dict->index, tree_entries, 0, (int)count - 1);
+    }
+
+    return dict;
+}
+
 DictMmap* parse_stardict(const char *ifo_path) {
-    printf("[IFO] Loading StarDict: %s\n", ifo_path);
+    fprintf(stderr, "[IFO] Loading StarDict: %s\n", ifo_path);
 
     uint32_t wordcount = 0, idxfilesize = 0;
-    char sametypesequence[32] = {0};
+    char sametypesequence[64] = {0};
     char *bookname = NULL;
 
     if (parse_ifo_metadata(ifo_path, &wordcount, &idxfilesize,
                            sametypesequence, sizeof(sametypesequence), &bookname) != 0) {
         fprintf(stderr, "[IFO] Failed to parse .ifo: %s\n", ifo_path);
-        if (bookname) free(bookname);
+        g_free(bookname);
         return NULL;
     }
 
-    printf("[IFO] wordcount=%u, idxfilesize=%u, sametypesequence='%s'\n",
-           wordcount, idxfilesize, sametypesequence);
+    size_t base_len = strlen(ifo_path) - 4;
+    char *base = g_strndup(ifo_path, base_len);
+    const char *idx_suffixes[] = { ".idx", ".idx.gz", ".idx.dz", ".IDX", ".IDX.GZ", ".IDX.DZ" };
+    const char *dict_suffixes[] = { ".dict.dz", ".dict", ".DICT.DZ", ".DICT" };
+    char *idx_path = find_existing_sibling(base, idx_suffixes, G_N_ELEMENTS(idx_suffixes));
+    char *dict_path = find_existing_sibling(base, dict_suffixes, G_N_ELEMENTS(dict_suffixes));
+    char *resource_dir = find_stardict_resource_dir(ifo_path);
+    g_free(base);
 
-    /* Derive sibling file paths from .ifo path */
-    size_t base_len = strlen(ifo_path) - 4; /* strip ".ifo" */
-    char *idx_path = malloc(base_len + 8);
-    char *dict_path = malloc(base_len + 10);
-
-    memcpy(idx_path, ifo_path, base_len);
-    memcpy(dict_path, ifo_path, base_len);
-
-    /* Try .idx.gz first, then .idx */
-    strcpy(idx_path + base_len, ".idx");
-    struct stat st;
-    if (stat(idx_path, &st) != 0) {
-        /* No plain .idx, try .idx.gz — but for simplicity, just fail */
-        fprintf(stderr, "[IFO] No .idx file found\n");
-        free(idx_path); free(dict_path);
+    if (!idx_path || !dict_path) {
+        fprintf(stderr, "[IFO] Missing companion files for %s\n", ifo_path);
+        g_free(bookname);
+        g_free(idx_path);
+        g_free(dict_path);
+        g_free(resource_dir);
         return NULL;
     }
 
-    /* Try .dict.dz first, then .dict */
-    strcpy(dict_path + base_len, ".dict.dz");
-    int dict_is_dz = 1;
-    if (stat(dict_path, &st) != 0) {
-        strcpy(dict_path + base_len, ".dict");
-        dict_is_dz = 0;
-        if (stat(dict_path, &st) != 0) {
-            fprintf(stderr, "[IFO] No .dict or .dict.dz found\n");
-            free(idx_path); free(dict_path);
-            return NULL;
-        }
-    }
-
-    printf("[IFO] idx: %s, dict: %s (dz=%d)\n", idx_path, dict_path, dict_is_dz);
-
-    // Ensure cache directory exists
     ensure_cache_directory();
-
-    // Get cache path for this dictionary (based on .ifo path)
     char *cache_path = get_cached_dict_path(ifo_path);
-    gboolean cache_exists = (access(cache_path, F_OK) == 0);
-    gboolean cache_valid = cache_exists && is_cache_valid(cache_path, ifo_path);
+    const char *sources[] = { ifo_path, idx_path, dict_path };
 
-    int cache_fd = -1;
-    const char *dict_data = NULL;
-    size_t dict_size = 0;
-
-    if (cache_valid) {
-        // Use cached version directly
-        printf("[IFO] Loading from cache: %s\n", cache_path);
-        cache_fd = open(cache_path, O_RDONLY);
-        if (cache_fd < 0) {
-            g_free(cache_path);
-            free(idx_path); free(dict_path);
-            return NULL;
-        }
-
-        struct stat st;
-        if (fstat(cache_fd, &st) < 0 || st.st_size == 0) {
-            close(cache_fd);
-            g_free(cache_path);
-            free(idx_path); free(dict_path);
-            return NULL;
-        }
-        dict_size = st.st_size;
-        dict_data = mmap(NULL, dict_size, PROT_READ, MAP_PRIVATE, cache_fd, 0);
-        if (dict_data == MAP_FAILED) {
-            close(cache_fd);
-            g_free(cache_path);
-            free(idx_path); free(dict_path);
-            return NULL;
-        }
-    } else {
-        // Need to extract and convert
-        printf("[IFO] Building cache from source files\n");
-
-        // Open cache file for writing
-        FILE *cache_file = fopen(cache_path, "wb");
-        if (!cache_file) {
-            g_free(cache_path);
-            free(idx_path); free(dict_path);
-            return NULL;
-        }
-
-        gzFile gz = gzopen(dict_path, "rb");
-        if (!gz) {
-            fclose(cache_file);
-            g_free(cache_path);
-            free(idx_path); free(dict_path);
-            return NULL;
-        }
-
-        // Read entire dict data into heap
-        size_t dict_data_cap = 1024 * 1024;
-        unsigned char *dict_raw = malloc(dict_data_cap);
-        size_t dict_raw_len = 0;
-        unsigned char buf[65536];
-        int n;
-        while ((n = gzread(gz, buf, sizeof(buf))) > 0) {
-            if (dict_raw_len + n > dict_data_cap) {
-                dict_data_cap *= 2;
-                dict_raw = realloc(dict_raw, dict_data_cap);
-            }
-            memcpy(dict_raw + dict_raw_len, buf, n);
-            dict_raw_len += n;
-        }
-        gzclose(gz);
-
-        // Read .idx file
-        FILE *idx_file = fopen(idx_path, "rb");
-        if (!idx_file) {
-            free(dict_raw);
-            fclose(cache_file);
-            g_free(cache_path);
-            free(idx_path); free(dict_path);
-            return NULL;
-        }
-
-        fseek(idx_file, 0, SEEK_END);
-        long idx_size = ftell(idx_file);
-        fseek(idx_file, 0, SEEK_SET);
-
-        unsigned char *idx_data = malloc(idx_size);
-        if (fread(idx_data, 1, idx_size, idx_file) != (size_t)idx_size) {
-            free(idx_data);
-            free(dict_raw);
-            fclose(cache_file);
-            g_free(cache_path);
-            free(idx_path); free(dict_path);
-            return NULL;
-        }
-        fclose(idx_file);
-
-        // Write interleaved "headword\ndef\n" into cache file
-        const unsigned char *ip = idx_data;
-        const unsigned char *ie = idx_data + idx_size;
-
-        while (ip < ie) {
-            const unsigned char *hw_start = ip;
-            while (ip < ie && *ip != '\0') ip++;
-            size_t hw_len = ip - hw_start;
-            if (ip >= ie) break;
-            ip++; /* skip null */
-
-            if (ip + 8 > ie) break;
-            uint32_t def_offset = read_u32be(ip); ip += 4;
-            uint32_t def_size = read_u32be(ip); ip += 4;
-
-            /* Write headword line */
-            fwrite(hw_start, 1, hw_len, cache_file);
-            fwrite("\n", 1, 1, cache_file);
-
-            /* Write definition */
-            if (def_offset + def_size <= dict_raw_len) {
-                fwrite(dict_raw + def_offset, 1, def_size, cache_file);
-            }
-            fwrite("\n", 1, 1, cache_file);
-        }
-
-        free(dict_raw);
-        free(idx_data);
-        fflush(cache_file);
-        fclose(cache_file);
-
-        // Update cache file mtime to match source
-        struct stat src_st;
-        if (stat(ifo_path, &src_st) == 0) {
-            struct utimbuf times;
-            times.actime = src_st.st_mtime;
-            times.modtime = src_st.st_mtime;
-            utime(cache_path, &times);
-        }
-
-        // Now open the cached file
-        cache_fd = open(cache_path, O_RDONLY);
-        if (cache_fd < 0) {
-            g_free(cache_path);
-            free(idx_path); free(dict_path);
-            return NULL;
-        }
-
-        struct stat st;
-        if (fstat(cache_fd, &st) < 0 || st.st_size == 0) {
-            close(cache_fd);
-            g_free(cache_path);
-            free(idx_path); free(dict_path);
-            return NULL;
-        }
-        dict_size = st.st_size;
-        dict_data = mmap(NULL, dict_size, PROT_READ, MAP_PRIVATE, cache_fd, 0);
-        if (dict_data == MAP_FAILED) {
-            close(cache_fd);
-            g_free(cache_path);
-            free(idx_path); free(dict_path);
-            return NULL;
-        }
+    if (is_cache_valid_for_sources(cache_path, sources, G_N_ELEMENTS(sources))) {
+        DictMmap *cached = open_cached_stardict(cache_path, bookname, resource_dir);
+        g_free(cache_path);
+        g_free(idx_path);
+        g_free(dict_path);
+        return cached;
     }
 
+    unsigned char *dict_raw = NULL;
+    size_t dict_raw_len = 0;
+    unsigned char *idx_data = NULL;
+    size_t idx_size = 0;
+
+    if (!load_file_bytes_auto(dict_path, &dict_raw, &dict_raw_len) ||
+        !load_file_bytes_auto(idx_path, &idx_data, &idx_size)) {
+        fprintf(stderr, "[IFO] Failed reading .idx/.dict payloads\n");
+        g_free(bookname);
+        g_free(resource_dir);
+        g_free(cache_path);
+        g_free(idx_path);
+        g_free(dict_path);
+        g_free(dict_raw);
+        g_free(idx_data);
+        return NULL;
+    }
+
+    FILE *cache_file = fopen(cache_path, "wb");
+    if (!cache_file) {
+        g_free(bookname);
+        g_free(resource_dir);
+        g_free(cache_path);
+        g_free(idx_path);
+        g_free(dict_path);
+        g_free(dict_raw);
+        g_free(idx_data);
+        return NULL;
+    }
+
+    uint64_t zero_count = 0;
+    fwrite(&zero_count, 8, 1, cache_file);
+
+    TreeEntry *entries = NULL;
+    size_t entry_count = 0;
+    gboolean built = build_stardict_cache(cache_file, idx_data, idx_size, dict_raw, dict_raw_len,
+                                          sametypesequence, &entries, &entry_count);
+
+    if (built) {
+        fwrite(entries, sizeof(TreeEntry), entry_count, cache_file);
+        fseek(cache_file, 0, SEEK_SET);
+        uint64_t final_count = (uint64_t)entry_count;
+        fwrite(&final_count, 8, 1, cache_file);
+    }
+
+    fclose(cache_file);
+    sync_cache_mtime(cache_path, sources, G_N_ELEMENTS(sources));
+
+    g_free(entries);
+    g_free(dict_raw);
+    g_free(idx_data);
+    g_free(idx_path);
+    g_free(dict_path);
+
+    if (!built) {
+        g_free(bookname);
+        g_free(resource_dir);
+        g_free(cache_path);
+        return NULL;
+    }
+
+    DictMmap *dict = open_cached_stardict(cache_path, bookname, resource_dir);
     g_free(cache_path);
-
-    /* Build DictMmap */
-    DictMmap *dict = calloc(1, sizeof(DictMmap));
-    dict->fd = cache_fd;
-    dict->tmp_file = NULL;
-    dict->data = dict_data;
-    dict->size = dict_size;
-    dict->name = bookname; // Ownership transferred
-    dict->index = splay_tree_new(dict->data, dict->size);
-
-    /* Read .idx file and parse entries for indexing */
-    FILE *idx_file = fopen(idx_path, "rb");
-    if (!idx_file) {
-        fprintf(stderr, "[IFO] Failed to open .idx: %s\n", idx_path);
-        dict_mmap_close(dict);
-        free(idx_path); free(dict_path);
-        return NULL;
-    }
-
-    /* Read entire .idx into memory (it's typically small) */
-    fseek(idx_file, 0, SEEK_END);
-    long idx_size = ftell(idx_file);
-    fseek(idx_file, 0, SEEK_SET);
-
-    unsigned char *idx_data = malloc(idx_size);
-    if (fread(idx_data, 1, idx_size, idx_file) != (size_t)idx_size) {
-        free(idx_data);
-        fclose(idx_file);
-        dict_mmap_close(dict);
-        free(idx_path); free(dict_path);
-        return NULL;
-    }
-    fclose(idx_file);
-
-    /* Index the cached file into SplayTree */
-    const char *dp = dict->data;
-    const char *de = dp + dict->size;
-    int indexed = 0;
-
-    while (dp < de) {
-        /* Headword line */
-        const char *hw_start = dp;
-        while (dp < de && *dp != '\n') dp++;
-        size_t hw_len = dp - hw_start;
-        if (dp < de) dp++; /* skip \n */
-
-        /* Definition */
-        const char *def_start = dp;
-        while (dp < de && *dp != '\n') dp++;
-        size_t def_len = dp - def_start;
-        if (dp < de) dp++; /* skip \n */
-
-        if (hw_len > 0 && def_len > 0) {
-            splay_tree_insert(dict->index,
-                              hw_start - dict->data, hw_len,
-                              def_start - dict->data, def_len);
-            indexed++;
-        }
-    }
-
-    free(idx_data);
-    free(idx_path);
-    free(dict_path);
-
-    printf("[IFO] Indexed %d StarDict entries (cached)\n", indexed);
     return dict;
 }

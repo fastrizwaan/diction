@@ -24,6 +24,182 @@ static void start_async_dict_loading(void);   // forward declaration
 static void on_search_changed(GtkSearchEntry *entry, gpointer user_data); // forward declaration
 static void on_random_clicked(GtkButton *btn, gpointer user_data);
 
+static gboolean spawn_audio_argv(const char *const *argv, const char *label) {
+    GError *error = NULL;
+    gboolean ok = g_spawn_async(NULL,
+                                (char **)argv,
+                                NULL,
+                                G_SPAWN_SEARCH_PATH |
+                                G_SPAWN_STDOUT_TO_DEV_NULL |
+                                G_SPAWN_STDERR_TO_DEV_NULL,
+                                NULL,
+                                NULL,
+                                NULL,
+                                &error);
+    if (ok) {
+        fprintf(stderr, "[AUDIO PLAY] Playing with '%s'...\n", label);
+        return TRUE;
+    }
+
+    g_clear_error(&error);
+    return FALSE;
+}
+
+static gboolean spawn_audio_shell_command(const char *command, const char *label) {
+    const char *argv[] = { "/bin/sh", "-c", command, NULL };
+    return spawn_audio_argv(argv, label);
+}
+
+static gboolean path_has_extension(const char *path, const char *ext) {
+    const char *dot = strrchr(path, '.');
+    return dot && g_ascii_strcasecmp(dot, ext) == 0;
+}
+
+static gboolean looks_like_url(const char *path) {
+    return path && (g_str_has_prefix(path, "http://") || g_str_has_prefix(path, "https://"));
+}
+
+static gboolean play_audio_via_pcm_pipeline(const char *audio_path) {
+    if (!g_find_program_in_path("ffmpeg")) {
+        return FALSE;
+    }
+
+    char *quoted = g_shell_quote(audio_path);
+    gboolean ok = FALSE;
+
+    if (g_find_program_in_path("pw-play")) {
+        char *cmd = g_strdup_printf(
+            "ffmpeg -nostdin -loglevel error -i %s -f s16le -acodec pcm_s16le -ac 2 -ar 48000 - | "
+            "pw-play --raw --format s16 --channels 2 --rate 48000 -",
+            quoted);
+        ok = spawn_audio_shell_command(cmd, "ffmpeg | pw-play");
+        g_free(cmd);
+    } else if (g_find_program_in_path("aplay")) {
+        char *cmd = g_strdup_printf(
+            "ffmpeg -nostdin -loglevel error -i %s -f s16le -acodec pcm_s16le -ac 2 -ar 48000 - | "
+            "aplay -q -f S16_LE -c 2 -r 48000 -",
+            quoted);
+        ok = spawn_audio_shell_command(cmd, "ffmpeg | aplay");
+        g_free(cmd);
+    }
+
+    g_free(quoted);
+    return ok;
+}
+
+static void play_audio_file(const char *audio_path) {
+    fprintf(stderr, "[AUDIO PLAY] Attempting to play: %s\n", audio_path);
+
+    if (!looks_like_url(audio_path) &&
+        (path_has_extension(audio_path, ".spx") ||
+        path_has_extension(audio_path, ".ogg") ||
+        path_has_extension(audio_path, ".oga"))) {
+        if (play_audio_via_pcm_pipeline(audio_path)) {
+            return;
+        }
+    }
+
+    if (g_find_program_in_path("ffplay")) {
+        const char *argv[] = { "ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", audio_path, NULL };
+        if (spawn_audio_argv(argv, "ffplay")) {
+            return;
+        }
+    }
+
+    if (g_find_program_in_path("mpg123")) {
+        const char *argv[] = { "mpg123", "-q", audio_path, NULL };
+        if (spawn_audio_argv(argv, "mpg123")) {
+            return;
+        }
+    }
+
+    if (g_find_program_in_path("play")) {
+        const char *argv[] = { "play", "-q", audio_path, NULL };
+        if (spawn_audio_argv(argv, "play")) {
+            return;
+        }
+    }
+
+    if (g_find_program_in_path("paplay")) {
+        const char *argv[] = { "paplay", audio_path, NULL };
+        if (spawn_audio_argv(argv, "paplay")) {
+            return;
+        }
+    }
+
+    fprintf(stderr, "[AUDIO ERROR] No usable audio player found\n");
+}
+
+static char *query_param_dup(const char *query, const char *key) {
+    if (!query || !key) {
+        return NULL;
+    }
+
+    char **pairs = g_strsplit(query, "&", -1);
+    char *value = NULL;
+
+    for (int i = 0; pairs[i]; i++) {
+        char *eq = strchr(pairs[i], '=');
+        if (!eq) {
+            continue;
+        }
+
+        *eq = '\0';
+        if (strcmp(pairs[i], key) == 0) {
+            value = g_uri_unescape_string(eq + 1, NULL);
+            *eq = '=';
+            break;
+        }
+        *eq = '=';
+    }
+
+    g_strfreev(pairs);
+    return value;
+}
+
+static gboolean try_play_encoded_sound_uri(const char *uri) {
+    const char *query = strchr(uri, '?');
+    if (!query) {
+        return FALSE;
+    }
+
+    char *audio_url = query_param_dup(query + 1, "url");
+    char *resource_dir = query_param_dup(query + 1, "dir");
+    char *sound_file = query_param_dup(query + 1, "file");
+
+    if (audio_url && *audio_url) {
+        fprintf(stderr, "[AUDIO CLICKED] URL: %s\n", audio_url);
+        play_audio_file(audio_url);
+        g_free(audio_url);
+        g_free(resource_dir);
+        g_free(sound_file);
+        return TRUE;
+    }
+
+    g_free(audio_url);
+
+    if (!resource_dir || !sound_file) {
+        g_free(resource_dir);
+        g_free(sound_file);
+        return FALSE;
+    }
+
+    fprintf(stderr, "[AUDIO CLICKED] Resource dir: %s\n", resource_dir);
+    fprintf(stderr, "[AUDIO CLICKED] File: %s\n", sound_file);
+
+    char *audio_path = g_build_filename(resource_dir, sound_file, NULL);
+    if (g_file_test(audio_path, G_FILE_TEST_EXISTS)) {
+        play_audio_file(audio_path);
+    } else {
+        fprintf(stderr, "[AUDIO ERROR] File not found: %s\n", audio_path);
+    }
+
+    g_free(audio_path);
+    g_free(resource_dir);
+    g_free(sound_file);
+    return TRUE;
+}
+
 static gboolean dict_list_filter_func(GtkListBoxRow *row, gpointer user_data) {
     (void)user_data;
     if (!search_entry) return TRUE;
@@ -43,11 +219,34 @@ static void on_decide_policy(WebKitWebView *v, WebKitPolicyDecision *d, WebKitPo
         WebKitNavigationAction *na = webkit_navigation_policy_decision_get_navigation_action(nd);
         WebKitURIRequest *req = webkit_navigation_action_get_request(na);
         const char *uri = webkit_uri_request_get_uri(req);
+        fprintf(stderr, "[LINK CLICKED] URI: %s\n", uri);
         if (g_str_has_prefix(uri, "dict://")) {
             const char *word = uri + 7;
             char *unescaped = g_uri_unescape_string(word, NULL);
+            fprintf(stderr, "[DICT LINK] Searching for: %s\n", unescaped ? unescaped : word);
             gtk_editable_set_text(GTK_EDITABLE(user_data), unescaped ? unescaped : word);
             g_free(unescaped);
+            webkit_policy_decision_ignore(d);
+            return;
+        } else if (g_str_has_prefix(uri, "sound://")) {
+            if (!try_play_encoded_sound_uri(uri)) {
+                const char *sound_file = uri + 8; // Skip "sound://"
+                fprintf(stderr, "[AUDIO CLICKED] Clicked: %s\n", sound_file);
+                
+                /* Backward-compatible fallback */
+                if (active_entry && active_entry->dict && active_entry->dict->resource_dir) {
+                    char *audio_path = g_build_filename(active_entry->dict->resource_dir, sound_file, NULL);
+                    if (g_file_test(audio_path, G_FILE_TEST_EXISTS)) {
+                        play_audio_file(audio_path);
+                    } else {
+                        fprintf(stderr, "[AUDIO ERROR] File not found: %s\n", audio_path);
+                    }
+                    g_free(audio_path);
+                } else {
+                    fprintf(stderr, "[AUDIO ERROR] No active dictionary or resource directory\n");
+                }
+            }
+            
             webkit_policy_decision_ignore(d);
             return;
         }
@@ -156,7 +355,7 @@ static void on_search_changed(GtkSearchEntry *entry, gpointer user_data) {
     }
 
     if (strlen(query) == 0) {
-        webkit_web_view_load_html(web_view, "<h2>Diction</h2><p>Start typing to search...</p>", NULL);
+        webkit_web_view_load_html(web_view, "<h2>Diction</h2><p>Start typing to search...</p>", "file:///");
         // Clear matches and update filter
         for (DictEntry *e = all_dicts; e; e = e->next) e->has_matches = FALSE;
         gtk_list_box_invalidate_filter(dict_listbox);
@@ -213,7 +412,7 @@ static void on_search_changed(GtkSearchEntry *entry, gpointer user_data) {
             char *rendered = dsl_render_to_html(
                 def_ptr, def_len,
                 e->dict->data + res->key_offset, res->key_length,
-                e->format, e->dict->resource_dir, dark_mode);
+                e->format, e->dict->resource_dir, e->dict->source_dir, e->dict->mdx_stylesheet, dark_mode);
             if (rendered) {
                 // Theme-aware dict source bar colors
                 const char *bar_bg = dark_mode ? "#2d2d2d" : "#f0f0f0";
@@ -243,7 +442,7 @@ static void on_search_changed(GtkSearchEntry *entry, gpointer user_data) {
 
     if (found_count > 0) {
         g_string_append(html_res, "</body></html>");
-        webkit_web_view_load_html(web_view, html_res->str, NULL);
+        webkit_web_view_load_html(web_view, html_res->str, "file:///");
     } else {
         // Theme-aware no results message
         int dark_mode = style_manager && adw_style_manager_get_dark(style_manager) ? 1 : 0;
@@ -330,11 +529,12 @@ static void refresh_search_results(void) {
             "text-align: center; margin-top: 2em; opacity: 0.7;'>"
             "<h2>Diction</h2><p>Start typing to search...</p></body></html>",
             bg, fg);
-        webkit_web_view_load_html(web_view, html, NULL);
+        webkit_web_view_load_html(web_view, html, "file:///");
         return;
     }
 
     // Re-run search with new theme
+    g_clear_pointer(&last_search_query, g_free);
     on_search_changed(search_entry, NULL);
 }
 
@@ -373,7 +573,7 @@ static void reload_dictionaries_from_settings(void *user_data) {
     webkit_web_view_load_html(web_view,
         "<html><body style='font-family: sans-serif; text-align: center; margin-top: 3em; opacity: 0.6;'>"
         "<h2>Reloading dictionaries\u2026</h2><p>Please wait.</p>"
-        "</body></html>", NULL);
+        "</body></html>", "file:///");
 
     start_async_dict_loading();
 }
@@ -416,6 +616,7 @@ static void on_sidebar_tab_toggled(GtkToggleButton *btn, gpointer user_data) {
 }
 
 static void append_entry_to_sidebar(DictEntry *e) {
+    fprintf(stderr, "[SIDEBAR] Adding dictionary: '%s' (format: %d)\n", e->name, e->format);
     GtkWidget *row = gtk_list_box_row_new();
     GtkWidget *label = gtk_label_new(e->name);
     gtk_label_set_xalign(GTK_LABEL(label), 0.0);
@@ -712,6 +913,10 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
 
     /* WebKit view */
     web_view = WEBKIT_WEB_VIEW(webkit_web_view_new());
+    WebKitSettings *web_settings = webkit_web_view_get_settings(web_view);
+    webkit_settings_set_auto_load_images(web_settings, TRUE);
+    webkit_settings_set_allow_file_access_from_file_urls(web_settings, TRUE);
+    webkit_settings_set_allow_universal_access_from_file_urls(web_settings, TRUE);
 
     /* Handle internal dict:// links */
     g_signal_connect(web_view, "decide-policy", G_CALLBACK(on_decide_policy), search_entry);
@@ -778,7 +983,7 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     webkit_web_view_load_html(web_view,
         "<html><body style='font-family: sans-serif; text-align: center; margin-top: 3em; opacity: 0.6;'>"
         "<h2>Loading dictionaries…</h2><p>Please wait.</p>"
-        "</body></html>", NULL);
+        "</body></html>", "file:///");
 
     gtk_window_present(GTK_WINDOW(window));
 

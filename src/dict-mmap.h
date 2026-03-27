@@ -19,7 +19,9 @@ typedef struct DictMmap {
     size_t size;
     SplayTree *index;
     char *name;
+    char *source_dir;
     char *resource_dir;
+    char *mdx_stylesheet;
 } DictMmap;
 
 DictMmap* dict_mmap_open(const char *path);

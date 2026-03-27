@@ -71,6 +71,24 @@ static unsigned int read_be(const unsigned char *p, int bytes) {
     return val;
 }
 
+static char *find_bgl_resource_dir(const char *path) {
+    char *base = g_strdup(path);
+    char *dot = strrchr(base, '.');
+    if (dot) {
+        *dot = '\0';
+    }
+
+    char *resource_dir = g_strconcat(base, ".files", NULL);
+    g_free(base);
+
+    if (g_file_test(resource_dir, G_FILE_TEST_IS_DIR)) {
+        return resource_dir;
+    }
+
+    g_free(resource_dir);
+    return NULL;
+}
+
 DictMmap* parse_bgl_file(const char *path) {
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
@@ -192,6 +210,7 @@ DictMmap* parse_bgl_file(const char *path) {
     dict->tmp_file = NULL;
     dict->data = dict_data;
     dict->size = dict_size;
+    dict->resource_dir = find_bgl_resource_dir(path);
     dict->index = splay_tree_new(dict->data, dict->size);
 
     /* Parse the block stream */

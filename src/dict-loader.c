@@ -91,8 +91,9 @@ static void scan_recursive(const char *dirpath, DictEntry **head,
         if (stat(full, &st) != 0) { free(full); continue; }
 
         if (S_ISDIR(st.st_mode)) {
-            /* Skip .files resource dirs like goldendict-ng does */
-            if (!ends_with_ci(full, ".dsl.files") &&
+            /* Skip extracted resource folders */
+            if (!ends_with_ci(full, ".files") &&
+                !ends_with_ci(full, ".dsl.files") &&
                 !ends_with_ci(full, ".dsl.dz.files")) {
                 scan_recursive(full, head, callback, user_data);
             }

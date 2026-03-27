@@ -538,7 +538,9 @@ void dict_mmap_close(DictMmap *dict) {
         if (dict->data) munmap((void*)dict->data, dict->size);
         if (dict->fd >= 0) close(dict->fd);
         if (dict->name) free(dict->name);
+        if (dict->source_dir) free(dict->source_dir);
         if (dict->resource_dir) free(dict->resource_dir);
+        if (dict->mdx_stylesheet) free(dict->mdx_stylesheet);
         free(dict);
     }
 }

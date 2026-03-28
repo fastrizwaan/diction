@@ -10,6 +10,9 @@
 #include <stdint.h>
 #include <utime.h>
 #include <glib.h>
+#include <glib/gstdio.h>
+#include <archive.h>
+#include <archive_entry.h>
 
 void insert_balanced(SplayTree *t, TreeEntry *e, int start, int end) {
     if (start > end) return;
@@ -72,6 +75,323 @@ static gboolean ensure_cache_directory(void) {
     int ret = g_mkdir_with_parents(cache_dir, 0755);
     g_free(cache_dir);
     return ret == 0;
+}
+
+static char *get_resource_cache_dir_path(const char *original_path) {
+    char *hash = g_compute_checksum_for_string(G_CHECKSUM_SHA1, original_path, -1);
+    const char *base = get_cache_base_dir();
+    char *path = g_build_filename(base, "diction", "resources", hash, NULL);
+    g_free(hash);
+    return path;
+}
+
+static char *get_resource_stamp_path(const char *resource_dir) {
+    return g_build_filename(resource_dir, ".diction-resource-stamp", NULL);
+}
+
+static gboolean ensure_resource_cache_directory(const char *resource_dir) {
+    return g_mkdir_with_parents(resource_dir, 0755) == 0;
+}
+
+static gboolean dir_has_visible_files(const char *dir_path) {
+    GDir *dir = g_dir_open(dir_path, 0, NULL);
+    if (!dir) {
+        return FALSE;
+    }
+
+    const char *name = NULL;
+    while ((name = g_dir_read_name(dir)) != NULL) {
+        if (name[0] == '.') {
+            continue;
+        }
+        g_dir_close(dir);
+        return TRUE;
+    }
+
+    g_dir_close(dir);
+    return FALSE;
+}
+
+static char *replace_backslashes(const char *text) {
+    char *copy = g_strdup(text ? text : "");
+    for (char *p = copy; *p; p++) {
+        if (*p == '\\') {
+            *p = '/';
+        }
+    }
+    return copy;
+}
+
+static gboolean path_has_parent_reference(const char *path) {
+    if (!path || !*path) {
+        return TRUE;
+    }
+    char **parts = g_strsplit(path, "/", -1);
+    gboolean bad = FALSE;
+    for (int i = 0; parts[i]; i++) {
+        if (strcmp(parts[i], "..") == 0) {
+            bad = TRUE;
+            break;
+        }
+    }
+    g_strfreev(parts);
+    return bad;
+}
+
+static char *sanitize_archive_entry_path(const char *path) {
+    char *slashes = replace_backslashes(path);
+    char *normalized = g_strdup(slashes);
+    g_free(slashes);
+
+    g_strstrip(normalized);
+    while (g_str_has_prefix(normalized, "/")) {
+        memmove(normalized, normalized + 1, strlen(normalized));
+    }
+    while (g_str_has_prefix(normalized, "./")) {
+        memmove(normalized, normalized + 2, strlen(normalized) - 1);
+    }
+
+    if (!*normalized || path_has_parent_reference(normalized)) {
+        g_free(normalized);
+        return NULL;
+    }
+
+    return normalized;
+}
+
+static void clear_directory_contents(const char *dir_path) {
+    GDir *dir = g_dir_open(dir_path, 0, NULL);
+    if (!dir) {
+        return;
+    }
+
+    const char *name = NULL;
+    while ((name = g_dir_read_name(dir)) != NULL) {
+        if (name[0] == '.') {
+            continue;
+        }
+
+        char *child = g_build_filename(dir_path, name, NULL);
+        if (g_file_test(child, G_FILE_TEST_IS_DIR)) {
+            clear_directory_contents(child);
+            g_rmdir(child);
+        } else {
+            g_remove(child);
+        }
+        g_free(child);
+    }
+
+    g_dir_close(dir);
+}
+
+static gboolean resource_stamp_matches(const char *resource_dir, const char *zip_path) {
+    struct stat zip_st;
+    if (g_stat(zip_path, &zip_st) != 0) {
+        return FALSE;
+    }
+
+    char *stamp_path = get_resource_stamp_path(resource_dir);
+    gchar *contents = NULL;
+    gboolean ok = FALSE;
+
+    if (g_file_get_contents(stamp_path, &contents, NULL, NULL) && contents) {
+        gchar *expected = g_strdup_printf("%lld:%lld",
+            (long long)zip_st.st_mtime, (long long)zip_st.st_size);
+        ok = g_strcmp0(contents, expected) == 0;
+        g_free(expected);
+    }
+
+    g_free(contents);
+    g_free(stamp_path);
+    return ok;
+}
+
+static void write_resource_stamp(const char *resource_dir, const char *zip_path) {
+    struct stat zip_st;
+    if (g_stat(zip_path, &zip_st) != 0) {
+        return;
+    }
+
+    char *stamp_path = get_resource_stamp_path(resource_dir);
+    gchar *contents = g_strdup_printf("%lld:%lld",
+        (long long)zip_st.st_mtime, (long long)zip_st.st_size);
+    g_file_set_contents(stamp_path, contents, -1, NULL);
+    g_free(contents);
+    g_free(stamp_path);
+}
+
+static gboolean extract_zip_to_directory(const char *zip_path, const char *output_dir) {
+    struct archive *reader = archive_read_new();
+    struct archive_entry *entry = NULL;
+    gboolean ok = TRUE;
+    int status = ARCHIVE_OK;
+
+    archive_read_support_filter_all(reader);
+    archive_read_support_format_zip(reader);
+
+    clear_directory_contents(output_dir);
+
+    if (archive_read_open_filename(reader, zip_path, 10240) != ARCHIVE_OK) {
+        fprintf(stderr, "[DSL RESOURCES] Failed to open ZIP %s: %s\n",
+                zip_path, archive_error_string(reader));
+        ok = FALSE;
+        goto done;
+    }
+
+    while ((status = archive_read_next_header(reader, &entry)) != ARCHIVE_EOF) {
+        if (status < ARCHIVE_WARN) {
+            fprintf(stderr, "[DSL RESOURCES] Failed reading ZIP entry from %s: %s\n",
+                    zip_path, archive_error_string(reader));
+            ok = FALSE;
+            break;
+        }
+
+        const char *raw_path = archive_entry_pathname(entry);
+        char *safe_rel = sanitize_archive_entry_path(raw_path);
+        if (!safe_rel) {
+            archive_read_data_skip(reader);
+            continue;
+        }
+
+        char *dest_path = g_build_filename(output_dir, safe_rel, NULL);
+        mode_t mode = archive_entry_perm(entry);
+        mode_t fallback_mode = mode ? mode : 0644;
+        mode_t filetype = archive_entry_filetype(entry);
+
+        if (filetype == AE_IFDIR) {
+            if (g_mkdir_with_parents(dest_path, mode ? mode : 0755) != 0) {
+                fprintf(stderr, "[DSL RESOURCES] Failed creating directory %s\n", dest_path);
+                g_free(dest_path);
+                g_free(safe_rel);
+                ok = FALSE;
+                break;
+            }
+        } else if (filetype == AE_IFREG || filetype == 0) {
+            char *parent_dir = g_path_get_dirname(dest_path);
+            if (g_mkdir_with_parents(parent_dir, 0755) != 0) {
+                fprintf(stderr, "[DSL RESOURCES] Failed creating parent directory for %s\n", dest_path);
+                g_free(parent_dir);
+                g_free(dest_path);
+                g_free(safe_rel);
+                ok = FALSE;
+                break;
+            }
+            g_free(parent_dir);
+
+            int fd = g_open(dest_path, O_CREAT | O_TRUNC | O_WRONLY, fallback_mode);
+            if (fd < 0) {
+                fprintf(stderr, "[DSL RESOURCES] Failed opening %s for writing\n", dest_path);
+                g_free(dest_path);
+                g_free(safe_rel);
+                ok = FALSE;
+                break;
+            }
+
+            status = archive_read_data_into_fd(reader, fd);
+            close(fd);
+            if (status < ARCHIVE_WARN) {
+                fprintf(stderr, "[DSL RESOURCES] Failed extracting %s: %s\n",
+                        dest_path, archive_error_string(reader));
+                g_free(dest_path);
+                g_free(safe_rel);
+                ok = FALSE;
+                break;
+            }
+            g_chmod(dest_path, fallback_mode);
+        } else {
+            archive_read_data_skip(reader);
+        }
+
+        g_free(dest_path);
+        g_free(safe_rel);
+    }
+
+done:
+    archive_read_close(reader);
+    archive_read_free(reader);
+    return ok;
+}
+
+static char *dsl_find_local_resource_dir(const char *path) {
+    char *candidate = g_strconcat(path, ".files", NULL);
+    if (g_file_test(candidate, G_FILE_TEST_IS_DIR)) {
+        return candidate;
+    }
+    g_free(candidate);
+
+    if (g_str_has_suffix(path, ".dz")) {
+        char *without_dz = g_strndup(path, strlen(path) - 3);
+        candidate = g_strconcat(without_dz, ".files", NULL);
+        g_free(without_dz);
+        if (g_file_test(candidate, G_FILE_TEST_IS_DIR)) {
+            return candidate;
+        }
+        g_free(candidate);
+    } else if (g_str_has_suffix(path, ".dsl")) {
+        candidate = g_strconcat(path, ".dz.files", NULL);
+        if (g_file_test(candidate, G_FILE_TEST_IS_DIR)) {
+            return candidate;
+        }
+        g_free(candidate);
+    }
+
+    return NULL;
+}
+
+static char *dsl_find_resource_zip(const char *path) {
+    char *candidate = g_strconcat(path, ".files.zip", NULL);
+    if (g_file_test(candidate, G_FILE_TEST_EXISTS)) {
+        return candidate;
+    }
+    g_free(candidate);
+
+    if (g_str_has_suffix(path, ".dz")) {
+        char *without_dz = g_strndup(path, strlen(path) - 3);
+        candidate = g_strconcat(without_dz, ".files.zip", NULL);
+        g_free(without_dz);
+        if (g_file_test(candidate, G_FILE_TEST_EXISTS)) {
+            return candidate;
+        }
+        g_free(candidate);
+    } else if (g_str_has_suffix(path, ".dsl")) {
+        candidate = g_strconcat(path, ".dz.files.zip", NULL);
+        if (g_file_test(candidate, G_FILE_TEST_EXISTS)) {
+            return candidate;
+        }
+        g_free(candidate);
+    }
+
+    return NULL;
+}
+
+static char *dsl_prepare_resource_dir(const char *path) {
+    char *local_dir = dsl_find_local_resource_dir(path);
+    if (local_dir) {
+        return local_dir;
+    }
+
+    char *zip_path = dsl_find_resource_zip(path);
+    if (!zip_path) {
+        return NULL;
+    }
+
+    char *resource_dir = get_resource_cache_dir_path(path);
+    if (!ensure_resource_cache_directory(resource_dir)) {
+        g_free(resource_dir);
+        g_free(zip_path);
+        return NULL;
+    }
+
+    if ((!dir_has_visible_files(resource_dir) || !resource_stamp_matches(resource_dir, zip_path)) &&
+        !extract_zip_to_directory(zip_path, resource_dir)) {
+        g_free(resource_dir);
+        g_free(zip_path);
+        return NULL;
+    }
+
+    write_resource_stamp(resource_dir, zip_path);
+    g_free(zip_path);
+    return resource_dir;
 }
 
 typedef struct {
@@ -287,6 +607,8 @@ DictMmap* dict_mmap_open(const char *path) {
     DictMmap *dict = (DictMmap*)calloc(1, sizeof(DictMmap));
     dict->fd = -1;
     dict->tmp_file = NULL;
+    dict->source_dir = g_path_get_dirname(path);
+    dict->resource_dir = dsl_prepare_resource_dir(path);
 
     if (cache_valid) {
         // Use cached version directly

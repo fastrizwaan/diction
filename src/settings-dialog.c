@@ -37,6 +37,11 @@ static void dir_remove_data_free(DirRemoveData *d) {
     g_free(d);
 }
 
+static void dir_remove_data_destroy(gpointer data, GClosure *closure) {
+    (void)closure;
+    dir_remove_data_free(data);
+}
+
 static void on_add_directory_response(GObject *source, GAsyncResult *result, gpointer user_data) {
     GtkFileDialog *chooser = GTK_FILE_DIALOG(source);
     SettingsDialogData *data = user_data;
@@ -93,6 +98,11 @@ typedef struct {
 static void dict_move_data_free(DictMoveData *d) {
     g_free(d->id);
     g_free(d);
+}
+
+static void dict_move_data_destroy(gpointer data, GClosure *closure) {
+    (void)closure;
+    dict_move_data_free(data);
 }
 
 static void on_move_dictionary(GtkButton *btn, DictMoveData *d) {
@@ -160,6 +170,11 @@ static void dict_remove_data_free(DictRemoveData *d) {
     g_free(d);
 }
 
+static void dict_remove_data_destroy(gpointer data, GClosure *closure) {
+    (void)closure;
+    dict_remove_data_free(data);
+}
+
 static gboolean on_remove_dictionary_idle(gpointer user_data) {
     SettingsDialogData *data = user_data;
     update_dict_list(data);
@@ -183,6 +198,11 @@ typedef struct {
 
 static void dict_switch_data_free(DictSwitchData *d) {
     g_free(d);
+}
+
+static void dict_switch_data_destroy(gpointer data, GClosure *closure) {
+    (void)closure;
+    dict_switch_data_free(data);
 }
 
 static gboolean on_dict_switch_state(GtkSwitch *sw, gboolean state, DictSwitchData *sd) {
@@ -251,6 +271,11 @@ typedef struct {
 static void group_remove_data_free(GroupRemoveData *d) {
     g_free(d->id);
     g_free(d);
+}
+
+static void group_remove_data_destroy(gpointer data, GClosure *closure) {
+    (void)closure;
+    group_remove_data_free(data);
 }
 
 static gboolean on_remove_group_idle(gpointer user_data) {
@@ -344,7 +369,7 @@ static void update_dir_list(SettingsDialogData *data) {
         rd->data = data;
         rd->path = g_strdup(path);
         g_signal_connect_data(remove_btn, "clicked", G_CALLBACK(on_remove_directory_clicked),
-            rd, (GClosureNotify)dir_remove_data_free, 0);
+            rd, dir_remove_data_destroy, 0);
 
         adw_action_row_add_suffix(ADW_ACTION_ROW(row), remove_btn);
         gtk_list_box_append(data->dir_list, GTK_WIDGET(row));
@@ -391,7 +416,7 @@ static void update_dict_list(SettingsDialogData *data) {
         DictSwitchData *sd = g_new(DictSwitchData, 1);
         sd->cfg = cfg;
         g_signal_connect_data(switch_widget, "state-set", G_CALLBACK(on_dict_switch_state),
-            sd, (GClosureNotify)dict_switch_data_free, 0);
+            sd, dict_switch_data_destroy, 0);
 
         adw_action_row_add_suffix(ADW_ACTION_ROW(row), switch_widget);
 
@@ -404,7 +429,7 @@ static void update_dict_list(SettingsDialogData *data) {
         rd->data = data;
         rd->id = g_strdup(cfg->id);
         g_signal_connect_data(remove_btn, "clicked", G_CALLBACK(on_remove_dictionary_clicked),
-            rd, (GClosureNotify)dict_remove_data_free, 0);
+            rd, dict_remove_data_destroy, 0);
 
         adw_action_row_add_suffix(ADW_ACTION_ROW(row), remove_btn);
         gtk_list_box_append(data->dict_list, GTK_WIDGET(row));
@@ -447,7 +472,7 @@ static void update_group_list(SettingsDialogData *data) {
         rd->data = data;
         rd->id = g_strdup(grp->id);
         g_signal_connect_data(remove_btn, "clicked", G_CALLBACK(on_remove_group_clicked),
-            rd, (GClosureNotify)group_remove_data_free, 0);
+            rd, group_remove_data_destroy, 0);
 
         adw_action_row_add_suffix(ADW_ACTION_ROW(row), remove_btn);
         gtk_list_box_append(data->group_list, GTK_WIDGET(row));
@@ -489,6 +514,7 @@ static void on_theme_changed(AdwComboRow *row, GParamSpec *pspec, SettingsDialog
 GtkWidget* settings_dialog_new(GtkWindow *parent, AppSettings *settings,
                                AdwStyleManager *style_manager,
                                void (*reload_callback)(void *), void *reload_user_data) {
+    (void)parent;
     SettingsDialogData *data = g_new0(SettingsDialogData, 1);
     data->settings = settings;
     data->group_selection_ids = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
@@ -573,7 +599,7 @@ GtkWidget* settings_dialog_new(GtkWindow *parent, AppSettings *settings,
     up_data->direction = -1;
     up_data->id = NULL; // id is read from data->selected_dict_id at click time
     g_signal_connect_data(data->move_up_btn, "clicked", G_CALLBACK(on_move_dictionary),
-        up_data, (GClosureNotify)dict_move_data_free, 0);
+        up_data, dict_move_data_destroy, 0);
     
     data->move_down_btn = gtk_button_new_from_icon_name("go-down-symbolic");
     gtk_widget_set_tooltip_text(data->move_down_btn, "Move selected dictionary down");
@@ -583,7 +609,7 @@ GtkWidget* settings_dialog_new(GtkWindow *parent, AppSettings *settings,
     down_data->direction = 1;
     down_data->id = NULL; // id is read from data->selected_dict_id at click time
     g_signal_connect_data(data->move_down_btn, "clicked", G_CALLBACK(on_move_dictionary),
-        down_data, (GClosureNotify)dict_move_data_free, 0);
+        down_data, dict_move_data_destroy, 0);
     
     data->create_group_btn = gtk_button_new_with_label("Create Group from Selected…");
     g_signal_connect(data->create_group_btn, "clicked", G_CALLBACK(on_create_group_from_selected), data);

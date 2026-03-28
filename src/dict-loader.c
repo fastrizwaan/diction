@@ -5,6 +5,7 @@
 #include <strings.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 /* ── helpers ─────────────────────────────────────────────── */
 
@@ -33,6 +34,52 @@ static char *basename_noext(const char *path) {
     memcpy(out, base, len);
     out[len] = '\0';
     return out;
+}
+
+static gboolean file_exists_at(const char *path) {
+    return path && access(path, F_OK) == 0;
+}
+
+static gboolean is_dsl_family_path(const char *path) {
+    return ends_with_ci(path, ".dsl") || ends_with_ci(path, ".dsl.dz");
+}
+
+static char *dsl_family_key(const char *path) {
+    if (ends_with_ci(path, ".dsl.dz")) {
+        return g_strndup(path, strlen(path) - 3);
+    }
+    return g_strdup(path);
+}
+
+static char *dsl_preferred_variant(const char *path) {
+    if (ends_with_ci(path, ".dsl.dz")) {
+        return g_strdup(path);
+    }
+    if (ends_with_ci(path, ".dsl")) {
+        char *compressed = g_strconcat(path, ".dz", NULL);
+        if (file_exists_at(compressed)) {
+            return compressed;
+        }
+        g_free(compressed);
+    }
+    return g_strdup(path);
+}
+
+static char *dsl_fallback_variant(const char *preferred_path) {
+    if (ends_with_ci(preferred_path, ".dsl.dz")) {
+        char *plain = g_strndup(preferred_path, strlen(preferred_path) - 3);
+        if (file_exists_at(plain)) {
+            return plain;
+        }
+        g_free(plain);
+    } else if (ends_with_ci(preferred_path, ".dsl")) {
+        char *compressed = g_strconcat(preferred_path, ".dz", NULL);
+        if (file_exists_at(compressed)) {
+            return compressed;
+        }
+        g_free(compressed);
+    }
+    return NULL;
 }
 
 /* ── format detection ────────────────────────────────────── */
@@ -77,8 +124,9 @@ DictMmap* dict_load_any(const char *path, DictFormat fmt) {
 
 /* ── directory scanner ───────────────────────────────────── */
 
-static void scan_recursive(const char *dirpath, DictEntry **head, 
-                            DictLoaderCallback callback, void *user_data) {
+static void scan_recursive(const char *dirpath, DictEntry **head,
+                           DictLoaderCallback callback, void *user_data,
+                           GHashTable *seen_dsl_families) {
     DIR *d = opendir(dirpath);
     if (!d) return;
 
@@ -95,7 +143,7 @@ static void scan_recursive(const char *dirpath, DictEntry **head,
             if (!ends_with_ci(full, ".files") &&
                 !ends_with_ci(full, ".dsl.files") &&
                 !ends_with_ci(full, ".dsl.dz.files")) {
-                scan_recursive(full, head, callback, user_data);
+                scan_recursive(full, head, callback, user_data, seen_dsl_families);
             }
             free(full);
             continue;
@@ -107,19 +155,51 @@ static void scan_recursive(const char *dirpath, DictEntry **head,
             continue;
         }
 
-        DictMmap *loaded = dict_load_any(full, fmt);
+        const char *load_path = full;
+        char *family_key = NULL;
+        char *preferred_path = NULL;
+        char *fallback_path = NULL;
+
+        if (fmt == DICT_FORMAT_DSL && is_dsl_family_path(full)) {
+            family_key = dsl_family_key(full);
+            if (seen_dsl_families && g_hash_table_contains(seen_dsl_families, family_key)) {
+                g_free(family_key);
+                free(full);
+                continue;
+            }
+            preferred_path = dsl_preferred_variant(full);
+            fallback_path = dsl_fallback_variant(preferred_path);
+            load_path = preferred_path;
+        }
+
+        DictMmap *loaded = dict_load_any(load_path, fmt);
+        if (!loaded && fallback_path && g_strcmp0(fallback_path, load_path) != 0) {
+            loaded = dict_load_any(fallback_path, fmt);
+            if (loaded) {
+                load_path = fallback_path;
+            }
+        }
         if (!loaded) {
+            g_free(family_key);
+            g_free(preferred_path);
+            g_free(fallback_path);
             free(full);
             continue;
+        }
+
+        if (family_key && seen_dsl_families) {
+            g_hash_table_add(seen_dsl_families, family_key);
+            family_key = NULL;
         }
 
         DictEntry *entry = calloc(1, sizeof(DictEntry));
         if (loaded->name) {
             entry->name = strdup(loaded->name);
         } else {
-            entry->name = basename_noext(full);
+            entry->name = basename_noext(load_path);
         }
-        entry->path = full;
+        free(full);
+        entry->path = strdup(load_path);
         entry->format = fmt;
         entry->dict = loaded;
 
@@ -131,6 +211,10 @@ static void scan_recursive(const char *dirpath, DictEntry **head,
             entry->next = *head;
             *head = entry;
         }
+
+        g_free(family_key);
+        g_free(preferred_path);
+        g_free(fallback_path);
     }
 
     closedir(d);
@@ -138,12 +222,16 @@ static void scan_recursive(const char *dirpath, DictEntry **head,
 
 DictEntry* dict_loader_scan_directory(const char *dirpath) {
     DictEntry *head = NULL;
-    scan_recursive(dirpath, &head, NULL, NULL);
+    GHashTable *seen_dsl_families = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    scan_recursive(dirpath, &head, NULL, NULL, seen_dsl_families);
+    g_hash_table_destroy(seen_dsl_families);
     return head;
 }
 
 void dict_loader_scan_directory_streaming(const char *dirpath, DictLoaderCallback callback, void *user_data) {
-    scan_recursive(dirpath, NULL, callback, user_data);
+    GHashTable *seen_dsl_families = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    scan_recursive(dirpath, NULL, callback, user_data, seen_dsl_families);
+    g_hash_table_destroy(seen_dsl_families);
 }
 
 void dict_loader_free(DictEntry *head) {

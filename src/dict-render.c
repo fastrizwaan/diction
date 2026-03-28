@@ -436,6 +436,60 @@ static void buf_append_escaped_html(StrBuf *b, const char *s, size_t n) {
     }
 }
 
+static char *normalize_headword_for_render(const char *text, size_t length, gboolean keep_middle_dot) {
+    if (!text) {
+        return g_strdup("");
+    }
+
+    char *raw = g_strndup(text, length);
+    char *valid = g_utf8_make_valid(raw, -1);
+    GString *out = g_string_new("");
+    const char *p = valid;
+
+    while (*p) {
+        if (g_str_has_prefix(p, "{*}")) {
+            if (keep_middle_dot) {
+                g_string_append(out, "*");
+            }
+            p += strlen("{*}");
+            continue;
+        }
+
+        if (g_str_has_prefix(p, "{·}")) {
+            if (keep_middle_dot) {
+                g_string_append(out, "·");
+            }
+            p += strlen("{·}");
+            continue;
+        }
+
+        if (g_str_has_prefix(p, "·")) {
+            if (keep_middle_dot) {
+                g_string_append(out, "·");
+            }
+            p += strlen("·");
+            continue;
+        }
+
+        if (*p == '\\' && p[1] != '\0') {
+            const char *next = p + 1;
+            const char *next_end = g_utf8_next_char(next);
+            g_string_append_len(out, next, next_end - next);
+            p = next_end;
+            continue;
+        }
+
+        const char *next = g_utf8_next_char(p);
+        g_string_append_len(out, p, next - p);
+        p = next;
+    }
+
+    char *normalized = g_string_free(out, FALSE);
+    g_free(valid);
+    g_free(raw);
+    return normalized;
+}
+
 static gboolean looks_like_html(const char *text, size_t length) {
     for (size_t i = 0; i + 3 < length; i++) {
         if (text[i] != '<') {
@@ -605,19 +659,40 @@ static char *normalize_resource_reference(const char *value, char **suffix_out) 
     return normalized;
 }
 
-static char *build_sound_uri(const char *resource_dir, const char *sound_file) {
-    if (!resource_dir || !sound_file) {
+static char *resolve_local_resource_path(const char *resource_dir, const char *source_dir, const char *value);
+static char *build_local_resource_uri(const char *resource_dir, const char *source_dir, const char *value);
+
+static char *build_sound_uri(const char *resource_dir, const char *source_dir, const char *sound_file) {
+    if (!sound_file) {
         return g_strdup(sound_file ? sound_file : "");
     }
 
     char *normalized = normalize_resource_reference(sound_file, NULL);
-    char *escaped_dir = g_uri_escape_string(resource_dir, NULL, FALSE);
-    char *escaped_file = g_uri_escape_string(normalized, NULL, FALSE);
-    char *uri = g_strdup_printf("sound:///play?dir=%s&file=%s", escaped_dir, escaped_file);
+    char *resolved_path = resolve_local_resource_path(resource_dir, source_dir, normalized);
+    char *uri = NULL;
+
+    if (resolved_path) {
+        char *escaped_path = g_uri_escape_string(resolved_path, NULL, FALSE);
+        uri = g_strdup_printf("sound:///play?path=%s", escaped_path);
+        g_free(escaped_path);
+        g_free(resolved_path);
+    } else if (resource_dir) {
+        char *escaped_dir = g_uri_escape_string(resource_dir, NULL, FALSE);
+        char *escaped_file = g_uri_escape_string(normalized, NULL, FALSE);
+        uri = g_strdup_printf("sound:///play?dir=%s&file=%s", escaped_dir, escaped_file);
+        g_free(escaped_dir);
+        g_free(escaped_file);
+    } else if (source_dir) {
+        char *path = g_build_filename(source_dir, normalized, NULL);
+        char *escaped_path = g_uri_escape_string(path, NULL, FALSE);
+        uri = g_strdup_printf("sound:///play?path=%s", escaped_path);
+        g_free(escaped_path);
+        g_free(path);
+    } else {
+        uri = g_strdup(sound_file);
+    }
 
     g_free(normalized);
-    g_free(escaped_dir);
-    g_free(escaped_file);
     return uri;
 }
 
@@ -630,6 +705,78 @@ static char *build_remote_sound_uri(const char *url) {
     char *uri = g_strdup_printf("sound:///play?url=%s", escaped_url);
     g_free(escaped_url);
     return uri;
+}
+
+static gboolean file_has_extension_ci(const char *path, const char *ext) {
+    if (!path || !ext) {
+        return FALSE;
+    }
+    const char *dot = strrchr(path, '.');
+    return dot && g_ascii_strcasecmp(dot, ext) == 0;
+}
+
+static gboolean media_is_audio_file(const char *path) {
+    const char *exts[] = { ".wav", ".mp3", ".ogg", ".oga", ".spx", ".flac", ".m4a", NULL };
+    for (int i = 0; exts[i]; i++) {
+        if (file_has_extension_ci(path, exts[i])) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static gboolean media_is_image_file(const char *path) {
+    const char *exts[] = { ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".svg", NULL };
+    for (int i = 0; exts[i]; i++) {
+        if (file_has_extension_ci(path, exts[i])) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static void append_dsl_media_reference(StrBuf *b,
+                                       const char *media_ref,
+                                       const char *resource_dir,
+                                       const char *source_dir) {
+    if (!b || !media_ref) {
+        return;
+    }
+
+    char *clean = g_strdup(media_ref);
+    g_strstrip(clean);
+    if (!*clean) {
+        g_free(clean);
+        return;
+    }
+
+    if (media_is_audio_file(clean)) {
+        char *sound_uri = build_sound_uri(resource_dir, source_dir, clean);
+        buf_append_str(b, "<a class='dict-audio' href='");
+        buf_append_str(b, sound_uri);
+        buf_append_str(b, "' title='");
+        buf_append_escaped_html(b, clean, strlen(clean));
+        buf_append_str(b, "'>🔊</a>");
+        g_free(sound_uri);
+    } else if (media_is_image_file(clean)) {
+        char *img_uri = build_local_resource_uri(resource_dir, source_dir, clean);
+        buf_append_str(b, "<img class='dsl-media-image' src='");
+        buf_append_str(b, img_uri);
+        buf_append_str(b, "' alt='");
+        buf_append_escaped_html(b, clean, strlen(clean));
+        buf_append_str(b, "' loading='lazy'>");
+        g_free(img_uri);
+    } else {
+        char *file_uri = build_local_resource_uri(resource_dir, source_dir, clean);
+        buf_append_str(b, "<a class='dict-link' href='");
+        buf_append_str(b, file_uri);
+        buf_append_str(b, "'>");
+        buf_append_escaped_html(b, clean, strlen(clean));
+        buf_append_str(b, "</a>");
+        g_free(file_uri);
+    }
+
+    g_free(clean);
 }
 
 static char *resolve_local_resource_path(const char *resource_dir, const char *source_dir, const char *value) {
@@ -826,6 +973,12 @@ static char *rewrite_css_urls(const char *css, const char *resource_dir, const c
     return g_string_free(out, FALSE);
 }
 
+static char *normalize_headword_for_link_target(const char *text) {
+    char *normalized = normalize_headword_for_render(text, text ? strlen(text) : 0, FALSE);
+    g_strstrip(normalized);
+    return normalized;
+}
+
 static char *replace_attribute_value(const char *tag,
                                      const char *attr_name,
                                      const char *new_value,
@@ -961,7 +1114,7 @@ static char* process_html_tag_attribute(const char *tag, const char *attr_name, 
             g_free(escaped);
         } else if (g_str_has_prefix(value, "sound://")) {
             if (resource_dir) {
-                new_value = build_sound_uri(resource_dir, value + 8);
+                new_value = build_sound_uri(resource_dir, source_dir, value + 8);
             } else {
                 new_value = g_strdup(value);
             }
@@ -1273,7 +1426,8 @@ static char *finalize_placeholder_dict_links(char *html) {
 
         char *inner_html = g_strndup(inner_start, close - inner_start);
         char *plain = strip_html_tags_to_text(inner_html);
-        char *target = unescape_xml_entities(plain);
+        char *target_raw = unescape_xml_entities(plain);
+        char *target = normalize_headword_for_link_target(target_raw);
         g_strstrip(target);
 
         if (*target) {
@@ -1286,6 +1440,7 @@ static char *finalize_placeholder_dict_links(char *html) {
             g_string_append_len(out, anchor, (close + 4) - anchor);
         }
 
+        g_free(target_raw);
         g_free(target);
         g_free(plain);
         g_free(inner_html);
@@ -1308,6 +1463,7 @@ char* dsl_render_to_html(const char *dsl_text,
     StrBuf b = {NULL, 0, 0};
     char *styled_text = NULL;
     char *normalized_plain_text = NULL;
+    char *display_headword = normalize_headword_for_render(headword, hw_length, TRUE);
 
     if (format == DICT_FORMAT_MDX) {
         styled_text = substitute_mdx_stylesheet(dsl_text, length, mdx_stylesheet, &length);
@@ -1346,6 +1502,7 @@ char* dsl_render_to_html(const char *dsl_text,
     buf_append_str(&b, link_color);
     buf_append_str(&b, "; text-decoration: none;}"
         ".dict-link:hover {text-decoration: underline;}"
+        ".dsl-media-image{display:block; max-width:100%; height:auto; margin:0.35em 0;}"
         ".trn{color: ");
     buf_append_str(&b, trn_color);
     buf_append_str(&b, ";}"
@@ -1385,7 +1542,7 @@ char* dsl_render_to_html(const char *dsl_text,
     buf_append_str(&b, "<h2 style='color:");
     buf_append_str(&b, heading_color);
     buf_append_str(&b, "; margin-bottom: 0.5em;'>");
-    buf_append(&b, headword, hw_length);
+    buf_append_escaped_html(&b, display_headword, strlen(display_headword));
     buf_append_str(&b, "</h2>\n<div>");
 
     if (format == DICT_FORMAT_MDX || format == DICT_FORMAT_STARDICT || format == DICT_FORMAT_BGL) {
@@ -1397,6 +1554,7 @@ char* dsl_render_to_html(const char *dsl_text,
             buf_append_str(&b, "</div>");
             g_free(normalized_plain_text);
             g_free(styled_text);
+            g_free(display_headword);
             return finalize_placeholder_dict_links(b.str);
         }
 
@@ -1565,6 +1723,7 @@ char* dsl_render_to_html(const char *dsl_text,
             buf_append_str(&b, "</div>");
             g_free(normalized_plain_text);
             g_free(styled_text);
+            g_free(display_headword);
             return finalize_placeholder_dict_links(b.str);
         }
 
@@ -1577,8 +1736,9 @@ char* dsl_render_to_html(const char *dsl_text,
     size_t i = 0;
     
     // State tracking
-    int in_sound = 0;
+    int in_media = 0;
     int m_open = 0;
+    GString *media_buf = g_string_new("");
     
     while (i < length) {
         // Strip out {{ macros }} entirely
@@ -1593,16 +1753,41 @@ char* dsl_render_to_html(const char *dsl_text,
             }
         }
         
+        if (in_media) {
+            if (dsl_text[i] == '[' && i + 3 < length &&
+                dsl_text[i + 1] == '/' && dsl_text[i + 2] == 's' && dsl_text[i + 3] == ']') {
+                append_dsl_media_reference(&b, media_buf->str, resource_dir, source_dir);
+                g_string_truncate(media_buf, 0);
+                in_media = 0;
+                i += 4;
+                continue;
+            }
+            if (i + 6 < length &&
+                dsl_text[i] == '[' && dsl_text[i + 1] == '/' &&
+                dsl_text[i + 2] == 'i' && dsl_text[i + 3] == 'm' &&
+                dsl_text[i + 4] == 'g' && dsl_text[i + 5] == ']') {
+                append_dsl_media_reference(&b, media_buf->str, resource_dir, source_dir);
+                g_string_truncate(media_buf, 0);
+                in_media = 0;
+                i += 6;
+                continue;
+            }
+
+            g_string_append_c(media_buf, dsl_text[i]);
+            i++;
+            continue;
+        }
+
         // Escape brackets
         if (dsl_text[i] == '\\' && i + 1 < length) {
             char next = dsl_text[i+1];
             if (next == '\\') {
-                if (!in_sound) buf_append_str(&b, "\\");
+                buf_append_str(&b, "\\");
                 i += 2;
                 continue;
             }
             if (next == '[' || next == ']' || next == '(' || next == ')' || next == '{' || next == '}' || next == '~') {
-                if (!in_sound) buf_append(&b, &dsl_text[i+1], 1);
+                buf_append(&b, &dsl_text[i+1], 1);
                 i += 2;
                 continue;
             }
@@ -1617,7 +1802,7 @@ char* dsl_render_to_html(const char *dsl_text,
                  
                  // Handle color tags like [c darkblue]
                  if (tag_len > 2 && tag[0] == 'c' && tag[1] == ' ') {
-                     if (!in_sound) {
+                     if (!in_media) {
                          buf_append_str(&b, "<span style='color:");
 
                          // Extract color name/value
@@ -1637,7 +1822,7 @@ char* dsl_render_to_html(const char *dsl_text,
                      /* Bare [c] appears in some BGL content as a no-op marker. */
                  }
                  else if (tag_len == 2 && strncmp(tag, "/c", 2) == 0) {
-                     if (!in_sound) buf_append_str(&b, "</span>");
+                     if (!in_media) buf_append_str(&b, "</span>");
                  }
                  else if ((tag_len == 4 && strncmp(tag, "lang", 4) == 0) ||
                           (tag_len > 4 && strncmp(tag, "lang", 4) == 0 && isspace((unsigned char)tag[4]))) {
@@ -1649,7 +1834,7 @@ char* dsl_render_to_html(const char *dsl_text,
                  
                  // M-Line handling [m1], [m2]...
                  else if (tag_len >= 1 && tag[0] == 'm' && (tag_len == 1 || isdigit(tag[1]))) {
-                     if (!in_sound) {
+                     if (!in_media) {
                          if (m_open) buf_append_str(&b, "</div>");
                          
                          int level = (tag_len > 1 && isdigit(tag[1])) ? (tag[1] - '0') : 1;
@@ -1660,7 +1845,7 @@ char* dsl_render_to_html(const char *dsl_text,
                      }
                  }
                  else if (tag_len == 2 && strncmp(tag, "/m", 2) == 0) {
-                     if (!in_sound && m_open) {
+                     if (!in_media && m_open) {
                          buf_append_str(&b, "</div>");
                          m_open = 0;
                      }
@@ -1668,64 +1853,80 @@ char* dsl_render_to_html(const char *dsl_text,
                  
                  // Links handling [ref]...[/ref]
                  else if (tag_len == 3 && strncmp(tag, "ref", 3) == 0) {
-                     if (!in_sound) buf_append_str(&b, "<a class='dict-link' href='#'>");
+                     if (!in_media) buf_append_str(&b, "<a class='dict-link' href='#'>");
                  }
                  else if (tag_len == 4 && strncmp(tag, "/ref", 4) == 0) {
-                     if (!in_sound) buf_append_str(&b, "</a>");
+                     if (!in_media) buf_append_str(&b, "</a>");
                  }
                  
-                 // Sound tags [s]...[/s] - hide for now
-                 else if (tag_len == 1 && tag[0] == 's') in_sound = 1;
-                 else if (tag_len == 2 && tag[0] == '/' && tag[1] == 's') in_sound = 0;
+                 // Media references [s]...[/s]
+                 else if (tag_len == 1 && tag[0] == 's') {
+                     g_string_truncate(media_buf, 0);
+                     in_media = 1;
+                 }
+                 else if (tag_len == 2 && tag[0] == '/' && tag[1] == 's') {
+                     append_dsl_media_reference(&b, media_buf->str, resource_dir, source_dir);
+                     g_string_truncate(media_buf, 0);
+                     in_media = 0;
+                 }
+                 else if (tag_len == 3 && strncmp(tag, "img", 3) == 0) {
+                     g_string_truncate(media_buf, 0);
+                     in_media = 1;
+                 }
+                 else if (tag_len == 4 && strncmp(tag, "/img", 4) == 0) {
+                     append_dsl_media_reference(&b, media_buf->str, resource_dir, source_dir);
+                     g_string_truncate(media_buf, 0);
+                     in_media = 0;
+                 }
                  
                  // Transcription [t]...[/t]
                  else if (tag_len == 1 && tag[0] == 't') {
                      const char *t_color = dark_mode ? "#9ae59a" : "#1e8e3e";
-                     if (!in_sound) {
+                     if (!in_media) {
                          buf_append_str(&b, "<span style='color: ");
                          buf_append_str(&b, t_color);
                          buf_append_str(&b, "; font-family: sans-serif;'>");
                      }
                  }
                  else if (tag_len == 2 && tag[0] == '/' && tag[1] == 't') {
-                     if (!in_sound) buf_append_str(&b, "</span>");
+                     if (!in_media) buf_append_str(&b, "</span>");
                  }
                  
                  // Basics
-                 else if (tag_len == 1 && tag[0] == 'b') { if(!in_sound) buf_append_str(&b, "<b>"); }
-                 else if (tag_len == 2 && strncmp(tag, "/b", 2) == 0) { if(!in_sound) buf_append_str(&b, "</b>"); }
-                 else if (tag_len == 1 && tag[0] == 'i') { if(!in_sound) buf_append_str(&b, "<i>"); }
-                 else if (tag_len == 2 && strncmp(tag, "/i", 2) == 0) { if(!in_sound) buf_append_str(&b, "</i>"); }
-                 else if (tag_len == 1 && tag[0] == 'u') { if(!in_sound) buf_append_str(&b, "<u>"); }
-                 else if (tag_len == 2 && strncmp(tag, "/u", 2) == 0) { if(!in_sound) buf_append_str(&b, "</u>"); }
+                 else if (tag_len == 1 && tag[0] == 'b') { if(!in_media) buf_append_str(&b, "<b>"); }
+                 else if (tag_len == 2 && strncmp(tag, "/b", 2) == 0) { if(!in_media) buf_append_str(&b, "</b>"); }
+                 else if (tag_len == 1 && tag[0] == 'i') { if(!in_media) buf_append_str(&b, "<i>"); }
+                 else if (tag_len == 2 && strncmp(tag, "/i", 2) == 0) { if(!in_media) buf_append_str(&b, "</i>"); }
+                 else if (tag_len == 1 && tag[0] == 'u') { if(!in_media) buf_append_str(&b, "<u>"); }
+                 else if (tag_len == 2 && strncmp(tag, "/u", 2) == 0) { if(!in_media) buf_append_str(&b, "</u>"); }
                  
                  // Superscript/Subscript
-                 else if (tag_len == 3 && strncmp(tag, "sup", 3) == 0) { if(!in_sound) buf_append_str(&b, "<sup>"); }
-                 else if (tag_len == 4 && strncmp(tag, "/sup", 4) == 0) { if(!in_sound) buf_append_str(&b, "</sup>"); }
-                 else if (tag_len == 3 && strncmp(tag, "sub", 3) == 0) { if(!in_sound) buf_append_str(&b, "<sub>"); }
-                 else if (tag_len == 4 && strncmp(tag, "/sub", 4) == 0) { if(!in_sound) buf_append_str(&b, "</sub>"); }
+                 else if (tag_len == 3 && strncmp(tag, "sup", 3) == 0) { if(!in_media) buf_append_str(&b, "<sup>"); }
+                 else if (tag_len == 4 && strncmp(tag, "/sup", 4) == 0) { if(!in_media) buf_append_str(&b, "</sup>"); }
+                 else if (tag_len == 3 && strncmp(tag, "sub", 3) == 0) { if(!in_media) buf_append_str(&b, "<sub>"); }
+                 else if (tag_len == 4 && strncmp(tag, "/sub", 4) == 0) { if(!in_media) buf_append_str(&b, "</sub>"); }
                  
                  // Bullet/list marker [*] is treated as structural, not visible text.
                  else if (tag_len == 1 && tag[0] == '*') { /* no-op */ }
                  else if (tag_len == 2 && strncmp(tag, "/*", 2) == 0) { /* ignore */ }
                  
-                 else if (tag_len == 1 && tag[0] == 'p') { if(!in_sound) buf_append_str(&b, "<span class='pos'>"); }
-                 else if (tag_len == 2 && strncmp(tag, "/p", 2) == 0) { if(!in_sound) buf_append_str(&b, "</span>"); }
-                 else if (tag_len == 3 && strncmp(tag, "trn", 3) == 0) { if(!in_sound) buf_append_str(&b, "<span class='trn'>"); }
-                 else if (tag_len == 4 && strncmp(tag, "/trn", 4) == 0) { if(!in_sound) buf_append_str(&b, "</span>"); }
+                 else if (tag_len == 1 && tag[0] == 'p') { if(!in_media) buf_append_str(&b, "<span class='pos'>"); }
+                 else if (tag_len == 2 && strncmp(tag, "/p", 2) == 0) { if(!in_media) buf_append_str(&b, "</span>"); }
+                 else if (tag_len == 3 && strncmp(tag, "trn", 3) == 0) { if(!in_media) buf_append_str(&b, "<span class='trn'>"); }
+                 else if (tag_len == 4 && strncmp(tag, "/trn", 4) == 0) { if(!in_media) buf_append_str(&b, "</span>"); }
                  else if (tag_len == 4 && strncmp(tag, "!trs", 4) == 0) { /* no-op */ }
                  else if (tag_len == 5 && strncmp(tag, "/!trs", 5) == 0) { /* no-op */ }
-                 else if (tag_len == 2 && strncmp(tag, "ex", 2) == 0) { if(!in_sound) buf_append_str(&b, "<span class='ex'>"); }
-                 else if (tag_len == 3 && strncmp(tag, "/ex", 3) == 0) { if(!in_sound) buf_append_str(&b, "</span>"); }
-                 else if (tag_len == 3 && strncmp(tag, "com", 3) == 0) { if(!in_sound) buf_append_str(&b, "<span class='com'>"); }
-                 else if (tag_len == 4 && strncmp(tag, "/com", 4) == 0) { if(!in_sound) buf_append_str(&b, "</span>"); }
+                 else if (tag_len == 2 && strncmp(tag, "ex", 2) == 0) { if(!in_media) buf_append_str(&b, "<span class='ex'>"); }
+                 else if (tag_len == 3 && strncmp(tag, "/ex", 3) == 0) { if(!in_media) buf_append_str(&b, "</span>"); }
+                 else if (tag_len == 3 && strncmp(tag, "com", 3) == 0) { if(!in_media) buf_append_str(&b, "<span class='com'>"); }
+                 else if (tag_len == 4 && strncmp(tag, "/com", 4) == 0) { if(!in_media) buf_append_str(&b, "</span>"); }
                  
                  else {
                      // Potential transcription if unknown tag with no space (e.g. [frait])
                      int has_space = 0;
                      for(size_t j=0; j<tag_len; j++) if(isspace(tag[j])) has_space = 1;
 
-                     if (!in_sound) {
+                     if (!in_media) {
                          if (!has_space && tag_len > 0 && tag[0] != '/') {
                              const char *trans_color = dark_mode ? "#9ae59a" : "#1e8e3e";
                              buf_append_str(&b, "<span style='color: ");
@@ -1750,18 +1951,20 @@ char* dsl_render_to_html(const char *dsl_text,
             size_t end = i + 2;
             while (end + 1 < length && !(dsl_text[end] == '>' && dsl_text[end+1] == '>')) end++;
             if (end + 1 < length) {
-                if (!in_sound) {
-                    size_t word_len = end - i - 2;
+                    if (!in_media) {
+                        size_t word_len = end - i - 2;
+                        char *display_word = normalize_headword_for_render(dsl_text + i + 2, word_len, TRUE);
                     buf_append_str(&b, "<a class='dict-link' href='#'>");
-                    buf_append(&b, dsl_text + i + 2, word_len);
+                    buf_append_escaped_html(&b, display_word, strlen(display_word));
                     buf_append_str(&b, "</a>");
+                    g_free(display_word);
                 }
                 i = end + 2;
                 continue;
             }
         }
         else if (dsl_text[i] == '<') {
-            if (!in_sound) {
+            if (!in_media) {
                 // Potential sense identifier like <A>
                 size_t end = i + 1;
                 while (end < length && dsl_text[end] != '>' && (end - i < 10)) end++;
@@ -1782,31 +1985,32 @@ char* dsl_render_to_html(const char *dsl_text,
             } else { i++; continue; }
         }
         else if (dsl_text[i] == '\n') {
-            if (!in_sound) buf_append_str(&b, "\n");
+            if (!in_media) buf_append_str(&b, "\n");
             i++;
             continue;
         } 
         else if (dsl_text[i] == '~') {
-            if (!in_sound) buf_append(&b, headword, hw_length);
+            if (!in_media) buf_append_escaped_html(&b, display_headword, strlen(display_headword));
             i++;
             continue;
         } 
         else if (dsl_text[i] == '>') {
-            if (!in_sound) buf_append_str(&b, "&gt;");
+            if (!in_media) buf_append_str(&b, "&gt;");
             i++;
             continue;
         } 
         else if (dsl_text[i] == '&') {
-            if (!in_sound) buf_append_str(&b, "&amp;");
+            if (!in_media) buf_append_str(&b, "&amp;");
             i++;
             continue;
         }
         
-        if (!in_sound) buf_append(&b, &dsl_text[i], 1);
+        if (!in_media) buf_append(&b, &dsl_text[i], 1);
         i++;
     }
     
     if (m_open) buf_append_str(&b, "</div>");
+    g_string_free(media_buf, TRUE);
     
     if (b.str == NULL) {
         buf_append_str(&b, " ");
@@ -1816,5 +2020,6 @@ char* dsl_render_to_html(const char *dsl_text,
     
     g_free(normalized_plain_text);
     g_free(styled_text);
+    g_free(display_headword);
     return finalize_placeholder_dict_links(b.str);
 }

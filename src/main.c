@@ -11,25 +11,49 @@
 static DictEntry *all_dicts = NULL;
 static DictEntry *active_entry = NULL;
 static WebKitWebView *web_view = NULL;
-static GtkListBox *dict_listbox = NULL;
 static AdwStyleManager *style_manager = NULL;
 static GtkSearchEntry *search_entry = NULL;
 static char *last_search_query = NULL;
 static AppSettings *app_settings = NULL;
-static GtkListBox *history_listbox = NULL;
-static GtkListBox *related_listbox = NULL;
-static GtkListBox *favorites_listbox = NULL;
-static GtkListBox *groups_listbox = NULL;
 static GtkWidget *favorite_toggle_btn = NULL;
 static GPtrArray *history_words = NULL;
 static GPtrArray *favorite_words = NULL;
 static char *active_scope_id = NULL;
 static guint search_execute_source_id = 0;
+static GtkStringList *related_string_list = NULL;
+static GtkSingleSelection *related_selection_model = NULL;
+static GtkListView *related_list_view = NULL;
+static GPtrArray *related_row_payloads = NULL;
+
+typedef enum {
+    SIDEBAR_ROW_HINT = 0,
+    SIDEBAR_ROW_WORD,
+    SIDEBAR_ROW_GROUP,
+    SIDEBAR_ROW_DICT
+} SidebarRowType;
+
+typedef struct {
+    SidebarRowType type;
+    char *title;
+    char *subtitle;
+    char *scope_id;
+    DictEntry *dict_entry;
+} SidebarRowPayload;
+
+typedef struct {
+    GtkStringList *string_list;
+    GtkSingleSelection *selection_model;
+    GtkListView *list_view;
+    GPtrArray *payloads;
+} SidebarListView;
+
+static SidebarListView dict_sidebar = {0};
+static SidebarListView history_sidebar = {0};
+static SidebarListView favorites_sidebar = {0};
+static SidebarListView groups_sidebar = {0};
 
 #define HISTORY_FILE_NAME "history.json"
 #define FAVORITES_FILE_NAME "favorites.json"
-#define SEARCH_SIDEBAR_MIN_BROAD_QUERY_LEN 3
-
 static void populate_dict_sidebar(void);      // forward declaration
 static void start_async_dict_loading(void);   // forward declaration
 static void on_search_changed(GtkSearchEntry *entry, gpointer user_data); // forward declaration
@@ -37,20 +61,31 @@ static void on_random_clicked(GtkButton *btn, gpointer user_data);
 static void refresh_search_results(void);
 static void populate_search_sidebar(const char *query);
 static void execute_search_now(void);
+static void activate_dictionary_entry(DictEntry *e);
 
 typedef struct {
     char *query;
     char *query_key;
     guint query_len;
-    GHashTable *best;
+    GHashTable *seen_words;
     DictEntry *current_entry;
     DictEntry *current_dict;
     SplayNode *current_node;
-    guint dict_rank;
+    gboolean list_started;
     guint source_id;
 } SidebarSearchState;
 
 static SidebarSearchState *sidebar_search_state = NULL;
+
+typedef enum {
+    RELATED_ROW_HINT = 0,
+    RELATED_ROW_CANDIDATE
+} RelatedRowType;
+
+typedef struct {
+    RelatedRowType type;
+    char *word;
+} RelatedRowPayload;
 
 static gboolean spawn_audio_argv(const char *const *argv, const char *label) {
     GError *error = NULL;
@@ -192,6 +227,7 @@ static gboolean try_play_encoded_sound_uri(const char *uri) {
     }
 
     char *audio_url = query_param_dup(query + 1, "url");
+    char *audio_path_param = query_param_dup(query + 1, "path");
     char *resource_dir = query_param_dup(query + 1, "dir");
     char *sound_file = query_param_dup(query + 1, "file");
 
@@ -199,12 +235,28 @@ static gboolean try_play_encoded_sound_uri(const char *uri) {
         fprintf(stderr, "[AUDIO CLICKED] URL: %s\n", audio_url);
         play_audio_file(audio_url);
         g_free(audio_url);
+        g_free(audio_path_param);
         g_free(resource_dir);
         g_free(sound_file);
         return TRUE;
     }
 
     g_free(audio_url);
+
+    if (audio_path_param && *audio_path_param) {
+        fprintf(stderr, "[AUDIO CLICKED] Path: %s\n", audio_path_param);
+        if (g_file_test(audio_path_param, G_FILE_TEST_EXISTS)) {
+            play_audio_file(audio_path_param);
+        } else {
+            fprintf(stderr, "[AUDIO ERROR] File not found: %s\n", audio_path_param);
+        }
+        g_free(audio_path_param);
+        g_free(resource_dir);
+        g_free(sound_file);
+        return TRUE;
+    }
+
+    g_free(audio_path_param);
 
     if (!resource_dir || !sound_file) {
         g_free(resource_dir);
@@ -233,7 +285,9 @@ static char *sanitize_user_word(const char *value) {
         return NULL;
     }
 
-    char *text = g_strdup(value);
+    char *valid = g_utf8_make_valid(value, -1);
+    char *text = g_strdup(valid);
+    g_free(valid);
     g_strstrip(text);
     for (char *p = text; *p; p++) {
         if (*p == '\r' || *p == '\n' || *p == '\t') {
@@ -262,63 +316,75 @@ static char *sanitize_user_word(const char *value) {
     return g_string_free(clean, FALSE);
 }
 
+static gboolean text_has_replacement_char(const char *text) {
+    return text && strstr(text, "\xEF\xBF\xBD") != NULL;
+}
+
+static char *normalize_headword_for_search(const char *value) {
+    if (!value) {
+        return NULL;
+    }
+
+    char *valid = g_utf8_make_valid(value, -1);
+    GString *out = g_string_new("");
+    const char *p = valid;
+
+    while (*p) {
+        if (g_str_has_prefix(p, "{*}")) {
+            p += strlen("{*}");
+            continue;
+        }
+
+        if (g_str_has_prefix(p, "{·}")) {
+            p += strlen("{·}");
+            continue;
+        }
+
+        if (*p == '\\' && p[1] != '\0') {
+            const char *next = p + 1;
+            const char *next_end = g_utf8_next_char(next);
+            g_string_append_len(out, next, next_end - next);
+            p = next_end;
+            continue;
+        }
+
+        const char *next = g_utf8_next_char(p);
+        g_string_append_len(out, p, next - p);
+        p = next;
+    }
+
+    char *normalized = g_string_free(out, FALSE);
+    char *clean = sanitize_user_word(normalized);
+    g_free(normalized);
+    g_free(valid);
+    return clean;
+}
+
 typedef enum {
     SEARCH_BUCKET_EXACT = 0,
     SEARCH_BUCKET_SUFFIX,
     SEARCH_BUCKET_PREFIX,
+    SEARCH_BUCKET_PHRASE,
     SEARCH_BUCKET_SUBSTRING,
     SEARCH_BUCKET_FUZZY
 } SearchBucket;
 
-typedef struct {
-    char *word;
-    char *word_key;
-    char *dict_name;
-    guint dict_rank;
-    SearchBucket bucket;
-    double fuzzy_score;
-    guint length_delta;
-} SearchCandidate;
-
-static void search_candidate_free(SearchCandidate *candidate) {
-    if (!candidate) {
+static void related_row_payload_free(RelatedRowPayload *payload) {
+    if (!payload) {
         return;
     }
-    g_free(candidate->word);
-    g_free(candidate->word_key);
-    g_free(candidate->dict_name);
-    g_free(candidate);
+    g_free(payload->word);
+    g_free(payload);
 }
 
-static const char *search_bucket_label(SearchBucket bucket) {
-    switch (bucket) {
-    case SEARCH_BUCKET_EXACT:
-        return "Exact";
-    case SEARCH_BUCKET_SUFFIX:
-        return "Suffix";
-    case SEARCH_BUCKET_PREFIX:
-        return "Prefix";
-    case SEARCH_BUCKET_SUBSTRING:
-        return "Substring";
-    case SEARCH_BUCKET_FUZZY:
-        return "Fuzzy";
-    default:
-        return "Match";
+static void sidebar_row_payload_free(SidebarRowPayload *payload) {
+    if (!payload) {
+        return;
     }
-}
-
-static GtkWidget *create_search_section_row(const char *title) {
-    GtkWidget *row = gtk_list_box_row_new();
-    GtkWidget *label = gtk_label_new(title ? title : "");
-    gtk_label_set_xalign(GTK_LABEL(label), 0.0f);
-    gtk_widget_set_margin_start(label, 12);
-    gtk_widget_set_margin_end(label, 12);
-    gtk_widget_set_margin_top(label, 10);
-    gtk_widget_set_margin_bottom(label, 4);
-    gtk_widget_add_css_class(label, "heading");
-    gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), label);
-    gtk_widget_set_sensitive(row, FALSE);
-    return row;
+    g_free(payload->title);
+    g_free(payload->subtitle);
+    g_free(payload->scope_id);
+    g_free(payload);
 }
 
 static guint utf8_length_or_bytes(const char *text) {
@@ -384,6 +450,27 @@ static double fuzzy_similarity_score(const char *query_key, const char *candidat
     return 1.0 - ((double)distance / (double)longest);
 }
 
+static gboolean candidate_has_token_match(const char *candidate_key, const char *query_key) {
+    if (!candidate_key || !query_key || !*query_key) {
+        return FALSE;
+    }
+
+    gsize query_bytes = strlen(query_key);
+    const char *match = candidate_key;
+    while ((match = strstr(match, query_key)) != NULL) {
+        const char *before = g_utf8_find_prev_char(candidate_key, match);
+        const char *after = match + query_bytes;
+        gboolean before_ok = !before || !g_unichar_isalnum(g_utf8_get_char(before));
+        gboolean after_ok = !*after || !g_unichar_isalnum(g_utf8_get_char(after));
+        if (before_ok && after_ok) {
+            return TRUE;
+        }
+        match = g_utf8_next_char(match);
+    }
+
+    return FALSE;
+}
+
 static gboolean classify_search_candidate(const char *query_key,
                                           guint query_len,
                                           const char *candidate_key,
@@ -425,7 +512,9 @@ static gboolean classify_search_candidate(const char *query_key,
 
     if (strstr(candidate_key, query_key) != NULL) {
         if (bucket_out) {
-            *bucket_out = SEARCH_BUCKET_SUBSTRING;
+            *bucket_out = candidate_has_token_match(candidate_key, query_key)
+                ? SEARCH_BUCKET_PHRASE
+                : SEARCH_BUCKET_SUBSTRING;
         }
         if (fuzzy_score_out) {
             *fuzzy_score_out = 0.0;
@@ -458,67 +547,6 @@ static gboolean classify_search_candidate(const char *query_key,
     return TRUE;
 }
 
-static gboolean search_candidate_should_replace(const SearchCandidate *current,
-                                                SearchBucket bucket,
-                                                double fuzzy_score,
-                                                guint dict_rank,
-                                                guint length_delta,
-                                                const char *display_word) {
-    if (!current) {
-        return TRUE;
-    }
-
-    if ((int)bucket != (int)current->bucket) {
-        return ((int)bucket < (int)current->bucket);
-    }
-
-    if (bucket == SEARCH_BUCKET_FUZZY) {
-        if (fuzzy_score != current->fuzzy_score) {
-            return fuzzy_score > current->fuzzy_score;
-        }
-        if (length_delta != current->length_delta) {
-            return length_delta < current->length_delta;
-        }
-    }
-
-    if (dict_rank != current->dict_rank) {
-        return dict_rank < current->dict_rank;
-    }
-
-    return g_ascii_strcasecmp(display_word, current->word) < 0;
-}
-
-static gint compare_search_candidates(gconstpointer a, gconstpointer b) {
-    const SearchCandidate *left = *(SearchCandidate * const *)a;
-    const SearchCandidate *right = *(SearchCandidate * const *)b;
-
-    if (left->bucket != right->bucket) {
-        return (gint)left->bucket - (gint)right->bucket;
-    }
-
-    if (left->bucket == SEARCH_BUCKET_FUZZY && left->fuzzy_score != right->fuzzy_score) {
-        return left->fuzzy_score > right->fuzzy_score ? -1 : 1;
-    }
-
-    int word_cmp = g_ascii_strcasecmp(left->word, right->word);
-    if (word_cmp != 0 && left->bucket != SEARCH_BUCKET_FUZZY) {
-        return word_cmp;
-    }
-
-    if (left->dict_rank != right->dict_rank) {
-        return left->dict_rank < right->dict_rank ? -1 : 1;
-    }
-
-    if (left->length_delta != right->length_delta) {
-        return left->length_delta < right->length_delta ? -1 : 1;
-    }
-
-    if (word_cmp != 0) {
-        return word_cmp;
-    }
-
-    return g_ascii_strcasecmp(left->dict_name, right->dict_name);
-}
 
 static char *get_app_config_file_path(const char *filename) {
     char *dir = g_build_filename(g_get_user_config_dir(), "diction", NULL);
@@ -541,8 +569,8 @@ static void sidebar_search_state_free(SidebarSearchState *state) {
     }
     g_free(state->query);
     g_free(state->query_key);
-    if (state->best) {
-        g_hash_table_unref(state->best);
+    if (state->seen_words) {
+        g_hash_table_unref(state->seen_words);
     }
     g_free(state);
 }
@@ -626,31 +654,156 @@ static void save_word_list(GPtrArray *words, const char *filename) {
     g_free(path);
 }
 
-static void clear_listbox_rows(GtkListBox *listbox) {
-    if (!listbox) {
-        return;
+static void clear_related_rows(void) {
+    if (related_row_payloads) {
+        g_ptr_array_set_size(related_row_payloads, 0);
     }
-    GtkWidget *child = NULL;
-    while ((child = gtk_widget_get_first_child(GTK_WIDGET(listbox)))) {
-        gtk_list_box_remove(listbox, child);
+    if (GTK_IS_STRING_LIST(related_string_list)) {
+        guint n_items = g_list_model_get_n_items(G_LIST_MODEL(related_string_list));
+        gtk_string_list_splice(related_string_list, 0, n_items, NULL);
     }
 }
 
-typedef struct {
-    char *word;
-} SidebarWordData;
-
-static void sidebar_word_data_free(SidebarWordData *data) {
-    if (!data) {
+static void set_related_rows(GPtrArray *labels, GPtrArray *payloads) {
+    clear_related_rows();
+    if (!labels || labels->len == 0 || !GTK_IS_STRING_LIST(related_string_list) || !related_row_payloads) {
         return;
     }
-    g_free(data->word);
-    g_free(data);
+
+    char **items = g_new0(char *, labels->len + 1);
+    for (guint i = 0; i < labels->len; i++) {
+        items[i] = g_ptr_array_index(labels, i);
+    }
+    gtk_string_list_splice(related_string_list, 0, 0, (const char * const *)items);
+    g_free(items);
+
+    for (guint i = 0; i < payloads->len; i++) {
+        g_ptr_array_add(related_row_payloads, g_ptr_array_index(payloads, i));
+    }
+    g_ptr_array_set_size(payloads, 0);
 }
 
-static void sidebar_word_data_destroy(gpointer data, GClosure *closure) {
-    (void)closure;
-    sidebar_word_data_free(data);
+static void append_related_rows(GPtrArray *labels, GPtrArray *payloads) {
+    if (!labels || labels->len == 0 || !GTK_IS_STRING_LIST(related_string_list) || !related_row_payloads) {
+        return;
+    }
+
+    guint start = g_list_model_get_n_items(G_LIST_MODEL(related_string_list));
+    char **items = g_new0(char *, labels->len + 1);
+    for (guint i = 0; i < labels->len; i++) {
+        items[i] = g_ptr_array_index(labels, i);
+    }
+    gtk_string_list_splice(related_string_list, start, 0, (const char * const *)items);
+    g_free(items);
+
+    for (guint i = 0; i < payloads->len; i++) {
+        g_ptr_array_add(related_row_payloads, g_ptr_array_index(payloads, i));
+    }
+    g_ptr_array_set_size(payloads, 0);
+}
+
+static void clear_sidebar_list(SidebarListView *sidebar) {
+    if (!sidebar) {
+        return;
+    }
+    if (sidebar->payloads) {
+        g_ptr_array_set_size(sidebar->payloads, 0);
+    }
+    if (GTK_IS_STRING_LIST(sidebar->string_list)) {
+        guint n_items = g_list_model_get_n_items(G_LIST_MODEL(sidebar->string_list));
+        gtk_string_list_splice(sidebar->string_list, 0, n_items, NULL);
+    }
+}
+
+static void set_sidebar_list_rows(SidebarListView *sidebar, GPtrArray *labels, GPtrArray *payloads) {
+    clear_sidebar_list(sidebar);
+    if (!sidebar || !labels || labels->len == 0 || !GTK_IS_STRING_LIST(sidebar->string_list) || !sidebar->payloads) {
+        return;
+    }
+
+    for (guint i = 0; i < payloads->len; i++) {
+        g_ptr_array_add(sidebar->payloads, g_ptr_array_index(payloads, i));
+    }
+    g_ptr_array_set_size(payloads, 0);
+
+    char **items = g_new0(char *, labels->len + 1);
+    for (guint i = 0; i < labels->len; i++) {
+        items[i] = g_ptr_array_index(labels, i);
+    }
+    gtk_string_list_splice(sidebar->string_list, 0, 0, (const char * const *)items);
+    g_free(items);
+}
+
+static SidebarRowPayload *sidebar_payload_at(SidebarListView *sidebar, guint position) {
+    if (!sidebar || !sidebar->payloads || position >= sidebar->payloads->len) {
+        return NULL;
+    }
+    return g_ptr_array_index(sidebar->payloads, position);
+}
+
+static gboolean sidebar_list_select_payload(SidebarListView *sidebar, SidebarRowPayload *target) {
+    if (!sidebar || !sidebar->selection_model || !sidebar->payloads) {
+        return FALSE;
+    }
+    for (guint i = 0; i < sidebar->payloads->len; i++) {
+        if (g_ptr_array_index(sidebar->payloads, i) == target) {
+            gtk_single_selection_set_selected(sidebar->selection_model, i);
+            return TRUE;
+        }
+    }
+    gtk_single_selection_set_selected(sidebar->selection_model, GTK_INVALID_LIST_POSITION);
+    return FALSE;
+}
+
+static GtkWidget *sidebar_list_item_make_label(void) {
+    GtkWidget *label = gtk_label_new("");
+    gtk_label_set_xalign(GTK_LABEL(label), 0.0f);
+    gtk_label_set_wrap(GTK_LABEL(label), TRUE);
+    gtk_label_set_wrap_mode(GTK_LABEL(label), PANGO_WRAP_WORD_CHAR);
+    gtk_label_set_use_markup(GTK_LABEL(label), TRUE);
+    gtk_widget_set_margin_start(label, 12);
+    gtk_widget_set_margin_end(label, 12);
+    gtk_widget_set_margin_top(label, 8);
+    gtk_widget_set_margin_bottom(label, 8);
+    return label;
+}
+
+static void sidebar_list_item_setup(GtkSignalListItemFactory *factory, GtkListItem *item, gpointer user_data) {
+    (void)factory;
+    (void)user_data;
+    gtk_list_item_set_child(item, sidebar_list_item_make_label());
+}
+
+static void sidebar_list_item_bind(GtkSignalListItemFactory *factory, GtkListItem *item, gpointer user_data) {
+    (void)factory;
+    SidebarListView *sidebar = user_data;
+    GtkWidget *label = gtk_list_item_get_child(item);
+    guint position = gtk_list_item_get_position(item);
+    SidebarRowPayload *payload = sidebar_payload_at(sidebar, position);
+    const char *title = payload && payload->title ? payload->title : "";
+    const char *subtitle = payload && payload->subtitle ? payload->subtitle : "";
+    char *safe_title = g_markup_escape_text(title, -1);
+    char *safe_subtitle = g_markup_escape_text(subtitle, -1);
+    char *markup = NULL;
+
+    if (payload && payload->type == SIDEBAR_ROW_HINT) {
+        if (*safe_subtitle) {
+            markup = g_strdup_printf("<span alpha='75%%'>%s</span>\n<span alpha='60%%' size='small'>%s</span>",
+                                     safe_title, safe_subtitle);
+        } else {
+            markup = g_strdup_printf("<span alpha='75%%'>%s</span>", safe_title);
+        }
+    } else if (*safe_subtitle) {
+        markup = g_strdup_printf("%s\n<span alpha='65%%' size='small'>%s</span>",
+                                 safe_title, safe_subtitle);
+    } else {
+        markup = g_strdup(safe_title);
+    }
+
+    gtk_label_set_markup(GTK_LABEL(label), markup);
+    g_free(markup);
+    g_free(safe_title);
+    g_free(safe_subtitle);
 }
 
 static void refresh_favorite_button_state(void);
@@ -659,9 +812,6 @@ static void populate_favorites_sidebar(void);
 static void populate_groups_sidebar(void);
 static void populate_search_sidebar(const char *query);
 static gboolean dict_entry_in_active_scope(DictEntry *entry);
-static GtkWidget *create_word_sidebar_row(const char *word,
-                                          const char *subtitle,
-                                          gboolean add_favorite_button);
 
 static void cancel_sidebar_search(void) {
     if (sidebar_search_state && sidebar_search_state->source_id != 0) {
@@ -672,116 +822,22 @@ static void cancel_sidebar_search(void) {
 }
 
 static void populate_search_sidebar_status(const char *title, const char *subtitle) {
-    clear_listbox_rows(related_listbox);
-    if (!related_listbox) {
-        return;
-    }
-    GtkWidget *row = create_word_sidebar_row(title, subtitle, FALSE);
-    gtk_widget_set_sensitive(row, FALSE);
-    gtk_list_box_append(related_listbox, row);
-}
-
-static void render_sidebar_search_results(SidebarSearchState *state) {
-    clear_listbox_rows(related_listbox);
-    if (!related_listbox || !state) {
+    if (!GTK_IS_STRING_LIST(related_string_list) || !related_row_payloads) {
         return;
     }
 
-    GPtrArray *ordered = g_ptr_array_new();
-    GHashTableIter iter;
-    gpointer key = NULL;
-    gpointer value = NULL;
-    g_hash_table_iter_init(&iter, state->best);
-    while (g_hash_table_iter_next(&iter, &key, &value)) {
-        g_ptr_array_add(ordered, value);
-    }
-    g_ptr_array_sort(ordered, compare_search_candidates);
-
-    guint total = 0;
-    for (int bucket = SEARCH_BUCKET_EXACT; bucket <= SEARCH_BUCKET_FUZZY; bucket++) {
-        guint appended = 0;
-        for (guint i = 0; i < ordered->len; i++) {
-            SearchCandidate *candidate = g_ptr_array_index(ordered, i);
-            if ((int)candidate->bucket != bucket) {
-                continue;
-            }
-            if (appended == 0) {
-                gtk_list_box_append(related_listbox,
-                    create_search_section_row(search_bucket_label((SearchBucket)bucket)));
-            }
-            gtk_list_box_append(related_listbox,
-                create_word_sidebar_row(candidate->word, candidate->dict_name, FALSE));
-            appended++;
-            total++;
-        }
-    }
-
-    if (total == 0) {
-        GtkWidget *row = create_word_sidebar_row("No suggestions", state->query, FALSE);
-        gtk_widget_set_sensitive(row, FALSE);
-        gtk_list_box_append(related_listbox, row);
-    }
-
-    g_ptr_array_free(ordered, TRUE);
-}
-
-static void populate_search_sidebar_exact_only(const char *query, const char *empty_hint) {
-    clear_listbox_rows(related_listbox);
-    if (!related_listbox || !query || !*query) {
-        return;
-    }
-
-    GHashTable *seen = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
-    guint total = 0;
-    size_t q_len = strlen(query);
-
-    for (DictEntry *entry = all_dicts; entry; entry = entry->next) {
-        if (!entry->dict || !entry->dict->index || !dict_entry_in_active_scope(entry)) {
-            continue;
-        }
-
-        guint per_dict = 0;
-        for (SplayNode *node = splay_tree_search_first(entry->dict->index, query);
-             node;
-             node = splay_tree_successor(node)) {
-            const char *candidate_ptr = entry->dict->data + node->key_offset;
-            if (node->key_length != q_len ||
-                strncasecmp(candidate_ptr, query, q_len) != 0) {
-                break;
-            }
-
-            char *word = g_strndup(candidate_ptr, node->key_length);
-            char *word_key = g_utf8_casefold(word, -1);
-            if (!g_hash_table_contains(seen, word_key)) {
-                if (total == 0) {
-                    gtk_list_box_append(related_listbox, create_search_section_row("Exact"));
-                }
-                g_hash_table_add(seen, word_key);
-                gtk_list_box_append(related_listbox,
-                    create_word_sidebar_row(word, entry->name, FALSE));
-                word_key = NULL;
-                total++;
-                per_dict++;
-            }
-            g_free(word_key);
-            g_free(word);
-
-            if (per_dict >= 32) {
-                break;
-            }
-        }
-    }
-
-    if (total == 0) {
-        GtkWidget *row = create_word_sidebar_row(
-            empty_hint ? empty_hint : "No suggestions",
-            "Type more characters for broader matches.",
-            FALSE);
-        gtk_widget_set_sensitive(row, FALSE);
-        gtk_list_box_append(related_listbox, row);
-    }
-
-    g_hash_table_unref(seen);
+    GPtrArray *labels = g_ptr_array_new_with_free_func(g_free);
+    GPtrArray *payloads = g_ptr_array_new();
+    char *label = subtitle && *subtitle
+        ? g_strdup_printf("%s\n%s", title ? title : "", subtitle)
+        : g_strdup(title ? title : "");
+    RelatedRowPayload *payload = g_new0(RelatedRowPayload, 1);
+    payload->type = RELATED_ROW_HINT;
+    g_ptr_array_add(labels, label);
+    g_ptr_array_add(payloads, payload);
+    set_related_rows(labels, payloads);
+    g_ptr_array_free(labels, TRUE);
+    g_ptr_array_free(payloads, TRUE);
 }
 
 static gboolean continue_sidebar_search(gpointer user_data) {
@@ -791,12 +847,19 @@ static gboolean continue_sidebar_search(gpointer user_data) {
     }
 
     guint processed = 0;
-    const guint max_batch_size = 1500;
-    gint64 deadline_us = g_get_monotonic_time() + 8000;
+    const guint max_batch_size = 1200;
+    gint64 deadline_us = g_get_monotonic_time() + 6000;
+    GPtrArray *labels = g_ptr_array_new_with_free_func(g_free);
+    GPtrArray *payloads = g_ptr_array_new();
 
     while (processed < max_batch_size && g_get_monotonic_time() < deadline_us) {
         if (!state->current_entry) {
-            render_sidebar_search_results(state);
+            if (!state->list_started &&
+                g_hash_table_size(state->seen_words) == 0) {
+                populate_search_sidebar_status("No results", NULL);
+            }
+            g_ptr_array_free(labels, TRUE);
+            g_ptr_array_free(payloads, TRUE);
             state->source_id = 0;
             g_clear_pointer(&sidebar_search_state, sidebar_search_state_free);
             return G_SOURCE_REMOVE;
@@ -823,7 +886,6 @@ static gboolean continue_sidebar_search(gpointer user_data) {
                 continue;
             }
 
-            state->dict_rank++;
         }
 
         if (!state->current_node) {
@@ -839,27 +901,26 @@ static gboolean continue_sidebar_search(gpointer user_data) {
         state->current_node = splay_tree_successor(node);
 
         char *word = g_strndup(state->current_dict->dict->data + node->key_offset, node->key_length);
-        char *word_key = g_utf8_casefold(word, -1);
+        char *clean_word = normalize_headword_for_search(word);
+        if (!clean_word || text_has_replacement_char(clean_word)) {
+            g_free(word);
+            g_free(clean_word);
+            processed++;
+            continue;
+        }
+
+        char *word_key = g_utf8_casefold(clean_word, -1);
         SearchBucket bucket;
         double fuzzy_score = 0.0;
 
         if (classify_search_candidate(state->query_key, state->query_len, word_key, &bucket, &fuzzy_score)) {
-            guint candidate_len = utf8_length_or_bytes(word_key);
-            guint length_delta = candidate_len > state->query_len
-                ? candidate_len - state->query_len
-                : state->query_len - candidate_len;
-            SearchCandidate *current = g_hash_table_lookup(state->best, word_key);
-            if (search_candidate_should_replace(current, bucket, fuzzy_score, state->dict_rank, length_delta, word)) {
-                SearchCandidate *candidate = g_new0(SearchCandidate, 1);
-                candidate->word = word;
-                candidate->word_key = g_strdup(word_key);
-                candidate->dict_name = g_strdup(state->current_dict->name);
-                candidate->dict_rank = state->dict_rank;
-                candidate->bucket = bucket;
-                candidate->fuzzy_score = fuzzy_score;
-                candidate->length_delta = length_delta;
-                g_hash_table_replace(state->best, g_strdup(word_key), candidate);
-                word = NULL;
+            if (!g_hash_table_contains(state->seen_words, word_key)) {
+                RelatedRowPayload *payload = g_new0(RelatedRowPayload, 1);
+                payload->type = RELATED_ROW_CANDIDATE;
+                payload->word = g_strdup(clean_word);
+                g_hash_table_add(state->seen_words, g_strdup(word_key));
+                g_ptr_array_add(labels, g_strdup(clean_word));
+                g_ptr_array_add(payloads, payload);
             }
         }
 
@@ -867,40 +928,90 @@ static gboolean continue_sidebar_search(gpointer user_data) {
             state->current_dict = NULL;
         }
 
-        g_free(word_key);
         g_free(word);
+        g_free(clean_word);
+        g_free(word_key);
         processed++;
     }
 
+    if (labels->len > 0) {
+        if (!state->list_started) {
+            set_related_rows(labels, payloads);
+            state->list_started = TRUE;
+        } else {
+            append_related_rows(labels, payloads);
+        }
+    }
+    g_ptr_array_free(labels, TRUE);
+    g_ptr_array_free(payloads, TRUE);
+
     return G_SOURCE_CONTINUE;
+}
+
+static guint seed_search_sidebar_exact_rows(SidebarSearchState *state) {
+    if (!state || !state->query || !state->query_key) {
+        return 0;
+    }
+
+    GPtrArray *labels = g_ptr_array_new_with_free_func(g_free);
+    GPtrArray *payloads = g_ptr_array_new();
+    const guint max_seed_rows = 48;
+    guint added = 0;
+    size_t q_len = strlen(state->query);
+
+    for (DictEntry *entry = all_dicts; entry && added < max_seed_rows; entry = entry->next) {
+        if (!entry->dict || !entry->dict->index || !dict_entry_in_active_scope(entry)) {
+            continue;
+        }
+
+        for (SplayNode *node = splay_tree_search_first(entry->dict->index, state->query);
+             node && added < max_seed_rows;
+             node = splay_tree_successor(node)) {
+            if (node->key_length != q_len ||
+                strncasecmp(entry->dict->data + node->key_offset, state->query, q_len) != 0) {
+                break;
+            }
+
+            char *raw_word = g_strndup(entry->dict->data + node->key_offset, node->key_length);
+            char *clean_word = normalize_headword_for_search(raw_word);
+            g_free(raw_word);
+            if (!clean_word || text_has_replacement_char(clean_word)) {
+                g_free(clean_word);
+                continue;
+            }
+
+            char *word_key = g_utf8_casefold(clean_word, -1);
+            if (!g_hash_table_contains(state->seen_words, word_key)) {
+                RelatedRowPayload *payload = g_new0(RelatedRowPayload, 1);
+                payload->type = RELATED_ROW_CANDIDATE;
+                payload->word = g_strdup(clean_word);
+                g_hash_table_add(state->seen_words, g_strdup(word_key));
+                g_ptr_array_add(labels, g_strdup(clean_word));
+                g_ptr_array_add(payloads, payload);
+                added++;
+            }
+
+            g_free(word_key);
+            g_free(clean_word);
+        }
+    }
+
+    if (labels->len > 0) {
+        set_related_rows(labels, payloads);
+        state->list_started = TRUE;
+    }
+
+    g_ptr_array_free(labels, TRUE);
+    g_ptr_array_free(payloads, TRUE);
+    return added;
 }
 
 static void populate_search_sidebar(const char *query) {
     cancel_sidebar_search();
 
-    char *clean = sanitize_user_word(query);
+    char *clean = normalize_headword_for_search(query);
     if (!clean) {
-        clear_listbox_rows(related_listbox);
-        if (history_words && history_words->len > 0) {
-            guint limit = MIN(history_words->len, 25);
-            for (guint i = 0; i < limit; i++) {
-                const char *word = g_ptr_array_index(history_words, i);
-                gtk_list_box_append(related_listbox, create_word_sidebar_row(word, "Recent search", FALSE));
-            }
-        } else {
-            GtkWidget *row = create_word_sidebar_row("Start typing to search", "Candidate headwords will appear here.", FALSE);
-            gtk_widget_set_sensitive(row, FALSE);
-            gtk_list_box_append(related_listbox, row);
-        }
-        g_free(clean);
-        return;
-    }
-
-    guint query_len = utf8_length_or_bytes(clean);
-    if (query_len < SEARCH_SIDEBAR_MIN_BROAD_QUERY_LEN) {
-        populate_search_sidebar_exact_only(
-            clean,
-            "Type at least 3 characters for prefix, suffix, substring, and fuzzy suggestions.");
+        populate_search_sidebar_status("Type to search dictionaries…", NULL);
         g_free(clean);
         return;
     }
@@ -909,11 +1020,13 @@ static void populate_search_sidebar(const char *query) {
     sidebar_search_state->query = clean;
     sidebar_search_state->query_key = g_utf8_casefold(clean, -1);
     sidebar_search_state->query_len = utf8_length_or_bytes(sidebar_search_state->query_key);
-    sidebar_search_state->best = g_hash_table_new_full(
-        g_str_hash, g_str_equal, g_free, (GDestroyNotify)search_candidate_free);
+    sidebar_search_state->seen_words = g_hash_table_new_full(
+        g_str_hash, g_str_equal, g_free, NULL);
     sidebar_search_state->current_entry = all_dicts;
 
-    populate_search_sidebar_status("Searching suggestions…", clean);
+    if (seed_search_sidebar_exact_rows(sidebar_search_state) == 0) {
+        populate_search_sidebar_status("Searching…", NULL);
+    }
     sidebar_search_state->source_id = g_idle_add_full(
         G_PRIORITY_LOW, continue_sidebar_search, sidebar_search_state, NULL);
 }
@@ -981,51 +1094,6 @@ static void update_history_word(const char *word) {
 
     save_word_list(history_words, HISTORY_FILE_NAME);
     populate_history_sidebar();
-}
-
-static void on_sidebar_favorite_clicked(GtkButton *btn, gpointer user_data) {
-    (void)btn;
-    SidebarWordData *data = user_data;
-    if (!data || !data->word) {
-        return;
-    }
-    gboolean is_favorite = word_list_contains_ci(favorite_words, data->word);
-    update_favorites_word(data->word, !is_favorite);
-}
-
-static GtkWidget *create_word_sidebar_row(const char *word,
-                                          const char *subtitle,
-                                          gboolean add_favorite_button) {
-    GtkWidget *row = gtk_list_box_row_new();
-    GtkWidget *action = adw_action_row_new();
-    adw_preferences_row_set_use_markup(ADW_PREFERENCES_ROW(action), FALSE);
-    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(action), word ? word : "");
-    if (subtitle && *subtitle) {
-        adw_action_row_set_subtitle(ADW_ACTION_ROW(action), subtitle);
-    }
-    gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), action);
-
-    char *clean = sanitize_user_word(word);
-    if (clean) {
-        g_object_set_data_full(G_OBJECT(row), "lookup-word", clean, g_free);
-    }
-
-    if (add_favorite_button && clean) {
-        gboolean is_favorite = word_list_contains_ci(favorite_words, clean);
-        GtkWidget *fav_btn = gtk_button_new_from_icon_name(
-            is_favorite ? "starred-symbolic" : "non-starred-symbolic");
-        gtk_widget_add_css_class(fav_btn, "flat");
-        gtk_widget_set_valign(fav_btn, GTK_ALIGN_CENTER);
-        gtk_widget_set_tooltip_text(fav_btn, is_favorite ? "Unfavorite" : "Favorite");
-
-        SidebarWordData *data = g_new0(SidebarWordData, 1);
-        data->word = g_strdup(clean);
-        g_signal_connect_data(fav_btn, "clicked", G_CALLBACK(on_sidebar_favorite_clicked),
-            data, sidebar_word_data_destroy, 0);
-        adw_action_row_add_suffix(ADW_ACTION_ROW(action), fav_btn);
-    }
-
-    return row;
 }
 
 static gboolean dict_entry_enabled(DictEntry *entry) {
@@ -1101,45 +1169,71 @@ static void refresh_favorite_button_state(void) {
 }
 
 static void populate_history_sidebar(void) {
-    clear_listbox_rows(history_listbox);
-    if (!history_listbox || !history_words || history_words->len == 0) {
-        if (history_listbox) {
-            GtkWidget *row = create_word_sidebar_row("No history yet", "Successful searches will appear here.", FALSE);
-            gtk_widget_set_sensitive(row, FALSE);
-            gtk_list_box_append(history_listbox, row);
-        }
+    GPtrArray *labels = g_ptr_array_new_with_free_func(g_free);
+    GPtrArray *payloads = g_ptr_array_new();
+
+    if (!history_words || history_words->len == 0) {
+        SidebarRowPayload *payload = g_new0(SidebarRowPayload, 1);
+        payload->type = SIDEBAR_ROW_HINT;
+        payload->title = g_strdup("No history yet");
+        payload->subtitle = g_strdup("Successful searches will appear here.");
+        g_ptr_array_add(labels, g_strdup(payload->title));
+        g_ptr_array_add(payloads, payload);
+        set_sidebar_list_rows(&history_sidebar, labels, payloads);
+        g_ptr_array_free(labels, TRUE);
+        g_ptr_array_free(payloads, TRUE);
         return;
     }
 
     for (guint i = 0; i < history_words->len; i++) {
         const char *word = g_ptr_array_index(history_words, i);
-        gtk_list_box_append(history_listbox, create_word_sidebar_row(word, NULL, TRUE));
+        SidebarRowPayload *payload = g_new0(SidebarRowPayload, 1);
+        payload->type = SIDEBAR_ROW_WORD;
+        payload->title = g_strdup(word);
+        g_ptr_array_add(labels, g_strdup(word));
+        g_ptr_array_add(payloads, payload);
     }
+
+    set_sidebar_list_rows(&history_sidebar, labels, payloads);
+    g_ptr_array_free(labels, TRUE);
+    g_ptr_array_free(payloads, TRUE);
 }
 
 static void populate_favorites_sidebar(void) {
-    clear_listbox_rows(favorites_listbox);
-    if (!favorites_listbox || !favorite_words || favorite_words->len == 0) {
-        if (favorites_listbox) {
-            GtkWidget *row = create_word_sidebar_row("No favorites yet", "Use the star button to save words.", FALSE);
-            gtk_widget_set_sensitive(row, FALSE);
-            gtk_list_box_append(favorites_listbox, row);
-        }
+    GPtrArray *labels = g_ptr_array_new_with_free_func(g_free);
+    GPtrArray *payloads = g_ptr_array_new();
+
+    if (!favorite_words || favorite_words->len == 0) {
+        SidebarRowPayload *payload = g_new0(SidebarRowPayload, 1);
+        payload->type = SIDEBAR_ROW_HINT;
+        payload->title = g_strdup("No favorites yet");
+        payload->subtitle = g_strdup("Use the star button to save words.");
+        g_ptr_array_add(labels, g_strdup(payload->title));
+        g_ptr_array_add(payloads, payload);
+        set_sidebar_list_rows(&favorites_sidebar, labels, payloads);
+        g_ptr_array_free(labels, TRUE);
+        g_ptr_array_free(payloads, TRUE);
         return;
     }
 
     for (guint i = 0; i < favorite_words->len; i++) {
         const char *word = g_ptr_array_index(favorite_words, i);
-        gtk_list_box_append(favorites_listbox, create_word_sidebar_row(word, NULL, TRUE));
+        SidebarRowPayload *payload = g_new0(SidebarRowPayload, 1);
+        payload->type = SIDEBAR_ROW_WORD;
+        payload->title = g_strdup(word);
+        g_ptr_array_add(labels, g_strdup(word));
+        g_ptr_array_add(payloads, payload);
     }
+
+    set_sidebar_list_rows(&favorites_sidebar, labels, payloads);
+    g_ptr_array_free(labels, TRUE);
+    g_ptr_array_free(payloads, TRUE);
 }
 
 static void populate_groups_sidebar(void) {
-    clear_listbox_rows(groups_listbox);
-    if (!groups_listbox) {
-        return;
-    }
-    GtkListBoxRow *active_row = NULL;
+    GPtrArray *labels = g_ptr_array_new_with_free_func(g_free);
+    GPtrArray *payloads = g_ptr_array_new();
+    SidebarRowPayload *active_payload = NULL;
 
     guint all_count = 0;
     for (DictEntry *entry = all_dicts; entry; entry = entry->next) {
@@ -1148,25 +1242,24 @@ static void populate_groups_sidebar(void) {
         }
     }
 
-    GtkWidget *all_row = create_word_sidebar_row("All Dictionaries", NULL, FALSE);
-    g_object_set_data_full(G_OBJECT(all_row), "scope-id", g_strdup("all"), g_free);
-    {
-        GtkWidget *child = gtk_list_box_row_get_child(GTK_LIST_BOX_ROW(all_row));
-        if (ADW_IS_ACTION_ROW(child)) {
-            char subtitle[64];
-            g_snprintf(subtitle, sizeof(subtitle), "%u dictionaries", all_count);
-            adw_action_row_set_subtitle(ADW_ACTION_ROW(child), subtitle);
-        }
-    }
-    gtk_list_box_append(groups_listbox, all_row);
+    SidebarRowPayload *all_payload = g_new0(SidebarRowPayload, 1);
+    char all_subtitle[64];
+    g_snprintf(all_subtitle, sizeof(all_subtitle), "%u dictionaries", all_count);
+    all_payload->type = SIDEBAR_ROW_GROUP;
+    all_payload->title = g_strdup("All Dictionaries");
+    all_payload->subtitle = g_strdup(all_subtitle);
+    all_payload->scope_id = g_strdup("all");
+    g_ptr_array_add(labels, g_strdup(all_payload->title));
+    g_ptr_array_add(payloads, all_payload);
     if (!active_scope_id || g_strcmp0(active_scope_id, "all") == 0) {
-        active_row = GTK_LIST_BOX_ROW(all_row);
+        active_payload = all_payload;
     }
 
     if (!app_settings) {
-        if (active_row) {
-            gtk_list_box_select_row(groups_listbox, active_row);
-        }
+        set_sidebar_list_rows(&groups_sidebar, labels, payloads);
+        sidebar_list_select_payload(&groups_sidebar, active_payload);
+        g_ptr_array_free(labels, TRUE);
+        g_ptr_array_free(payloads, TRUE);
         return;
     }
 
@@ -1188,23 +1281,24 @@ static void populate_groups_sidebar(void) {
             g_free(dict_id);
         }
 
-        GtkWidget *row = create_word_sidebar_row(grp->name, NULL, FALSE);
-        g_object_set_data_full(G_OBJECT(row), "scope-id", g_strdup(grp->id), g_free);
-        GtkWidget *child = gtk_list_box_row_get_child(GTK_LIST_BOX_ROW(row));
-        if (ADW_IS_ACTION_ROW(child)) {
-            char subtitle[64];
-            g_snprintf(subtitle, sizeof(subtitle), "%u dictionaries", member_count);
-            adw_action_row_set_subtitle(ADW_ACTION_ROW(child), subtitle);
-        }
-        gtk_list_box_append(groups_listbox, row);
+        SidebarRowPayload *payload = g_new0(SidebarRowPayload, 1);
+        char subtitle[64];
+        g_snprintf(subtitle, sizeof(subtitle), "%u dictionaries", member_count);
+        payload->type = SIDEBAR_ROW_GROUP;
+        payload->title = g_strdup(grp->name);
+        payload->subtitle = g_strdup(subtitle);
+        payload->scope_id = g_strdup(grp->id);
+        g_ptr_array_add(labels, g_strdup(payload->title));
+        g_ptr_array_add(payloads, payload);
         if (active_scope_id && g_strcmp0(active_scope_id, grp->id) == 0) {
-            active_row = GTK_LIST_BOX_ROW(row);
+            active_payload = payload;
         }
     }
 
-    if (active_row) {
-        gtk_list_box_select_row(groups_listbox, active_row);
-    }
+    set_sidebar_list_rows(&groups_sidebar, labels, payloads);
+    sidebar_list_select_payload(&groups_sidebar, active_payload);
+    g_ptr_array_free(labels, TRUE);
+    g_ptr_array_free(payloads, TRUE);
 }
 
 static void on_favorite_toggle_clicked(GtkButton *btn, gpointer user_data) {
@@ -1219,16 +1313,18 @@ static void on_favorite_toggle_clicked(GtkButton *btn, gpointer user_data) {
     g_free(word);
 }
 
-static gboolean dict_list_filter_func(GtkListBoxRow *row, gpointer user_data) {
-    (void)user_data;
-    if (!search_entry) return TRUE;
+static gboolean dict_entry_visible_in_sidebar(DictEntry *entry) {
+    if (!entry || !dict_entry_enabled(entry)) {
+        return FALSE;
+    }
+    if (!search_entry) {
+        return TRUE;
+    }
     const char *query = gtk_editable_get_text(GTK_EDITABLE(search_entry));
-    if (!query || strlen(query) == 0) return TRUE;
-
-    DictEntry *e = g_object_get_data(G_OBJECT(row), "dict-entry");
-    if (!e) return TRUE;
-    
-    return e->has_matches;
+    if (!query || strlen(query) == 0) {
+        return TRUE;
+    }
+    return entry->has_matches;
 }
 
 static void on_decide_policy(WebKitWebView *v, WebKitPolicyDecision *d, WebKitPolicyDecisionType t, gpointer user_data) {
@@ -1273,48 +1369,152 @@ static void on_decide_policy(WebKitWebView *v, WebKitPolicyDecision *d, WebKitPo
     webkit_policy_decision_use(d);
 }
 
-static void on_history_selected(GtkListBox *box, GtkListBoxRow *row, gpointer user_data);
-static void on_related_selected(GtkListBox *box, GtkListBoxRow *row, gpointer user_data);
-static void on_favorites_selected(GtkListBox *box, GtkListBoxRow *row, gpointer user_data);
-static void on_groups_selected(GtkListBox *box, GtkListBoxRow *row, gpointer user_data);
+static void related_list_item_setup(GtkSignalListItemFactory *factory, GtkListItem *item, gpointer user_data);
+static void related_list_item_bind(GtkSignalListItemFactory *factory, GtkListItem *item, gpointer user_data);
+static void on_related_item_activated(GtkListView *view, guint position, gpointer user_data);
+static void on_history_item_activated(GtkListView *view, guint position, gpointer user_data);
+static void on_favorites_item_activated(GtkListView *view, guint position, gpointer user_data);
+static void on_groups_item_activated(GtkListView *view, guint position, gpointer user_data);
+static void on_dict_item_activated(GtkListView *view, guint position, gpointer user_data);
 
-static void on_history_selected(GtkListBox *box, GtkListBoxRow *row, gpointer user_data) {
-    (void)box; (void)user_data;
-    if (!row) return;
-    const char *text = g_object_get_data(G_OBJECT(row), "lookup-word");
-    if (text) {
-        gtk_editable_set_text(GTK_EDITABLE(search_entry), text);
+static void set_search_word_and_execute(const char *word) {
+    char *clean = normalize_headword_for_search(word);
+    if (!clean || text_has_replacement_char(clean)) {
+        g_free(clean);
+        return;
     }
-    gtk_list_box_unselect_all(box);
+
+    gtk_editable_set_text(GTK_EDITABLE(search_entry), clean);
+    g_clear_pointer(&last_search_query, g_free);
+    execute_search_now();
+    g_free(clean);
 }
 
-static void on_related_selected(GtkListBox *box, GtkListBoxRow *row, gpointer user_data) {
-    (void)box; (void)user_data;
-    if (!row) return;
-    const char *text = g_object_get_data(G_OBJECT(row), "lookup-word");
-    if (text) {
-        gtk_editable_set_text(GTK_EDITABLE(search_entry), text);
-    }
-    gtk_list_box_unselect_all(box);
+static GtkWidget *create_sidebar_list_view(SidebarListView *sidebar, GCallback activate_cb) {
+    sidebar->string_list = gtk_string_list_new(NULL);
+    sidebar->payloads = g_ptr_array_new_with_free_func((GDestroyNotify)sidebar_row_payload_free);
+    sidebar->selection_model = GTK_SINGLE_SELECTION(gtk_single_selection_new(G_LIST_MODEL(sidebar->string_list)));
+    gtk_single_selection_set_autoselect(sidebar->selection_model, FALSE);
+    gtk_single_selection_set_can_unselect(sidebar->selection_model, TRUE);
+
+    GtkListItemFactory *factory = gtk_signal_list_item_factory_new();
+    g_signal_connect(factory, "setup", G_CALLBACK(sidebar_list_item_setup), NULL);
+    g_signal_connect(factory, "bind", G_CALLBACK(sidebar_list_item_bind), sidebar);
+
+    sidebar->list_view = GTK_LIST_VIEW(gtk_list_view_new(GTK_SELECTION_MODEL(sidebar->selection_model), factory));
+    gtk_widget_add_css_class(GTK_WIDGET(sidebar->list_view), "navigation-sidebar");
+    gtk_list_view_set_single_click_activate(sidebar->list_view, TRUE);
+    g_signal_connect(sidebar->list_view, "activate", activate_cb, sidebar);
+    return GTK_WIDGET(sidebar->list_view);
 }
 
-static void on_favorites_selected(GtkListBox *box, GtkListBoxRow *row, gpointer user_data) {
-    (void)box; (void)user_data;
-    if (!row) return;
-    const char *text = g_object_get_data(G_OBJECT(row), "lookup-word");
-    if (text) {
-        gtk_editable_set_text(GTK_EDITABLE(search_entry), text);
+static void on_history_item_activated(GtkListView *view, guint position, gpointer user_data) {
+    (void)view;
+    SidebarListView *sidebar = user_data;
+    SidebarRowPayload *payload = sidebar_payload_at(sidebar, position);
+    if (payload && payload->type == SIDEBAR_ROW_WORD && payload->title) {
+        set_search_word_and_execute(payload->title);
     }
-    gtk_list_box_unselect_all(box);
+    if (sidebar && sidebar->selection_model) {
+        gtk_single_selection_set_selected(sidebar->selection_model, GTK_INVALID_LIST_POSITION);
+    }
 }
 
-static void on_groups_selected(GtkListBox *box, GtkListBoxRow *row, gpointer user_data) {
-    (void)box; (void)user_data;
-    if (!row) return;
-    const char *scope_id = g_object_get_data(G_OBJECT(row), "scope-id");
+static void related_list_item_setup(GtkSignalListItemFactory *factory, GtkListItem *item, gpointer user_data) {
+    (void)factory;
+    (void)user_data;
+    GtkWidget *label = gtk_label_new("");
+    gtk_label_set_xalign(GTK_LABEL(label), 0.0f);
+    gtk_label_set_wrap(GTK_LABEL(label), TRUE);
+    gtk_label_set_wrap_mode(GTK_LABEL(label), PANGO_WRAP_WORD_CHAR);
+    gtk_label_set_use_markup(GTK_LABEL(label), TRUE);
+    gtk_widget_set_margin_start(label, 12);
+    gtk_widget_set_margin_end(label, 12);
+    gtk_widget_set_margin_top(label, 8);
+    gtk_widget_set_margin_bottom(label, 8);
+    gtk_list_item_set_child(item, label);
+}
+
+static void related_list_item_bind(GtkSignalListItemFactory *factory, GtkListItem *item, gpointer user_data) {
+    (void)factory;
+    (void)user_data;
+    GtkWidget *label = gtk_list_item_get_child(item);
+    GtkStringObject *string_object = GTK_STRING_OBJECT(gtk_list_item_get_item(item));
+    guint position = gtk_list_item_get_position(item);
+    const char *text = string_object ? gtk_string_object_get_string(string_object) : "";
+    char *valid_text = g_utf8_make_valid(text ? text : "", -1);
+    RelatedRowPayload *payload = NULL;
+
+    if (related_row_payloads && position < related_row_payloads->len) {
+        payload = g_ptr_array_index(related_row_payloads, position);
+    }
+
+    if (payload && payload->type == RELATED_ROW_HINT) {
+        char *escaped = g_markup_escape_text(valid_text, -1);
+        char *markup = g_strdup_printf("<span alpha='75%%'>%s</span>", escaped);
+        gtk_label_set_markup(GTK_LABEL(label), markup);
+        g_free(markup);
+        g_free(escaped);
+        g_free(valid_text);
+        return;
+    }
+
+    gtk_label_set_text(GTK_LABEL(label), valid_text);
+    g_free(valid_text);
+}
+
+static void on_related_item_activated(GtkListView *view, guint position, gpointer user_data) {
+    (void)view;
+    (void)user_data;
+    if (!related_row_payloads || position >= related_row_payloads->len) {
+        return;
+    }
+
+    RelatedRowPayload *payload = g_ptr_array_index(related_row_payloads, position);
+    if (!payload || payload->type != RELATED_ROW_CANDIDATE || !payload->word) {
+        return;
+    }
+
+    set_search_word_and_execute(payload->word);
+    if (related_selection_model) {
+        gtk_single_selection_set_selected(related_selection_model, GTK_INVALID_LIST_POSITION);
+    }
+}
+
+static void on_favorites_item_activated(GtkListView *view, guint position, gpointer user_data) {
+    (void)view;
+    SidebarListView *sidebar = user_data;
+    SidebarRowPayload *payload = sidebar_payload_at(sidebar, position);
+    if (payload && payload->type == SIDEBAR_ROW_WORD && payload->title) {
+        set_search_word_and_execute(payload->title);
+    }
+    if (sidebar && sidebar->selection_model) {
+        gtk_single_selection_set_selected(sidebar->selection_model, GTK_INVALID_LIST_POSITION);
+    }
+}
+
+static void on_groups_item_activated(GtkListView *view, guint position, gpointer user_data) {
+    (void)view;
+    SidebarListView *sidebar = user_data;
+    SidebarRowPayload *payload = sidebar_payload_at(sidebar, position);
+    if (!payload || payload->type != SIDEBAR_ROW_GROUP) {
+        return;
+    }
     g_free(active_scope_id);
-    active_scope_id = g_strdup(scope_id ? scope_id : "all");
+    active_scope_id = g_strdup(payload->scope_id ? payload->scope_id : "all");
     refresh_search_results();
+    sidebar_list_select_payload(sidebar, payload);
+}
+
+static void on_dict_item_activated(GtkListView *view, guint position, gpointer user_data) {
+    (void)view;
+    SidebarListView *sidebar = user_data;
+    SidebarRowPayload *payload = sidebar_payload_at(sidebar, position);
+    if (!payload || payload->type != SIDEBAR_ROW_DICT || !payload->dict_entry) {
+        return;
+    }
+    activate_dictionary_entry(payload->dict_entry);
+    sidebar_list_select_payload(sidebar, payload);
 }
 
 static gboolean run_debounced_search(gpointer user_data) {
@@ -1331,6 +1531,75 @@ static void schedule_execute_search(void) {
     search_execute_source_id = g_timeout_add(200, run_debounced_search, NULL);
 }
 
+static gboolean headword_matches_normalized_query(const char *raw_word, const char *query_key) {
+    gboolean matches = FALSE;
+    char *normalized = normalize_headword_for_search(raw_word);
+    if (normalized) {
+        char *normalized_key = g_utf8_casefold(normalized, -1);
+        matches = g_strcmp0(normalized_key, query_key) == 0;
+        g_free(normalized_key);
+        g_free(normalized);
+    }
+    return matches;
+}
+
+static void append_rendered_entry_html(GString *html_res,
+                                       DictEntry *entry,
+                                       SplayNode *res,
+                                       int dict_idx,
+                                       int *dict_header_shown,
+                                       int *found_count) {
+    const char *def_ptr = entry->dict->data + res->val_offset;
+    size_t def_len = res->val_length;
+
+    if (entry->format == DICT_FORMAT_MDX && def_len > 8 && g_str_has_prefix(def_ptr, "@@@LINK=")) {
+        char link_target[1024];
+        const char *lp = def_ptr + 8;
+        size_t l = 0;
+        while (l < sizeof(link_target) - 1 && l < (def_len - 8) && lp[l] != '\r' && lp[l] != '\n') {
+            link_target[l] = lp[l];
+            l++;
+        }
+        link_target[l] = '\0';
+
+        SplayNode *red_res = splay_tree_search_first(entry->dict->index, link_target);
+        if (red_res) {
+            def_ptr = entry->dict->data + red_res->val_offset;
+            def_len = red_res->val_length;
+        }
+    }
+
+    int dark_mode = style_manager && adw_style_manager_get_dark(style_manager) ? 1 : 0;
+
+    char *rendered = dsl_render_to_html(
+        def_ptr, def_len,
+        entry->dict->data + res->key_offset, res->key_length,
+        entry->format, entry->dict->resource_dir, entry->dict->source_dir, entry->dict->mdx_stylesheet, dark_mode);
+    if (!rendered) {
+        return;
+    }
+
+    const char *bar_bg = dark_mode ? "#2d2d2d" : "#f0f0f0";
+    const char *bar_fg = dark_mode ? "#aaaaaa" : "#555555";
+    const char *bar_border = dark_mode ? "#444444" : "#dddddd";
+
+    if (!*dict_header_shown) {
+        g_string_append_printf(html_res,
+            "<div id='dict-%d' class='dict-source' style='background: %s; color: %s; "
+            "padding: 4px 12px; margin: 20px -10px 10px -10px; border-bottom: 1px solid %s; "
+            "font-size: 0.85em; font-weight: bold; text-transform: uppercase; letter-spacing: 0.05em;'>"
+            "%s</div>",
+            dict_idx, bar_bg, bar_fg, bar_border, entry->name);
+
+        *dict_header_shown = 1;
+        entry->has_matches = TRUE;
+        (*found_count)++;
+    }
+
+    g_string_append(html_res, rendered);
+    free(rendered);
+}
+
 static void execute_search_now(void) {
     if (search_execute_source_id != 0) {
         g_source_remove(search_execute_source_id);
@@ -1341,7 +1610,8 @@ static void execute_search_now(void) {
         return;
     }
 
-    const char *query = gtk_editable_get_text(GTK_EDITABLE(search_entry));
+    const char *query_raw = gtk_editable_get_text(GTK_EDITABLE(search_entry));
+    char *query = normalize_headword_for_search(query_raw);
 
     refresh_favorite_button_state();
 
@@ -1352,14 +1622,20 @@ static void execute_search_now(void) {
         for (DictEntry *e = all_dicts; e; e = e->next) {
             e->has_matches = FALSE;
         }
-        gtk_list_box_invalidate_filter(dict_listbox);
+        populate_dict_sidebar();
+        g_free(query);
         return;
+    }
+
+    if (g_strcmp0(query_raw, query) != 0) {
+        gtk_editable_set_text(GTK_EDITABLE(search_entry), query);
     }
 
     GString *html_res = g_string_new("<html><body style='font-family: sans-serif; padding: 10px;'>");
     int found_count = 0;
     for (DictEntry *e = all_dicts; e; e = e->next) e->has_matches = FALSE;
 
+    char *query_key = g_utf8_casefold(query, -1);
     int dict_idx = 0;
     for (DictEntry *e = all_dicts; e; e = e->next) {
         if (!e->dict || !dict_entry_in_active_scope(e)) continue;
@@ -1367,6 +1643,7 @@ static void execute_search_now(void) {
         SplayNode *res = splay_tree_search_first(e->dict->index, query);
         size_t q_len = strlen(query);
         int dict_header_shown = 0;
+        gboolean have_raw_exact = FALSE;
 
         while (res != NULL) {
             // Check if this node is still a match (case-insensitive and same length)
@@ -1374,62 +1651,22 @@ static void execute_search_now(void) {
                 strncasecmp(e->dict->data + res->key_offset, query, q_len) != 0) {
                 break;
             }
-
-            const char *def_ptr = e->dict->data + res->val_offset;
-            size_t def_len = res->val_length;
-
-            /* Handle MDX @@@LINK= redirect */
-            if (e->format == DICT_FORMAT_MDX && def_len > 8 && g_str_has_prefix(def_ptr, "@@@LINK=")) {
-                char link_target[1024];
-                const char *lp = def_ptr + 8;
-                size_t l = 0;
-                while (l < sizeof(link_target)-1 && l < (def_len - 8) && lp[l] != '\r' && lp[l] != '\n') {
-                    link_target[l] = lp[l];
-                    l++;
-                }
-                link_target[l] = '\0';
-
-                // For redirects, we just take the first match for simplicity, 
-                // or we could recursively handle it. But usually redirects are 1-to-1 or 1-to-many.
-                // Here we just use the first match of the target.
-                SplayNode *red_res = splay_tree_search_first(e->dict->index, link_target);
-                if (red_res) {
-                    def_ptr = e->dict->data + red_res->val_offset;
-                    def_len = red_res->val_length;
-                }
-            }
-
-            // Get current theme
-            int dark_mode = style_manager && adw_style_manager_get_dark(style_manager) ? 1 : 0;
-
-            char *rendered = dsl_render_to_html(
-                def_ptr, def_len,
-                e->dict->data + res->key_offset, res->key_length,
-                e->format, e->dict->resource_dir, e->dict->source_dir, e->dict->mdx_stylesheet, dark_mode);
-            if (rendered) {
-                // Theme-aware dict source bar colors
-                const char *bar_bg = dark_mode ? "#2d2d2d" : "#f0f0f0";
-                const char *bar_fg = dark_mode ? "#aaaaaa" : "#555555";
-                const char *bar_border = dark_mode ? "#444444" : "#dddddd";
-
-                if (!dict_header_shown) {
-                    g_string_append_printf(html_res,
-                        "<div id='dict-%d' class='dict-source' style='background: %s; color: %s; "
-                        "padding: 4px 12px; margin: 20px -10px 10px -10px; border-bottom: 1px solid %s; "
-                        "font-size: 0.85em; font-weight: bold; text-transform: uppercase; letter-spacing: 0.05em;'>"
-                        "%s</div>",
-                        dict_idx, bar_bg, bar_fg, bar_border, e->name);
-        
-                    dict_header_shown = 1;
-                    e->has_matches = TRUE;
-                    found_count++;
-                }
-
-                g_string_append(html_res, rendered);
-                free(rendered);
-            }
+            have_raw_exact = TRUE;
+            append_rendered_entry_html(html_res, e, res, dict_idx, &dict_header_shown, &found_count);
             
             res = splay_tree_successor(res);
+        }
+
+        if (!have_raw_exact) {
+            for (SplayNode *node = splay_tree_min(e->dict->index->root); node; node = splay_tree_successor(node)) {
+                char *raw_word = g_strndup(e->dict->data + node->key_offset, node->key_length);
+                gboolean matches = headword_matches_normalized_query(raw_word, query_key);
+                g_free(raw_word);
+                if (!matches) {
+                    continue;
+                }
+                append_rendered_entry_html(html_res, e, node, dict_idx, &dict_header_shown, &found_count);
+            }
         }
 
         dict_idx++;
@@ -1444,16 +1681,25 @@ static void execute_search_now(void) {
         int dark_mode = style_manager && adw_style_manager_get_dark(style_manager) ? 1 : 0;
         const char *text_color = dark_mode ? "#aaaaaa" : "#666666";
 
+        char *escaped_query = g_markup_escape_text(query, -1);
         char buf[512];
         snprintf(buf, sizeof(buf),
             "<div style='padding: 20px; color: %s; font-style: italic;'>"
             "No exact match for <b>%s</b> in any dictionary.</div>", text_color, query);
+        if (escaped_query) {
+            snprintf(buf, sizeof(buf),
+                "<div style='padding: 20px; color: %s; font-style: italic;'>"
+                "No exact match for <b>%s</b> in any dictionary.</div>", text_color, escaped_query);
+        }
         webkit_web_view_load_html(web_view, buf, "file:///");
+        g_free(escaped_query);
     }
     g_string_free(html_res, TRUE);
 
-    gtk_list_box_invalidate_filter(dict_listbox);
+    populate_dict_sidebar();
     populate_search_sidebar(query);
+    g_free(query_key);
+    g_free(query);
 }
 
 static void on_search_changed(GtkSearchEntry *entry, gpointer user_data) {
@@ -1507,12 +1753,8 @@ static void on_random_clicked(GtkButton *btn, gpointer user_data) {
     }
 }
 
-static void on_dict_selected(GtkListBox *box, GtkListBoxRow *row, gpointer user_data) {
-    (void)box; (void)user_data;
-    if (!row) return;
-    DictEntry *e = g_object_get_data(G_OBJECT(row), "dict-entry");
+static void activate_dictionary_entry(DictEntry *e) {
     if (!e) return;
-
     int idx = -1;
     int current = 0;
     for (DictEntry *cursor = all_dicts; cursor; cursor = cursor->next) {
@@ -1594,11 +1836,9 @@ static void reload_dictionaries_from_settings(void *user_data) {
     active_entry = NULL;
 
     // Clear sidebar
-    GtkWidget *child;
-    while ((child = gtk_widget_get_first_child(GTK_WIDGET(dict_listbox))))
-        gtk_list_box_remove(dict_listbox, child);
-    clear_listbox_rows(related_listbox);
-    clear_listbox_rows(groups_listbox);
+    clear_sidebar_list(&dict_sidebar);
+    clear_related_rows();
+    clear_sidebar_list(&groups_sidebar);
 
     // Show "Reloading..." and start async scan
     webkit_web_view_load_html(web_view,
@@ -1653,29 +1893,43 @@ static void on_sidebar_tab_toggled(GtkToggleButton *btn, gpointer user_data) {
     }
 }
 
-static void append_entry_to_sidebar(DictEntry *e) {
-    fprintf(stderr, "[SIDEBAR] Adding dictionary: '%s' (format: %d)\n", e->name, e->format);
-    GtkWidget *row = gtk_list_box_row_new();
-    GtkWidget *label = gtk_label_new(e->name);
-    gtk_label_set_xalign(GTK_LABEL(label), 0.0);
-    gtk_label_set_ellipsize(GTK_LABEL(label), PANGO_ELLIPSIZE_END);
-    gtk_widget_set_hexpand(label, TRUE);
-    gtk_widget_set_margin_start(label, 8);
-    gtk_widget_set_margin_end(label, 8);
-    gtk_widget_set_margin_top(label, 4);
-    gtk_widget_set_margin_bottom(label, 4);
-    
-    gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), label);
-    g_object_set_data(G_OBJECT(row), "dict-entry", e);
-    gtk_list_box_append(dict_listbox, row);
-}
-
 static void populate_dict_sidebar(void) {
+    GPtrArray *labels = g_ptr_array_new_with_free_func(g_free);
+    GPtrArray *payloads = g_ptr_array_new();
+    SidebarRowPayload *active_payload = NULL;
+
     for (DictEntry *e = all_dicts; e; e = e->next) {
-        if (dict_entry_enabled(e)) {
-            append_entry_to_sidebar(e);
+        if (dict_entry_visible_in_sidebar(e)) {
+            SidebarRowPayload *payload = g_new0(SidebarRowPayload, 1);
+            payload->type = SIDEBAR_ROW_DICT;
+            payload->title = g_strdup(e->name ? e->name : "Dictionary");
+            payload->dict_entry = e;
+            g_ptr_array_add(labels, g_strdup(payload->title));
+            g_ptr_array_add(payloads, payload);
+            if (e == active_entry) {
+                active_payload = payload;
+            }
         }
     }
+
+    if (labels->len == 0) {
+        SidebarRowPayload *payload = g_new0(SidebarRowPayload, 1);
+        payload->type = SIDEBAR_ROW_HINT;
+        payload->title = g_strdup("No dictionaries");
+        payload->subtitle = g_strdup("Load or enable a dictionary to browse results.");
+        g_ptr_array_add(labels, g_strdup(payload->title));
+        g_ptr_array_add(payloads, payload);
+    }
+
+    set_sidebar_list_rows(&dict_sidebar, labels, payloads);
+    if (active_payload) {
+        sidebar_list_select_payload(&dict_sidebar, active_payload);
+    } else if (dict_sidebar.selection_model) {
+        gtk_single_selection_set_selected(dict_sidebar.selection_model, GTK_INVALID_LIST_POSITION);
+    }
+
+    g_ptr_array_free(labels, TRUE);
+    g_ptr_array_free(payloads, TRUE);
 }
 
 // ------- Async loading infrastructure -------
@@ -1736,17 +1990,14 @@ static gboolean on_dict_loaded_idle(gpointer user_data) {
                 while (last->next) last = last->next;
                 last->next = e;
             }
-            // Add to sidebar
-            if (dict_entry_enabled(e)) {
-                append_entry_to_sidebar(e);
-            }
         }
+
+        populate_dict_sidebar();
 
         // Auto-select the very first dictionary
         if (all_dicts == e && !active_entry) {
             active_entry = e;
-            GtkListBoxRow *first = gtk_list_box_get_row_at_index(dict_listbox, 0);
-            if (first) gtk_list_box_select_row(dict_listbox, first);
+            populate_dict_sidebar();
         }
     }
 
@@ -1908,56 +2159,53 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     GtkWidget *related_scroll = gtk_scrolled_window_new();
     gtk_widget_set_vexpand(related_scroll, TRUE);
     gtk_widget_set_hexpand(related_scroll, TRUE);
-    related_listbox = GTK_LIST_BOX(gtk_list_box_new());
-    gtk_widget_add_css_class(GTK_WIDGET(related_listbox), "navigation-sidebar");
-    gtk_list_box_set_selection_mode(related_listbox, GTK_SELECTION_SINGLE);
-    g_signal_connect(related_listbox, "row-selected", G_CALLBACK(on_related_selected), NULL);
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(related_scroll), GTK_WIDGET(related_listbox));
+    related_string_list = gtk_string_list_new(NULL);
+    related_row_payloads = g_ptr_array_new_with_free_func((GDestroyNotify)related_row_payload_free);
+    related_selection_model = GTK_SINGLE_SELECTION(gtk_single_selection_new(G_LIST_MODEL(related_string_list)));
+    gtk_single_selection_set_autoselect(related_selection_model, FALSE);
+    gtk_single_selection_set_can_unselect(related_selection_model, TRUE);
+
+    GtkListItemFactory *related_factory = gtk_signal_list_item_factory_new();
+    g_signal_connect(related_factory, "setup", G_CALLBACK(related_list_item_setup), NULL);
+    g_signal_connect(related_factory, "bind", G_CALLBACK(related_list_item_bind), NULL);
+
+    related_list_view = GTK_LIST_VIEW(gtk_list_view_new(GTK_SELECTION_MODEL(related_selection_model), related_factory));
+    gtk_widget_add_css_class(GTK_WIDGET(related_list_view), "navigation-sidebar");
+    gtk_list_view_set_single_click_activate(related_list_view, TRUE);
+    g_signal_connect(related_list_view, "activate", G_CALLBACK(on_related_item_activated), NULL);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(related_scroll), GTK_WIDGET(related_list_view));
     adw_view_stack_add_titled_with_icon(sidebar_stack, related_scroll, "search", "Search", "system-search-symbolic");
 
     /* Dictionaries Tab */
     GtkWidget *dict_scroll = gtk_scrolled_window_new();
     gtk_widget_set_vexpand(dict_scroll, TRUE);
     gtk_widget_set_hexpand(dict_scroll, TRUE);
-    dict_listbox = GTK_LIST_BOX(gtk_list_box_new());
-    gtk_widget_add_css_class(GTK_WIDGET(dict_listbox), "navigation-sidebar");
-    gtk_list_box_set_filter_func(dict_listbox, dict_list_filter_func, NULL, NULL);
-    gtk_list_box_set_selection_mode(dict_listbox, GTK_SELECTION_SINGLE);
-    g_signal_connect(dict_listbox, "row-selected", G_CALLBACK(on_dict_selected), NULL);
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(dict_scroll), GTK_WIDGET(dict_listbox));
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(dict_scroll),
+        create_sidebar_list_view(&dict_sidebar, G_CALLBACK(on_dict_item_activated)));
     adw_view_stack_add_titled_with_icon(sidebar_stack, dict_scroll, "dictionaries", "Dictionaries", "accessories-dictionary-symbolic");
 
     /* History Tab */
     GtkWidget *history_scroll = gtk_scrolled_window_new();
     gtk_widget_set_vexpand(history_scroll, TRUE);
     gtk_widget_set_hexpand(history_scroll, TRUE);
-    history_listbox = GTK_LIST_BOX(gtk_list_box_new());
-    gtk_widget_add_css_class(GTK_WIDGET(history_listbox), "navigation-sidebar");
-    gtk_list_box_set_selection_mode(history_listbox, GTK_SELECTION_SINGLE);
-    g_signal_connect(history_listbox, "row-selected", G_CALLBACK(on_history_selected), NULL);
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(history_scroll), GTK_WIDGET(history_listbox));
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(history_scroll),
+        create_sidebar_list_view(&history_sidebar, G_CALLBACK(on_history_item_activated)));
     adw_view_stack_add_titled_with_icon(sidebar_stack, history_scroll, "history", "History", "document-open-recent-symbolic");
 
     /* Favorites Tab */
     GtkWidget *favorites_scroll = gtk_scrolled_window_new();
     gtk_widget_set_vexpand(favorites_scroll, TRUE);
     gtk_widget_set_hexpand(favorites_scroll, TRUE);
-    favorites_listbox = GTK_LIST_BOX(gtk_list_box_new());
-    gtk_widget_add_css_class(GTK_WIDGET(favorites_listbox), "navigation-sidebar");
-    gtk_list_box_set_selection_mode(favorites_listbox, GTK_SELECTION_SINGLE);
-    g_signal_connect(favorites_listbox, "row-selected", G_CALLBACK(on_favorites_selected), NULL);
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(favorites_scroll), GTK_WIDGET(favorites_listbox));
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(favorites_scroll),
+        create_sidebar_list_view(&favorites_sidebar, G_CALLBACK(on_favorites_item_activated)));
     adw_view_stack_add_titled_with_icon(sidebar_stack, favorites_scroll, "favorites", "Favorites", "starred-symbolic");
 
     /* Groups Tab */
     GtkWidget *groups_scroll = gtk_scrolled_window_new();
     gtk_widget_set_vexpand(groups_scroll, TRUE);
     gtk_widget_set_hexpand(groups_scroll, TRUE);
-    groups_listbox = GTK_LIST_BOX(gtk_list_box_new());
-    gtk_widget_add_css_class(GTK_WIDGET(groups_listbox), "navigation-sidebar");
-    gtk_list_box_set_selection_mode(groups_listbox, GTK_SELECTION_SINGLE);
-    g_signal_connect(groups_listbox, "row-selected", G_CALLBACK(on_groups_selected), NULL);
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(groups_scroll), GTK_WIDGET(groups_listbox));
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(groups_scroll),
+        create_sidebar_list_view(&groups_sidebar, G_CALLBACK(on_groups_item_activated)));
     adw_view_stack_add_titled_with_icon(sidebar_stack, groups_scroll, "groups", "Groups", "folder-symbolic");
 
     gtk_box_append(GTK_BOX(sidebar_vbox), GTK_WIDGET(sidebar_stack));
@@ -2058,8 +2306,7 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     /* Auto-select first dictionary */
     if (all_dicts) {
         active_entry = all_dicts;
-        GtkListBoxRow *first = gtk_list_box_get_row_at_index(dict_listbox, 0);
-        if (first) gtk_list_box_select_row(dict_listbox, first);
+        populate_dict_sidebar();
     }
 
     // Initialize style manager for theme support
@@ -2118,8 +2365,7 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
         populate_dict_sidebar();
         if (all_dicts) {
             active_entry = all_dicts;
-            GtkListBoxRow *first = gtk_list_box_get_row_at_index(dict_listbox, 0);
-            if (first) gtk_list_box_select_row(dict_listbox, first);
+            populate_dict_sidebar();
         }
         webkit_web_view_load_html(web_view,
             "<h2>Welcome to Diction</h2>"

@@ -14,6 +14,7 @@ if not webkit_dep.found()
 endif
 zlib_dep = dependency('zlib')
 json_dep = dependency('json-glib-1.0')
+archive_dep = dependency('libarchive')
 
 srcs = [
   'src/main.c',
@@ -30,6 +31,6 @@ srcs = [
 ]
 
 executable('diction', srcs,
-  dependencies: [ gtk_dep, adw_dep, webkit_dep, zlib_dep, json_dep ],
+  dependencies: [ gtk_dep, adw_dep, webkit_dep, zlib_dep, json_dep, archive_dep ],
   install: true,
 )

@@ -2133,7 +2133,7 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     gtk_widget_add_css_class(title_label, "title");
     adw_header_bar_set_title_widget(ADW_HEADER_BAR(sidebar_header), title_label);
 
-    GtkWidget *random_btn = gtk_button_new_from_icon_name("media-playlist-shuffle-symbolic");
+    GtkWidget *random_btn = gtk_button_new_from_icon_name("dice3-symbolic");
     gtk_widget_add_css_class(random_btn, "flat");
     gtk_widget_set_tooltip_text(random_btn, "Random Headword");
     g_signal_connect(random_btn, "clicked", G_CALLBACK(on_random_clicked), NULL);

@@ -868,21 +868,16 @@ static void populate_search_sidebar_status(const char *title, const char *subtit
 
 typedef struct {
     char *label;
+    char *sort_key;
     RelatedRowPayload *payload;
 } BucketItem;
 
 static gint compare_bucket_item(gconstpointer a, gconstpointer b, gpointer user_data) {
+    (void)user_data;
     const BucketItem *ia = a;
     const BucketItem *ib = b;
 
-    char *ka = g_utf8_casefold(ia->label, -1);
-    char *kb = g_utf8_casefold(ib->label, -1);
-
-    int r = g_strcmp0(ka, kb);
-
-    g_free(ka);
-    g_free(kb);
-    return r;
+    return g_strcmp0(ia->sort_key, ib->sort_key);
 }
 
 static gboolean fast_strncasestr(const char *haystack, size_t haystack_len, const char *needle) {
@@ -916,13 +911,16 @@ static gboolean continue_sidebar_search(gpointer user_data) {
                 if (n > 1) {
                     BucketItem *items = g_new(BucketItem, n);
                     for (guint j = 0; j < n; j++) {
-                        items[j].label = g_ptr_array_index(state->global_bucket_labels[i], j);
+                        char *label = g_ptr_array_index(state->global_bucket_labels[i], j);
+                        items[j].label = label;
+                        items[j].sort_key = g_utf8_casefold(label, -1);
                         items[j].payload = g_ptr_array_index(state->global_bucket_payloads[i], j);
                     }
-                    g_qsort_with_data(items, n, sizeof(BucketItem), compare_bucket_item, NULL);
+                    g_sort_array(items, n, sizeof(BucketItem), compare_bucket_item, NULL);
                     for (guint j = 0; j < n; j++) {
                         g_ptr_array_index(state->global_bucket_labels[i], j) = items[j].label;
                         g_ptr_array_index(state->global_bucket_payloads[i], j) = items[j].payload;
+                        g_free(items[j].sort_key);
                     }
                     g_free(items);
                 }
@@ -1024,7 +1022,9 @@ static gboolean continue_sidebar_search(gpointer user_data) {
                         if (n > 1) {
                             BucketItem *items = g_new(BucketItem, n);
                             for (guint j = 0; j < n; j++) {
-                                items[j].label = g_ptr_array_index(state->global_bucket_labels[b], j);
+                                char *label = g_ptr_array_index(state->global_bucket_labels[b], j);
+                                items[j].label = label;
+                                items[j].sort_key = g_utf8_casefold(label, -1);
                                 items[j].payload = g_ptr_array_index(state->global_bucket_payloads[b], j);
                             }
 
@@ -1033,6 +1033,7 @@ static gboolean continue_sidebar_search(gpointer user_data) {
                             for (guint j = 0; j < n; j++) {
                                 g_ptr_array_index(state->global_bucket_labels[b], j) = items[j].label;
                                 g_ptr_array_index(state->global_bucket_payloads[b], j) = items[j].payload;
+                                g_free(items[j].sort_key);
                             }
                             g_free(items);
                         }

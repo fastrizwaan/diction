@@ -1755,9 +1755,7 @@ static void execute_search_now(void) {
         return;
     }
 
-    if (g_strcmp0(query_raw, query) != 0) {
-        gtk_editable_set_text(GTK_EDITABLE(search_entry), query);
-    }
+
 
     GString *html_res = g_string_new("<html><body style='font-family: sans-serif; padding: 10px;'>");
     char *escaped_query_attr = g_markup_escape_text(query, -1);

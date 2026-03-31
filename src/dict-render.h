@@ -16,3 +16,14 @@ char* dsl_render_to_html(const char *dsl_text,
                          const char *mdx_stylesheet,
                          int dark_mode,
                          const char *theme_name);
+
+typedef struct {
+    const char *bg;
+    const char *fg;
+    const char *accent;
+    const char *link;
+    const char *border;
+    const char *heading;
+} dsl_theme_palette;
+
+void dict_render_get_theme_palette(const char *theme_name, int dark_mode, dsl_theme_palette *out_palette);

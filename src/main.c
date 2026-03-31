@@ -51,6 +51,7 @@ static SidebarListView dict_sidebar = {0};
 static SidebarListView history_sidebar = {0};
 static SidebarListView favorites_sidebar = {0};
 static SidebarListView groups_sidebar = {0};
+static GtkCssProvider *dynamic_theme_provider = NULL;
 
 #define HISTORY_FILE_NAME "history.json"
 #define FAVORITES_FILE_NAME "favorites.json"
@@ -1989,13 +1990,12 @@ static void refresh_search_results(void) {
     execute_search_now();
 }
 
-// Theme change handler
-static void on_theme_changed(AdwStyleManager *manager, GParamSpec *pspec, gpointer user_data) {
-    (void)manager; (void)pspec; (void)user_data;
+static void update_theme_colors(void) {
+    if (!web_view || !app_settings) return;
 
     // Update webview background color
     GdkRGBA bg_color;
-    int dark_mode = style_manager && adw_style_manager_get_dark(style_manager) ? 1 : 0;
+    int dark_mode = adw_style_manager_get_dark(adw_style_manager_get_default()) ? 1 : 0;
 
     if (dark_mode) {
         gdk_rgba_parse(&bg_color, "#1e1e1e");
@@ -2003,9 +2003,73 @@ static void on_theme_changed(AdwStyleManager *manager, GParamSpec *pspec, gpoint
         gdk_rgba_parse(&bg_color, "#ffffff");
     }
     webkit_web_view_set_background_color(web_view, &bg_color);
+ 
+    // Apply theme to GTK widgets
+    dsl_theme_palette palette;
+    dict_render_get_theme_palette(app_settings->color_theme, dark_mode, &palette);
+    
+    if (!dynamic_theme_provider) {
+        dynamic_theme_provider = gtk_css_provider_new();
+        gtk_style_context_add_provider_for_display(
+            gdk_display_get_default(),
+            GTK_STYLE_PROVIDER(dynamic_theme_provider),
+            GTK_STYLE_PROVIDER_PRIORITY_APPLICATION
+        );
+    }
+    
+    char *css = g_strdup_printf(
+        "window, .background, .view, .main-window {\n"
+        "  background-color: %s !important;\n"
+        "  color: %s !important;\n"
+        "}\n"
+        ".headerbar, headerbar {\n"
+        "  background-color: %s !important;\n"
+        "  color: %s !important;\n"
+        "  border-bottom: 1px solid %s !important;\n"
+        "}\n"
+        "listview, list, .sidebar, .navigation-sidebar, .boxed-list {\n"
+        "  background-color: transparent !important;\n"
+        "}\n"
+        "row, listitem {\n"
+        "  background-color: transparent !important;\n"
+        "  color: %s !important;\n"
+        "}\n"
+        "row:selected, listitem:selected, .selected {\n"
+        "  background-color: %s !important;\n"
+        "  color: #ffffff !important;\n"
+        "}\n"
+        "row:hover, listitem:hover {\n"
+        "  background-color: alpha(%s, 0.1) !important;\n"
+        "}\n"
+        ":root {\n"
+        "  --window-bg-color: %s;\n"
+        "  --window-fg-color: %s;\n"
+        "  --view-bg-color: %s;\n"
+        "  --view-fg-color: %s;\n"
+        "  --headerbar-bg-color: %s;\n"
+        "  --headerbar-fg-color: %s;\n"
+        "  --headerbar-border-color: %s;\n"
+        "  --accent-color: %s;\n"
+        "}\n",
+        palette.bg, palette.fg,
+        palette.bg, palette.fg, palette.border,
+        palette.fg,
+        palette.accent,
+        palette.accent,
+        palette.bg, palette.fg,
+        palette.bg, palette.fg,
+        palette.bg, palette.fg, palette.border,
+        palette.accent
+    );
+    gtk_css_provider_load_from_string(dynamic_theme_provider, css);
+    g_free(css);
 
-    // Refresh current content
     refresh_search_results();
+}
+
+static void on_style_manager_changed(AdwStyleManager *manager, GParamSpec *pspec, gpointer user_data) {
+    (void)manager; (void)pspec; (void)user_data;
+    update_theme_colors();
 }
 
 /* Called whenever font family or size changes in the Appearance tab */
@@ -2018,7 +2082,7 @@ static void apply_font_to_webview(void *user_data) {
     if (app_settings->font_size > 0)
         webkit_settings_set_default_font_size(ws, (guint32)app_settings->font_size);
     /* Refresh rendered content so HTML re-flows with new font */
-    refresh_search_results();
+    update_theme_colors(); /* This will also call refresh_search_results */
 }
 
 static void reload_dictionaries_from_settings(void *user_data) {
@@ -2519,7 +2583,7 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
 
     // Initialize style manager for theme support
     style_manager = adw_style_manager_get_default();
-    g_signal_connect(style_manager, "notify::dark", G_CALLBACK(on_theme_changed), NULL);
+    g_signal_connect(style_manager, "notify::dark", G_CALLBACK(on_style_manager_changed), NULL);
 
     GtkCssProvider *css_provider = gtk_css_provider_new();
     gtk_css_provider_load_from_string(css_provider,
@@ -2537,25 +2601,16 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     gtk_style_context_add_provider_for_display(gdk_display_get_default(), GTK_STYLE_PROVIDER(css_provider), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
 
     // Apply saved theme preference
-    if (app_settings && app_settings->theme) {
-        if (strcmp(app_settings->theme, "light") == 0) {
+    if (app_settings) {
+        if (g_strcmp0(app_settings->theme, "light") == 0)
             adw_style_manager_set_color_scheme(style_manager, ADW_COLOR_SCHEME_FORCE_LIGHT);
-        } else if (strcmp(app_settings->theme, "dark") == 0) {
+        else if (g_strcmp0(app_settings->theme, "dark") == 0)
             adw_style_manager_set_color_scheme(style_manager, ADW_COLOR_SCHEME_FORCE_DARK);
-        } else {
+        else
             adw_style_manager_set_color_scheme(style_manager, ADW_COLOR_SCHEME_DEFAULT);
-        }
     }
 
-    // Apply initial theme to webview
-    GdkRGBA bg_color;
-    int dark_mode = adw_style_manager_get_dark(style_manager) ? 1 : 0;
-    if (dark_mode) {
-        gdk_rgba_parse(&bg_color, "#1e1e1e");
-    } else {
-        gdk_rgba_parse(&bg_color, "#ffffff");
-    }
-    webkit_web_view_set_background_color(web_view, &bg_color);
+    update_theme_colors();
 
     /* Show the window FIRST, then start background loading */
     webkit_web_view_load_html(web_view,

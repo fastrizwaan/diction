@@ -1497,6 +1497,70 @@ static void close_tag(StrBuf *b, const char *name, ActiveTag *active_tags, int *
     }
 }
 
+void dict_render_get_theme_palette(const char *theme_name, int dark_mode, dsl_theme_palette *out) {
+    /* Set defaults */
+    out->fg = dark_mode ? "#e0e0e0" : "#222222";
+    out->bg = dark_mode ? "#1e1e1e" : "#ffffff";
+    out->link = dark_mode ? "#7fb0e0" : "#005bbb";
+    out->accent = dark_mode ? "#e0b07f" : "#e45649";
+    out->border = dark_mode ? "#444444" : "#cccccc";
+    out->heading = dark_mode ? "#e0e0e0" : "#222222";
+
+    if (!theme_name) return;
+
+    if (g_strcmp0(theme_name, "solarized") == 0) {
+        if (dark_mode) {
+            out->bg = "#002b36"; out->fg = "#839496"; out->accent = "#859900"; out->heading = "#268bd2"; out->link = "#268bd2"; out->border = "#073642";
+        } else {
+            out->bg = "#fdf6e3"; out->fg = "#657b83"; out->accent = "#859900"; out->heading = "#268bd2"; out->link = "#268bd2"; out->border = "#eee8d5";
+        }
+    } else if (g_strcmp0(theme_name, "dracula") == 0) {
+        if (dark_mode) {
+            out->bg = "#282a36"; out->fg = "#f8f8f2"; out->accent = "#ff79c6"; out->heading = "#bd93f9"; out->link = "#8be9fd"; out->border = "#44475a";
+        } else {
+            out->bg = "#ffffff"; out->fg = "#282a36"; out->accent = "#ff79c6"; out->heading = "#6272a4"; out->link = "#22a2c9"; out->border = "#f1f2f8";
+        }
+    } else if (g_strcmp0(theme_name, "nord") == 0) {
+        if (dark_mode) {
+            out->bg = "#2e3440"; out->fg = "#eceff4"; out->accent = "#a3be8c"; out->heading = "#88c0d0"; out->link = "#81a1c1"; out->border = "#3b4252";
+        } else {
+            out->bg = "#eceff4"; out->fg = "#2e3440"; out->accent = "#4c566a"; out->heading = "#5e81ac"; out->link = "#81a1c1"; out->border = "#d8dee9";
+        }
+    } else if (g_strcmp0(theme_name, "gruvbox") == 0) {
+        if (dark_mode) {
+            out->bg = "#282828"; out->fg = "#ebdbb2"; out->accent = "#b8bb26"; out->heading = "#83a598"; out->link = "#458588"; out->border = "#3c3836";
+        } else {
+            out->bg = "#fbf1c7"; out->fg = "#3c3836"; out->accent = "#79740e"; out->heading = "#076678"; out->link = "#af3a03"; out->border = "#ebdbb2";
+        }
+    } else if (g_strcmp0(theme_name, "monokai") == 0) {
+        if (dark_mode) {
+            out->bg = "#272822"; out->fg = "#f8f8f2"; out->accent = "#f92672"; out->heading = "#e6db74"; out->link = "#66d9ef"; out->border = "#3e3d32";
+        } else {
+            out->bg = "#ffffff"; out->fg = "#272822"; out->accent = "#f92672"; out->heading = "#fd971f"; out->link = "#66d9ef"; out->border = "#f1f1f1";
+        }
+    } else if (g_strcmp0(theme_name, "material") == 0) {
+        if (dark_mode) {
+            out->bg = "#263238"; out->fg = "#eeffff"; out->accent = "#c3e88d"; out->heading = "#80deea"; out->link = "#82b1ff"; out->border = "#37474f";
+        } else {
+            out->bg = "#ffffff"; out->fg = "#263238"; out->accent = "#91b859"; out->heading = "#00bcd4"; out->link = "#03a9f4"; out->border = "#eceff1";
+        }
+    } else if (g_strcmp0(theme_name, "ocean") == 0) {
+        if (dark_mode) {
+            out->bg = "#0f111a"; out->fg = "#eeffff"; out->accent = "#c3e88d"; out->heading = "#82aaff"; out->link = "#89ddff"; out->border = "#1a1c25";
+        } else {
+            out->bg = "#ffffff"; out->fg = "#0f111a"; out->accent = "#2ecc71"; out->heading = "#3498db"; out->link = "#3498db"; out->border = "#f1f2f6";
+        }
+    } else if (g_strcmp0(theme_name, "forest") == 0) {
+        if (dark_mode) {
+            out->bg = "#1b2b1b"; out->fg = "#ddeecc"; out->accent = "#88cc88"; out->heading = "#77bb77"; out->link = "#66aa99"; out->border = "#263626";
+        } else {
+            out->bg = "#f0f5f0"; out->fg = "#1b2b1b"; out->accent = "#006400"; out->heading = "#228b22"; out->link = "#2e8b57"; out->border = "#e0e8e0";
+        }
+    } else if (g_strcmp0(theme_name, "sepia") == 0) {
+        out->bg = "#f4ecd8"; out->fg = "#5d4a44"; out->accent = "#8c3b3b"; out->heading = "#5d4a44"; out->link = "#704214"; out->border = "#dad0b8";
+    }
+}
+
 char* dsl_render_to_html(const char *dsl_text,
                          size_t length,
                          const char *headword,
@@ -1519,71 +1583,21 @@ char* dsl_render_to_html(const char *dsl_text,
         }
     }
 
-    // Default colors
-    const char *body_color = dark_mode ? "#e0e0e0" : "#222222";
-    const char *bg_color = dark_mode ? "#1e1e1e" : "#ffffff";
-    const char *link_color = dark_mode ? "#7fb0e0" : "#005bbb";
-    const char *trn_color = dark_mode ? "#e6e6e6" : "#1e1e1e";
-    const char *ex_color = dark_mode ? "#95bf77" : "#76a150";
-    const char *com_color = dark_mode ? "#e0e0e0" : "#222222";
-    const char *pos_color = dark_mode ? "#e0b07f" : "#e45649";
-    const char *translit_color = dark_mode ? "#888888" : "#808080";
-    const char *heading_color = dark_mode ? "#e0e0e0" : "#222222";
-    const char *border_color = dark_mode ? "#444444" : "#cccccc";
+    // Map theme colors
+    dsl_theme_palette palette;
+    dict_render_get_theme_palette(theme_name, dark_mode, &palette);
 
-    if (theme_name) {
-        if (g_strcmp0(theme_name, "solarized") == 0) {
-            if (dark_mode) {
-                bg_color = "#002b36"; body_color = "#839496"; trn_color = "#93a1a1"; heading_color = "#268bd2"; pos_color = "#859900"; link_color = "#268bd2"; border_color = "#073642";
-            } else {
-                bg_color = "#fdf6e3"; body_color = "#657b83"; trn_color = "#586e75"; heading_color = "#268bd2"; pos_color = "#859900"; link_color = "#268bd2"; border_color = "#eee8d5";
-            }
-        } else if (g_strcmp0(theme_name, "dracula") == 0) {
-            if (dark_mode) {
-                bg_color = "#282a36"; body_color = "#f8f8f2"; trn_color = "#f8f8f2"; heading_color = "#bd93f9"; pos_color = "#ff79c6"; link_color = "#8be9fd"; border_color = "#44475a";
-            } else {
-                bg_color = "#ffffff"; body_color = "#282a36"; trn_color = "#282a36"; heading_color = "#6272a4"; pos_color = "#ff79c6"; link_color = "#22a2c9"; border_color = "#f1f2f8";
-            }
-        } else if (g_strcmp0(theme_name, "nord") == 0) {
-            if (dark_mode) {
-                bg_color = "#2e3440"; body_color = "#eceff4"; trn_color = "#e5e9f0"; heading_color = "#88c0d0"; pos_color = "#a3be8c"; link_color = "#81a1c1"; border_color = "#3b4252";
-            } else {
-                bg_color = "#eceff4"; body_color = "#2e3440"; trn_color = "#3b4252"; heading_color = "#5e81ac"; pos_color = "#4c566a"; link_color = "#81a1c1"; border_color = "#d8dee9";
-            }
-        } else if (g_strcmp0(theme_name, "gruvbox") == 0) {
-            if (dark_mode) {
-                bg_color = "#282828"; body_color = "#ebdbb2"; trn_color = "#d5c4a1"; heading_color = "#83a598"; pos_color = "#b8bb26"; link_color = "#458588"; border_color = "#3c3836";
-            } else {
-                bg_color = "#fbf1c7"; body_color = "#3c3836"; trn_color = "#504945"; heading_color = "#076678"; pos_color = "#79740e"; link_color = "#af3a03"; border_color = "#ebdbb2";
-            }
-        } else if (g_strcmp0(theme_name, "monokai") == 0) {
-            if (dark_mode) {
-                bg_color = "#272822"; body_color = "#f8f8f2"; trn_color = "#f8f8f2"; heading_color = "#e6db74"; pos_color = "#f92672"; link_color = "#66d9ef"; border_color = "#3e3d32";
-            } else {
-                bg_color = "#ffffff"; body_color = "#272822"; trn_color = "#272822"; heading_color = "#fd971f"; pos_color = "#f92672"; link_color = "#66d9ef"; border_color = "#f1f1f1";
-            }
-        } else if (g_strcmp0(theme_name, "material") == 0) {
-            if (dark_mode) {
-                bg_color = "#263238"; body_color = "#eeffff"; trn_color = "#eeffff"; heading_color = "#80deea"; pos_color = "#c3e88d"; link_color = "#82b1ff"; border_color = "#37474f";
-            } else {
-                bg_color = "#ffffff"; body_color = "#263238"; trn_color = "#546e7a"; heading_color = "#00bcd4"; pos_color = "#91b859"; link_color = "#03a9f4"; border_color = "#eceff1";
-            }
-        } else if (g_strcmp0(theme_name, "ocean") == 0) {
-            if (dark_mode) {
-                bg_color = "#0f111a"; body_color = "#eeffff"; trn_color = "#eeffff"; heading_color = "#82aaff"; pos_color = "#c3e88d"; link_color = "#89ddff"; border_color = "#1a1c25";
-            } else {
-                bg_color = "#ffffff"; body_color = "#0f111a"; trn_color = "#303952"; heading_color = "#3498db"; pos_color = "#2ecc71"; link_color = "#3498db"; border_color = "#f1f2f6";
-            }
-        } else if (g_strcmp0(theme_name, "forest") == 0) {
-            if (dark_mode) {
-                bg_color = "#1b2b1b"; body_color = "#ddeecc"; trn_color = "#ddeecc"; heading_color = "#77bb77"; pos_color = "#88cc88"; link_color = "#66aa99"; border_color = "#263626";
-            } else {
-                bg_color = "#f0f5f0"; body_color = "#1b2b1b"; trn_color = "#2d3d2d"; heading_color = "#228b22"; pos_color = "#006400"; link_color = "#2e8b57"; border_color = "#e0e8e0";
-            }
-        } else if (g_strcmp0(theme_name, "sepia") == 0) {
-            bg_color = "#f4ecd8"; body_color = "#5d4a44"; trn_color = "#1a1a1a"; heading_color = "#5d4a44"; pos_color = "#8c3b3b"; link_color = "#704214"; border_color = "#dad0b8";
-        }
-    }
+    const char *bg_color = palette.bg;
+    const char *body_color = palette.fg;
+    const char *link_color = palette.link;
+    const char *heading_color = palette.heading;
+    const char *pos_color = palette.accent;
+    const char *border_color = palette.border;
+
+    const char *trn_color = palette.fg;
+    const char *ex_color = dark_mode ? "#95bf77" : "#76a150";
+    const char *com_color = palette.fg;
+    const char *translit_color = dark_mode ? "#888888" : "#808080";
 
     // Add GoldenDict-like styling with theme-aware colors
     buf_append_str(&b,

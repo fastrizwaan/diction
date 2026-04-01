@@ -168,6 +168,7 @@ AppSettings* settings_load(void) {
     settings->font_family = g_strdup("sans-serif");
     settings->font_size = 16;
     settings->color_theme = g_strdup("default");
+    settings->render_style = g_strdup("diction");
 
     char *path = get_settings_file_path();
     if (!g_file_test(path, G_FILE_TEST_EXISTS)) {
@@ -218,6 +219,12 @@ AppSettings* settings_load(void) {
     if (color_theme) {
         g_free(settings->color_theme);
         settings->color_theme = g_strdup(color_theme);
+    }
+
+    const char *render_style = json_object_get_string_member(obj, "render_style");
+    if (render_style && *render_style) {
+        g_free(settings->render_style);
+        settings->render_style = g_strdup(render_style);
     }
 
     // Dictionary directories
@@ -288,6 +295,8 @@ void settings_save(AppSettings *settings) {
     json_object_set_int_member(root, "font_size", settings->font_size > 0 ? settings->font_size : 16);
     json_object_set_string_member(root, "color_theme",
         settings->color_theme ? settings->color_theme : "default");
+    json_object_set_string_member(root, "render_style",
+        settings->render_style ? settings->render_style : "diction");
 
     // Dictionary directories
     JsonArray *dirs = json_array_new();
@@ -346,6 +355,7 @@ void settings_free(AppSettings *settings) {
         g_free(settings->theme);
         g_free(settings->font_family);
         g_free(settings->color_theme);
+        g_free(settings->render_style);
         g_free(settings);
     }
 }

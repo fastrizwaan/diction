@@ -90,6 +90,7 @@ typedef enum {
 typedef struct {
     RelatedRowType type;
     char *word;
+    double fuzzy_score;
 } RelatedRowPayload;
 
 static gboolean spawn_audio_argv(const char *const *argv, const char *label) {
@@ -367,10 +368,10 @@ static char *normalize_headword_for_search(const char *value) {
 
 typedef enum {
     SEARCH_BUCKET_EXACT = 0,
-    SEARCH_BUCKET_PREFIX,
-    SEARCH_BUCKET_PHRASE, 
-    SEARCH_BUCKET_SUBSTRING,
     SEARCH_BUCKET_SUFFIX,
+    SEARCH_BUCKET_PREFIX,
+    SEARCH_BUCKET_PHRASE,
+    SEARCH_BUCKET_SUBSTRING,
     SEARCH_BUCKET_FUZZY
 } SearchBucket;
 
@@ -486,7 +487,21 @@ static gboolean classify_search_candidate(const char *query_key,
         return TRUE;
     }
 
-    /* 2. PHRASE / 5. SUBSTRING (checking phrase first) */
+    /* 2. SUFFIX */
+    if (g_str_has_suffix(candidate_key, query_key)) {
+        if (bucket_out) *bucket_out = SEARCH_BUCKET_SUFFIX;
+        if (fuzzy_score_out) *fuzzy_score_out = 0.0;
+        return TRUE;
+    }
+
+    /* 3. PREFIX */
+    if (g_str_has_prefix(candidate_key, query_key)) {
+        if (bucket_out) *bucket_out = SEARCH_BUCKET_PREFIX;
+        if (fuzzy_score_out) *fuzzy_score_out = 0.0;
+        return TRUE;
+    }
+
+    /* 4. PHRASE / 5. SUBSTRING */
     const char *match = strstr(candidate_key, query_key);
     gboolean is_phrase = FALSE;
     gboolean is_substring = FALSE;
@@ -517,22 +532,7 @@ static gboolean classify_search_candidate(const char *query_key,
         }
     }
 
-    /* 3. PREFIX */
-    if (g_str_has_prefix(candidate_key, query_key)) {
-        if (bucket_out) *bucket_out = SEARCH_BUCKET_PREFIX;
-        if (fuzzy_score_out) *fuzzy_score_out = 0.0;
-        return TRUE;
-    }
-
-    /* 4. SUFFIX */
-    if (g_str_has_suffix(candidate_key, query_key)) {
-        if (bucket_out) *bucket_out = SEARCH_BUCKET_SUFFIX;
-        if (fuzzy_score_out) *fuzzy_score_out = 0.0;
-        return TRUE;
-    }
-
     /* 5. SUBSTRING */
-    /* If we found a match above but it wasn't a phrase, return substring */
     if (is_substring) {
         if (bucket_out) *bucket_out = SEARCH_BUCKET_SUBSTRING;
         if (fuzzy_score_out) *fuzzy_score_out = 0.0;
@@ -869,12 +869,18 @@ typedef struct {
     char *label;
     char *sort_key;
     RelatedRowPayload *payload;
+    double score;
 } BucketItem;
 
 static gint compare_bucket_item(gconstpointer a, gconstpointer b, gpointer user_data) {
-    (void)user_data;
     const BucketItem *ia = a;
     const BucketItem *ib = b;
+    SearchBucket bucket = GPOINTER_TO_INT(user_data);
+
+    if (bucket == SEARCH_BUCKET_FUZZY) {
+        if (ia->score > ib->score) return -1;
+        if (ia->score < ib->score) return 1;
+    }
 
     return g_strcmp0(ia->sort_key, ib->sort_key);
 }
@@ -914,8 +920,9 @@ static gboolean continue_sidebar_search(gpointer user_data) {
                         items[j].label = label;
                         items[j].sort_key = g_utf8_casefold(label, -1);
                         items[j].payload = g_ptr_array_index(state->global_bucket_payloads[i], j);
+                        items[j].score = items[j].payload ? items[j].payload->fuzzy_score : 0.0;
                     }
-                    g_sort_array(items, n, sizeof(BucketItem), compare_bucket_item, NULL);
+                    g_sort_array(items, n, sizeof(BucketItem), compare_bucket_item, GINT_TO_POINTER(i));
                     for (guint j = 0; j < n; j++) {
                         g_ptr_array_index(state->global_bucket_labels[i], j) = items[j].label;
                         g_ptr_array_index(state->global_bucket_payloads[i], j) = items[j].payload;
@@ -1002,12 +1009,13 @@ static gboolean continue_sidebar_search(gpointer user_data) {
         SearchBucket bucket;
         double fuzzy_score = 0.0;
 
-        if (classify_search_candidate(state->query_key, state->query_len, word_key, &bucket, &fuzzy_score)) {
-            if (!g_hash_table_contains(state->seen_words, word_key)) {
-                RelatedRowPayload *payload = g_new0(RelatedRowPayload, 1);
-                payload->type = RELATED_ROW_CANDIDATE;
-                payload->word = clean_word; // Steal pointer
-                g_hash_table_add(state->seen_words, g_strdup(word_key));
+            if (classify_search_candidate(state->query_key, state->query_len, word_key, &bucket, &fuzzy_score)) {
+                if (!g_hash_table_contains(state->seen_words, word_key)) {
+                    RelatedRowPayload *payload = g_new0(RelatedRowPayload, 1);
+                    payload->type = RELATED_ROW_CANDIDATE;
+                    payload->word = clean_word; // Steal pointer
+                    payload->fuzzy_score = fuzzy_score;
+                    g_hash_table_add(state->seen_words, g_strdup(word_key));
                 
                 int b = (int)bucket;
                 if (b >= 0 && b < BUCKET_COUNT) {
@@ -1025,9 +1033,10 @@ static gboolean continue_sidebar_search(gpointer user_data) {
                                 items[j].label = label;
                                 items[j].sort_key = g_utf8_casefold(label, -1);
                                 items[j].payload = g_ptr_array_index(state->global_bucket_payloads[b], j);
+                                items[j].score = items[j].payload ? items[j].payload->fuzzy_score : 0.0;
                             }
 
-                            g_sort_array(items, n, sizeof(BucketItem), compare_bucket_item, NULL);
+                            g_sort_array(items, n, sizeof(BucketItem), compare_bucket_item, GINT_TO_POINTER(b));
 
                             for (guint j = 0; j < n; j++) {
                                 g_ptr_array_index(state->global_bucket_labels[b], j) = items[j].label;
@@ -1103,11 +1112,12 @@ static guint seed_search_sidebar_fast_rows(SidebarSearchState *state) {
             double score;
 
             if (classify_search_candidate(state->query_key, state->query_len, word_key, &bucket, &score)) {
-                if (bucket <= SEARCH_BUCKET_PHRASE) {
+                if (bucket == SEARCH_BUCKET_EXACT || bucket == SEARCH_BUCKET_PREFIX) {
                     if (!g_hash_table_contains(state->seen_words, word_key)) {
                         RelatedRowPayload *payload = g_new0(RelatedRowPayload, 1);
                         payload->type = RELATED_ROW_CANDIDATE;
-                        payload->word = clean_word; 
+                        payload->word = clean_word;
+                        payload->fuzzy_score = score;
 
                         g_hash_table_add(state->seen_words, g_strdup(word_key));
                         g_ptr_array_add(labels, clean_word);
@@ -1695,34 +1705,72 @@ static void append_rendered_entry_html(GString *html_res,
     }
 
     int dark_mode = style_manager && adw_style_manager_get_dark(style_manager) ? 1 : 0;
+    const char *render_style = (app_settings && app_settings->render_style && *app_settings->render_style)
+        ? app_settings->render_style
+        : "diction";
 
     char *rendered = dsl_render_to_html(
         def_ptr, def_len,
         entry->dict->data + res->key_offset, res->key_length,
         entry->format, entry->dict->resource_dir, entry->dict->source_dir, entry->dict->mdx_stylesheet, dark_mode,
-        app_settings ? app_settings->color_theme : "default");
+        app_settings ? app_settings->color_theme : "default",
+        render_style);
     if (!rendered) {
         return;
     }
 
-    const char *bar_bg = dark_mode ? "#2d2d2d" : "#f0f0f0";
-    const char *bar_fg = dark_mode ? "#aaaaaa" : "#555555";
-    const char *bar_border = dark_mode ? "#444444" : "#dddddd";
+    char *escaped_name = g_markup_escape_text(entry->name ? entry->name : "", -1);
+    char *escaped_headword = g_markup_escape_text(entry->dict->data + res->key_offset, (gssize)res->key_length);
+    gboolean first_match_for_dict = FALSE;
 
     if (!*dict_header_shown) {
-        g_string_append_printf(html_res,
-            "<div id='dict-%d' class='dict-source' style='background: %s; color: %s; "
-            "padding: 4px 12px; margin: 20px -10px 10px -10px; border-bottom: 1px solid %s; "
-            "font-size: 0.85em; font-weight: bold; text-transform: uppercase; letter-spacing: 0.05em;'>"
-            "%s</div>",
-            dict_idx, bar_bg, bar_fg, bar_border, entry->name);
-
         *dict_header_shown = 1;
         entry->has_matches = TRUE;
         (*found_count)++;
+        first_match_for_dict = TRUE;
     }
 
-    g_string_append(html_res, rendered);
+    if (first_match_for_dict) {
+        g_string_append_printf(
+            html_res,
+            "<div id='dict-%d' class='dict-anchor' style='scroll-margin-top: 8px;'></div>",
+            dict_idx);
+    }
+
+    if (g_strcmp0(render_style, "python") == 0) {
+        g_string_append_printf(
+            html_res,
+            "<div class='entry'><div class='header'><div><span class='lemma'>%s</span></div>"
+            "<span class='dict'>📖 %s</span></div><div class='defs'>%s</div><hr></div>",
+            escaped_headword, escaped_name, rendered);
+    } else if (g_strcmp0(render_style, "goldendict-ng") == 0) {
+        g_string_append_printf(
+            html_res,
+            "<article class='gdarticle'><div class='gold-header'><span class='gold-entry-headword'>%s</span>"
+            "<span class='gold-dict'>📖 %s</span></div><div class='gdarticlebody'>%s</div></article>",
+            escaped_headword, escaped_name, rendered);
+    } else if (g_strcmp0(render_style, "slate-card") == 0) {
+        g_string_append_printf(
+            html_res,
+            "<section class='slate-entry'><div class='slate-header'><span class='slate-lemma'>%s</span>"
+            "<span class='slate-dict'>📖 %s</span></div><div class='slate-entry-body'>%s</div></section>",
+            escaped_headword, escaped_name, rendered);
+    } else if (g_strcmp0(render_style, "paper") == 0) {
+        g_string_append_printf(
+            html_res,
+            "<section class='paper-entry'><div class='paper-header'><span class='paper-lemma'>%s</span>"
+            "<span class='paper-dict'>📖 %s</span></div><div class='paper-entry-body'>%s</div></section>",
+            escaped_headword, escaped_name, rendered);
+    } else {
+        g_string_append_printf(
+            html_res,
+            "<section class='diction-entry'><div class='diction-header'><span class='diction-lemma'>%s</span>"
+            "<span class='diction-dict'>📖 %s</span></div><div class='diction-entry-body'>%s</div></section>",
+            escaped_headword, escaped_name, rendered);
+    }
+
+    g_free(escaped_headword);
+    g_free(escaped_name);
     free(rendered);
 }
 
@@ -1755,7 +1803,7 @@ static void execute_search_now(void) {
 
 
 
-    GString *html_res = g_string_new("<html><body style='font-family: sans-serif; padding: 10px;'>");
+    GString *html_res = g_string_new("<html><body>");
     char *escaped_query_attr = g_markup_escape_text(query, -1);
     g_string_append_printf(html_res, "<div class='word-group' data-word='%s'>", escaped_query_attr);
     g_free(escaped_query_attr);
@@ -2045,7 +2093,10 @@ static void update_theme_colors(void) {
         sscanf(palette.accent + 1, "%02x%02x%02x", &ar, &ag, &ab);
     char hover_color[32];
     g_snprintf(hover_color, sizeof(hover_color),
-               "rgba(%u,%u,%u,0.12)", ar, ag, ab);
+               "rgba(%u,%u,%u,0.15)", ar, ag, ab);
+    char select_color[32];
+    g_snprintf(select_color, sizeof(select_color),
+               "rgba(%u,%u,%u,0.25)", ar, ag, ab);
 
     /*
      * Use Adwaita's @define-color mechanism so the theme engine picks up
@@ -2091,7 +2142,7 @@ static void update_theme_colors(void) {
         "}\n"
         "row:selected, listitem:selected {\n"
         "  background-color: %s;\n"
-        "  color: #ffffff;\n"
+        "  color: %s;\n"
         "}\n"
         "row:hover:not(:selected), listitem:hover:not(:selected) {\n"
         "  background-color: %s;\n"
@@ -2133,8 +2184,8 @@ static void update_theme_colors(void) {
         palette.border,
         /* row/listitem (1) */
         palette.fg,
-        /* row:selected (1) */
-        palette.accent,
+        /* row:selected bg+fg (2) */
+        select_color, palette.accent,
         /* row:hover (1) */
         hover_color,
         /* popover contents bg+fg (2) */

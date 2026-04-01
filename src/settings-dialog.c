@@ -562,6 +562,19 @@ static void on_font_size_changed(AdwSpinRow *spin, SettingsDialogData *data) {
         data->font_changed_callback(data->font_changed_user_data);
 }
 
+static void on_render_style_row_changed(AdwComboRow *row, GParamSpec *pspec, SettingsDialogData *data) {
+    (void)pspec;
+    const char *styles[] = {"diction", "python", "goldendict-ng", "slate-card", "paper"};
+    guint idx = adw_combo_row_get_selected(row);
+    if (idx >= G_N_ELEMENTS(styles)) return;
+
+    g_free(data->settings->render_style);
+    data->settings->render_style = g_strdup(styles[idx]);
+    settings_save(data->settings);
+    if (data->font_changed_callback)
+        data->font_changed_callback(data->font_changed_user_data);
+}
+
 /* ---- Dialog closed ---- */
 
 static void on_dialog_closed(SettingsDialogData *data) {
@@ -647,6 +660,27 @@ GtkWidget* settings_dialog_new(GtkWindow *parent, AppSettings *settings,
     adw_combo_row_set_selected(color_theme_row, color_idx);
     g_signal_connect(color_theme_row, "notify::selected", G_CALLBACK(on_color_theme_row_changed), data);
     adw_preferences_group_add(color_theme_group, GTK_WIDGET(color_theme_row));
+
+    AdwComboRow *render_style_row = ADW_COMBO_ROW(adw_combo_row_new());
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(render_style_row), "Entry Layout");
+    adw_action_row_set_subtitle(ADW_ACTION_ROW(render_style_row),
+        "Switch between compact, card, and editorial dictionary layouts");
+    GtkStringList *render_style_model = gtk_string_list_new((const char *[]){
+        "Diction", "Python", "GoldenDict-ng", "Slate Card", "Paper", NULL});
+    adw_combo_row_set_model(render_style_row, G_LIST_MODEL(render_style_model));
+    g_object_unref(render_style_model);
+
+    const char *render_styles[] = {"diction", "python", "goldendict-ng", "slate-card", "paper"};
+    int render_style_idx = 0;
+    for (int i = 0; i < 5; i++) {
+        if (g_strcmp0(settings->render_style, render_styles[i]) == 0) {
+            render_style_idx = i;
+            break;
+        }
+    }
+    adw_combo_row_set_selected(render_style_row, render_style_idx);
+    g_signal_connect(render_style_row, "notify::selected", G_CALLBACK(on_render_style_row_changed), data);
+    adw_preferences_group_add(color_theme_group, GTK_WIDGET(render_style_row));
 
     /* Font group */
     AdwPreferencesGroup *font_group = ADW_PREFERENCES_GROUP(adw_preferences_group_new());

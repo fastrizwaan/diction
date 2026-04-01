@@ -29,6 +29,7 @@ typedef struct {
     char *font_family;            // e.g. "sans-serif"
     int   font_size;              // e.g. 16 (CSS px)
     char *color_theme;            // e.g. "default", "solarized", "dracula"
+    char *render_style;           // e.g. "diction", "python", "goldendict-ng"
 } AppSettings;
 
 // Settings management

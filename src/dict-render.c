@@ -1594,60 +1594,85 @@ void dict_render_get_theme_palette(const char *theme_name, int dark_mode, dsl_th
     out->accent = dark_mode ? "#e0b07f" : "#e45649";
     out->border = dark_mode ? "#444444" : "#cccccc";
     out->heading = dark_mode ? "#e0e0e0" : "#222222";
+    out->trn = out->fg;
+    out->translit = dark_mode ? "#888888" : "#808080";
+    out->ex = out->fg;
+    out->com = out->fg;
 
     if (!theme_name) return;
 
     if (g_strcmp0(theme_name, "solarized") == 0) {
         if (dark_mode) {
             out->bg = "#002b36"; out->fg = "#839496"; out->accent = "#859900"; out->heading = "#268bd2"; out->link = "#268bd2"; out->border = "#073642";
+            out->translit = "#586e75";
         } else {
             out->bg = "#fdf6e3"; out->fg = "#657b83"; out->accent = "#859900"; out->heading = "#268bd2"; out->link = "#268bd2"; out->border = "#eee8d5";
+            out->translit = "#93a1a1";
         }
     } else if (g_strcmp0(theme_name, "dracula") == 0) {
         if (dark_mode) {
             out->bg = "#282a36"; out->fg = "#f8f8f2"; out->accent = "#ff79c6"; out->heading = "#bd93f9"; out->link = "#8be9fd"; out->border = "#44475a";
+            out->translit = "#6272a4";
         } else {
             out->bg = "#ffffff"; out->fg = "#282a36"; out->accent = "#ff79c6"; out->heading = "#6272a4"; out->link = "#22a2c9"; out->border = "#f1f2f8";
+            out->translit = "#6272a4";
         }
     } else if (g_strcmp0(theme_name, "nord") == 0) {
         if (dark_mode) {
             out->bg = "#2e3440"; out->fg = "#eceff4"; out->accent = "#a3be8c"; out->heading = "#88c0d0"; out->link = "#81a1c1"; out->border = "#3b4252";
+            out->translit = "#4c566a";
         } else {
             out->bg = "#eceff4"; out->fg = "#2e3440"; out->accent = "#4c566a"; out->heading = "#5e81ac"; out->link = "#81a1c1"; out->border = "#d8dee9";
+            out->translit = "#4c566a";
         }
     } else if (g_strcmp0(theme_name, "gruvbox") == 0) {
         if (dark_mode) {
             out->bg = "#282828"; out->fg = "#ebdbb2"; out->accent = "#b8bb26"; out->heading = "#83a598"; out->link = "#458588"; out->border = "#3c3836";
+            out->translit = "#7c6f64";
         } else {
             out->bg = "#fbf1c7"; out->fg = "#3c3836"; out->accent = "#79740e"; out->heading = "#076678"; out->link = "#af3a03"; out->border = "#ebdbb2";
+            out->translit = "#928374";
         }
     } else if (g_strcmp0(theme_name, "monokai") == 0) {
         if (dark_mode) {
             out->bg = "#272822"; out->fg = "#f8f8f2"; out->accent = "#f92672"; out->heading = "#e6db74"; out->link = "#66d9ef"; out->border = "#3e3d32";
+            out->translit = "#75715e";
         } else {
             out->bg = "#ffffff"; out->fg = "#272822"; out->accent = "#f92672"; out->heading = "#fd971f"; out->link = "#66d9ef"; out->border = "#f1f1f1";
+            out->translit = "#75715e";
         }
     } else if (g_strcmp0(theme_name, "material") == 0) {
         if (dark_mode) {
             out->bg = "#263238"; out->fg = "#eeffff"; out->accent = "#c3e88d"; out->heading = "#80deea"; out->link = "#82b1ff"; out->border = "#37474f";
+            out->translit = "#546e7a";
         } else {
             out->bg = "#ffffff"; out->fg = "#263238"; out->accent = "#91b859"; out->heading = "#00bcd4"; out->link = "#03a9f4"; out->border = "#eceff1";
+            out->translit = "#90a4ae";
         }
     } else if (g_strcmp0(theme_name, "ocean") == 0) {
         if (dark_mode) {
             out->bg = "#0f111a"; out->fg = "#eeffff"; out->accent = "#c3e88d"; out->heading = "#82aaff"; out->link = "#89ddff"; out->border = "#1a1c25";
+            out->translit = "#546e7a";
         } else {
             out->bg = "#ffffff"; out->fg = "#0f111a"; out->accent = "#2ecc71"; out->heading = "#3498db"; out->link = "#3498db"; out->border = "#f1f2f6";
+            out->translit = "#95a5a6";
         }
     } else if (g_strcmp0(theme_name, "forest") == 0) {
         if (dark_mode) {
             out->bg = "#1b2b1b"; out->fg = "#ddeecc"; out->accent = "#88cc88"; out->heading = "#77bb77"; out->link = "#66aa99"; out->border = "#263626";
+            out->translit = "#5a7a5a";
         } else {
             out->bg = "#f0f5f0"; out->fg = "#1b2b1b"; out->accent = "#006400"; out->heading = "#228b22"; out->link = "#2e8b57"; out->border = "#e0e8e0";
+            out->translit = "#7a9a7a";
         }
     } else if (g_strcmp0(theme_name, "sepia") == 0) {
         out->bg = "#f4ecd8"; out->fg = "#5d4a44"; out->accent = "#8c3b3b"; out->heading = "#5d4a44"; out->link = "#704214"; out->border = "#dad0b8";
+        out->translit = "#9c8b7a";
     }
+    /* trn, ex, and com all track fg; override per-theme above if needed */
+    out->trn = out->fg;
+    out->ex  = out->fg;
+    out->com = out->fg;
 }
 
 char* dsl_render_to_html(const char *dsl_text,
@@ -1659,11 +1684,17 @@ char* dsl_render_to_html(const char *dsl_text,
                          const char *source_dir,
                          const char *mdx_stylesheet,
                          int dark_mode,
-                         const char *theme_name) {
+                         const char *theme_name,
+                         const char *render_style) {
     StrBuf b = {NULL, 0, 0};
     char *styled_text = NULL;
     char *normalized_plain_text = NULL;
     char *display_headword = normalize_headword_for_render(headword, hw_length, TRUE);
+    gboolean python_style = g_strcmp0(render_style, "python") == 0;
+    gboolean goldendict_style = g_strcmp0(render_style, "goldendict-ng") == 0;
+    gboolean slate_style = g_strcmp0(render_style, "slate-card") == 0;
+    gboolean paper_style = g_strcmp0(render_style, "paper") == 0;
+    gboolean diction_style = !python_style && !goldendict_style && !slate_style && !paper_style;
 
     if (format == DICT_FORMAT_MDX) {
         styled_text = substitute_mdx_stylesheet(dsl_text, length, mdx_stylesheet, &length);
@@ -1683,52 +1714,196 @@ char* dsl_render_to_html(const char *dsl_text,
     const char *pos_color = palette.accent;
     const char *border_color = palette.border;
 
-    const char *trn_color = palette.fg;
-    const char *ex_color = dark_mode ? "#95bf77" : "#76a150";
-    const char *com_color = palette.fg;
-    const char *translit_color = dark_mode ? "#888888" : "#808080";
+    const char *trn_color = palette.trn;
+    const char *ex_color = palette.ex;
+    const char *com_color = palette.com;
+    const char *translit_color = palette.translit;
+    char gold_surface[16];
+    char gold_badge[16];
+    char slate_surface[16];
+    char slate_badge[16];
+    char paper_surface[16];
+    char paper_edge[16];
+    char paper_accent[16];
+    char tmp_color[16];
 
-    // Add GoldenDict-like styling with theme-aware colors
+    if (dark_mode) {
+        darken_hex_color(gold_surface, link_color, sizeof(gold_surface), 0.28);
+        darken_hex_color(gold_badge, link_color, sizeof(gold_badge), 0.40);
+        darken_hex_color(slate_surface, border_color, sizeof(slate_surface), 0.82);
+        lighten_hex_color(slate_badge, border_color, sizeof(slate_badge));
+        darken_hex_color(paper_surface, com_color, sizeof(paper_surface), 0.30);
+        darken_hex_color(paper_edge, border_color, sizeof(paper_edge), 0.90);
+        darken_hex_color(paper_accent, link_color, sizeof(paper_accent), 0.72);
+    } else {
+        lighten_hex_color(tmp_color, link_color, sizeof(tmp_color));
+        lighten_hex_color(gold_surface, tmp_color, sizeof(gold_surface));
+        g_strlcpy(gold_badge, tmp_color, sizeof(gold_badge));
+        darken_hex_color(slate_surface, bg_color, sizeof(slate_surface), 0.97);
+        lighten_hex_color(slate_badge, border_color, sizeof(slate_badge));
+        lighten_hex_color(tmp_color, com_color, sizeof(tmp_color));
+        lighten_hex_color(paper_surface, tmp_color, sizeof(paper_surface));
+        lighten_hex_color(paper_edge, border_color, sizeof(paper_edge));
+        lighten_hex_color(paper_accent, link_color, sizeof(paper_accent));
+    }
+
     buf_append_str(&b,
         "<style>"
-        "body{font-family: system-ui, sans-serif; line-height: 1.4; color: ");
+        "body{font-family:system-ui,sans-serif;line-height:1.45;color:");
     buf_append_str(&b, body_color);
-    buf_append_str(&b, "; background: ");
+    buf_append_str(&b, ";background:");
     buf_append_str(&b, bg_color);
-    buf_append_str(&b, ";}"
-        "img{max-width:100%; height:auto; vertical-align:middle;}"
-        ".dict-audio{display:inline-block; line-height:0;}"
+    buf_append_str(&b, ";margin:0;padding:8px;}"
+        "img{max-width:100%;height:auto;vertical-align:middle;}"
+        ".dict-audio{display:inline-block;line-height:0;}"
         ".dict-audio img{cursor:pointer;}"
-        "table{max-width:100%; border-collapse:collapse;}"
+        "table{max-width:100%;border-collapse:collapse;}"
         "td,th{vertical-align:top;}"
-        "pre,code{white-space:pre-wrap;}"
-        ".dict-link {color: ");
+        "pre,code{white-space:pre-wrap;border-radius:6px;padding:0.2em 0.35em;}"
+        ".dict-link{color:");
     buf_append_str(&b, link_color);
-    buf_append_str(&b, "; text-decoration: none;}"
-        ".dict-link:hover {text-decoration: underline;}"
-        ".dsl-media-image{display:block; max-width:100%; height:auto; margin:0.35em 0;}"
-        ".trn{color: ");
+    buf_append_str(&b, ";text-decoration:none;cursor:pointer;}"
+        ".dict-link:hover{text-decoration:underline;}"
+        ".dsl-media-image{display:block;max-width:100%;height:auto;margin:0.35em 0;}"
+        ".trn{color:");
     buf_append_str(&b, trn_color);
     buf_append_str(&b, ";}"
-        ".ex{color: ");
+        ".ex{color:");
     buf_append_str(&b, ex_color);
-    buf_append_str(&b, "; font-style: italic;}"
-        ".com{color: ");
+    buf_append_str(&b, ";font-style:italic;}"
+        ".com{color:");
     buf_append_str(&b, com_color);
     buf_append_str(&b, ";}"
-        ".pos{color: ");
+        ".pos{color:");
     buf_append_str(&b, pos_color);
-    buf_append_str(&b, "; font-style: italic; font-weight: normal;}\n"
-        ".pos .trn, .trn .pos{color: inherit; font-style: inherit;}\n"
-        ".translit{color: ");
+    buf_append_str(&b, ";font-style:italic;font-weight:normal;}"
+        ".pos .trn,.trn .pos{color:inherit;font-style:inherit;}"
+        ".translit{color:");
     buf_append_str(&b, translit_color);
-    buf_append_str(&b, "; font-style: italic;}"
-        ".m-line{margin-top: 2px; margin-bottom: 2px;}"
-        "hr{border: none; border-top: 1px solid ");
+    buf_append_str(&b, ";font-style:italic;}"
+        ".m-line{line-height:1.4;margin:2px 0;}"
+        "hr{border:none;border-top:1px solid ");
     buf_append_str(&b, border_color);
-    buf_append_str(&b, "; margin: 10px 0;}"
-        "</style>"
-    );
+    buf_append_str(&b, ";margin:10px 0;}"
+        ".rendered-entry{margin:0 0 10px 0;}"
+        ".rendered-entry-body{line-height:1.45;}"
+        ".dict-source-bar{background:");
+    buf_append_str(&b, border_color);
+    buf_append_str(&b, ";color:");
+    buf_append_str(&b, heading_color);
+    buf_append_str(&b, ";padding:4px 12px;margin:20px -10px 10px -10px;border-bottom:1px solid ");
+    buf_append_str(&b, border_color);
+    buf_append_str(&b, ";font-size:0.85em;font-weight:bold;text-transform:uppercase;letter-spacing:0.05em;}"
+        ".diction-entry{margin:0 0 14px 0;padding:0 0 6px 0;border-bottom:1px solid ");
+    buf_append_str(&b, border_color);
+    buf_append_str(&b, ";}"
+        ".diction-entry{padding-left:8px;padding-right:8px;}"
+        ".diction-header{display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin:0 0 6px 0;}"
+        ".diction-lemma{font-size:1.22em;font-weight:700;color:");
+    buf_append_str(&b, heading_color);
+    buf_append_str(&b, ";}"
+        ".diction-dict{font-size:0.88em;color:");
+    buf_append_str(&b, com_color);
+    buf_append_str(&b, ";white-space:nowrap;text-align:right;}"
+        ".entry{text-align:left;padding:0 8px 6px 8px;margin:0 0 14px 0;}"
+        ".header{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px;gap:12px;}"
+        ".lemma{font-size:1.3em;font-weight:bold;color:");
+    buf_append_str(&b, link_color);
+    buf_append_str(&b, ";}"
+        ".dict{font-size:0.9em;color:#888;white-space:nowrap;text-align:right;}"
+        ".defs{margin-top:2px;line-height:1.45;}"
+        ".example{color:");
+    buf_append_str(&b, ex_color);
+    buf_append_str(&b, ";font-style:italic;display:inline-block;}"
+        ".m-tag{opacity:0.7;font-style:italic;display:inline-block;}"
+        ".pos-tag{opacity:0.85;font-style:italic;display:inline-block;margin:0 0.15em;}"
+        ".comment{opacity:0.7;}"
+        ".media-file{color:");
+    buf_append_str(&b, link_color);
+    buf_append_str(&b, ";cursor:pointer;display:inline-block;margin-left:0.25em;}"
+        ".lang{opacity:0.8;font-style:italic;}"
+        ".full-translation{display:none;opacity:0.8;font-style:italic;}"
+        ".py-entry{margin:0 0 14px 0;padding:0 0 6px 0;border-bottom:1px solid ");
+    buf_append_str(&b, border_color);
+    buf_append_str(&b, ";}"
+        ".py-header{display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin:0 0 4px 0;}"
+        ".py-dict{font-size:0.9em;color:");
+    buf_append_str(&b, com_color);
+    buf_append_str(&b, ";white-space:nowrap;text-align:right;}"
+        ".py-lemma{font-size:1.3em;font-weight:700;color:");
+    buf_append_str(&b, link_color);
+    buf_append_str(&b, ";}"
+        ".py-entry .rendered-entry-body,.py-entry-body .rendered-entry-body{margin-top:2px;}"
+        ".gold-header{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin:0 0 10px 0;}"
+        ".gold-dict{display:inline-flex;align-items:center;padding:0.28em 0.75em;border-radius:999px;font-size:0.8em;"
+        "font-weight:600;white-space:nowrap;background:");
+    buf_append_str(&b, gold_badge);
+    buf_append_str(&b, ";color:");
+    buf_append_str(&b, link_color);
+    buf_append_str(&b, ";}"
+        ".gdarticle{margin:0.1em 0 0.7em 0;padding:12px 18px;border:1px solid ");
+    buf_append_str(&b, gold_badge);
+    buf_append_str(&b, ";border-radius:10px;background:");
+    buf_append_str(&b, gold_surface);
+    buf_append_str(&b, ";content-visibility:auto;contain-intrinsic-height:auto 420px;box-shadow:");
+    buf_append_str(&b, dark_mode ? "0 1px 0 rgba(255,255,255,0.03)" : "0 1px 3px rgba(0,0,0,0.04)");
+    buf_append_str(&b, ";}"
+        ".gddictname{display:inline-flex;align-items:center;gap:0.35em;font-size:12px;font-weight:500;"
+        "margin:-4px -8px 8px auto;padding:0.3em 0.7em;border-radius:999px;background:");
+    buf_append_str(&b, border_color);
+    buf_append_str(&b, ";color:");
+    buf_append_str(&b, link_color);
+    buf_append_str(&b, ";user-select:none;}"
+        ".gddicttitle{display:block;}"
+        ".gdfromprefix{display:none;}"
+        ".gdarticlebody{clear:both;}"
+        ".gdarticlebody > .dsl_headwords{display:inline-block;margin-top:0;margin-bottom:0.35em;}"
+        ".dsl_headwords{font-size:1.18em;font-weight:700;color:");
+    buf_append_str(&b, heading_color);
+    buf_append_str(&b, ";}"
+        ".gold-entry-headword{display:inline-block;font-size:1.18em;font-weight:700;color:");
+    buf_append_str(&b, heading_color);
+    buf_append_str(&b, ";margin:0;}"
+        ".slate-entry{margin:0.25em 0 0.9em 0;padding:14px 18px;border-radius:16px;border:1px solid ");
+    buf_append_str(&b, slate_badge);
+    buf_append_str(&b, ";background:");
+    buf_append_str(&b, slate_surface);
+    buf_append_str(&b, ";box-shadow:");
+    buf_append_str(&b, dark_mode ? "inset 0 1px 0 rgba(255,255,255,0.03)" : "0 1px 2px rgba(34,56,80,0.06)");
+    buf_append_str(&b, ";}"
+        ".slate-header{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin:0 0 12px 0;}"
+        ".slate-dict{display:inline-flex;align-items:center;padding:0.28em 0.75em;border-radius:999px;font-size:0.82em;font-weight:600;"
+        "white-space:nowrap;background:");
+    buf_append_str(&b, slate_badge);
+    buf_append_str(&b, ";color:");
+    buf_append_str(&b, link_color);
+    buf_append_str(&b, ";}"
+        ".slate-lemma{font-size:1.28em;font-weight:700;color:");
+    buf_append_str(&b, heading_color);
+    buf_append_str(&b, ";}"
+        ".slate-entry .rendered-entry-body{line-height:1.5;}"
+        ".paper-entry{margin:0 0 1em 0;padding:14px 18px 12px 18px;border-left:4px solid ");
+    buf_append_str(&b, paper_accent);
+    buf_append_str(&b, ";border-radius:10px;border-top:1px solid ");
+    buf_append_str(&b, paper_edge);
+    buf_append_str(&b, ";border-right:1px solid ");
+    buf_append_str(&b, paper_edge);
+    buf_append_str(&b, ";border-bottom:1px solid ");
+    buf_append_str(&b, paper_edge);
+    buf_append_str(&b, ";background:");
+    buf_append_str(&b, paper_surface);
+    buf_append_str(&b, ";box-shadow:");
+    buf_append_str(&b, dark_mode ? "0 1px 2px rgba(0,0,0,0.22)" : "0 1px 2px rgba(86,62,26,0.08)");
+    buf_append_str(&b, ";}"
+        ".paper-header{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin:0 0 10px 0;}"
+        ".paper-lemma{font-family:Georgia,\"Times New Roman\",serif;font-size:1.32em;font-weight:700;color:");
+    buf_append_str(&b, heading_color);
+    buf_append_str(&b, ";}"
+        ".paper-dict{font-size:0.82em;letter-spacing:0.03em;text-transform:uppercase;white-space:nowrap;color:");
+    buf_append_str(&b, com_color);
+    buf_append_str(&b, ";}"
+        ".paper-entry .rendered-entry-body{line-height:1.58;}"
+        "</style>");
     if (dark_mode) {
         buf_append_str(&b,
             "<style>"
@@ -1744,11 +1919,23 @@ char* dsl_render_to_html(const char *dsl_text,
             "</style>");
     }
 
-    buf_append_str(&b, "<h2 style='color:");
-    buf_append_str(&b, heading_color);
-    buf_append_str(&b, "; margin-bottom: 0.5em;'>");
-    buf_append_escaped_html(&b, display_headword, strlen(display_headword));
-    buf_append_str(&b, "</h2>\n<div>");
+    if (python_style) {
+        buf_append_str(&b, "<div class='rendered-entry py-entry-rendered'><div class='rendered-entry-body'>");
+    } else if (diction_style) {
+        buf_append_str(&b, "<div class='rendered-entry diction-entry-rendered'><div class='rendered-entry-body'>");
+    } else if (slate_style) {
+        buf_append_str(&b, "<div class='rendered-entry slate-entry-rendered'><div class='rendered-entry-body'>");
+    } else if (paper_style) {
+        buf_append_str(&b, "<div class='rendered-entry paper-entry-rendered'><div class='rendered-entry-body'>");
+    } else if (goldendict_style) {
+        buf_append_str(&b, "<div class='rendered-entry gold-entry-rendered'><div class='rendered-entry-body'>");
+    } else {
+        buf_append_str(&b, "<div class='rendered-entry diction-entry-rendered'><h2 style='color:");
+        buf_append_str(&b, heading_color);
+        buf_append_str(&b, "; margin-bottom: 0.5em;'>");
+        buf_append_escaped_html(&b, display_headword, strlen(display_headword));
+        buf_append_str(&b, "</h2><div class='rendered-entry-body'>");
+    }
 
     if (format == DICT_FORMAT_MDX || format == DICT_FORMAT_STARDICT || format == DICT_FORMAT_BGL) {
         gboolean treat_as_html = (format == DICT_FORMAT_MDX || looks_like_html(dsl_text, length));
@@ -1756,7 +1943,7 @@ char* dsl_render_to_html(const char *dsl_text,
 
         if (!treat_as_html && !treat_as_tagged_plain) {
             buf_append_escaped_html(&b, dsl_text, length);
-            buf_append_str(&b, "</div>");
+            buf_append_str(&b, "</div></div>");
             g_free(normalized_plain_text);
             g_free(styled_text);
             g_free(display_headword);
@@ -1925,7 +2112,7 @@ char* dsl_render_to_html(const char *dsl_text,
         }
 
         if (treat_as_html) {
-            buf_append_str(&b, "</div>");
+            buf_append_str(&b, "</div></div>");
             g_free(normalized_plain_text);
             g_free(styled_text);
             g_free(display_headword);
@@ -2221,7 +2408,7 @@ char* dsl_render_to_html(const char *dsl_text,
     if (b.str == NULL) {
         buf_append_str(&b, " ");
     } else {
-        buf_append_str(&b, "</div>");
+        buf_append_str(&b, "</div></div>");
     }
     
     g_free(normalized_plain_text);

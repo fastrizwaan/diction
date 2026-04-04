@@ -2521,12 +2521,20 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     adw_application_window_set_content(ADW_APPLICATION_WINDOW(window), main_box);
 
     AdwOverlaySplitView *split_view = ADW_OVERLAY_SPLIT_VIEW(adw_overlay_split_view_new());
+    adw_overlay_split_view_set_max_sidebar_width(split_view, 360.0);
     gtk_widget_set_vexpand(GTK_WIDGET(split_view), TRUE);
     gtk_box_append(GTK_BOX(main_box), GTK_WIDGET(split_view));
-
+    /* Auto-hide sidebar below 720px width */
+    AdwBreakpoint *breakpoint = adw_breakpoint_new(adw_breakpoint_condition_parse("max-width: 720px"));
+    GValue collapsed_val = G_VALUE_INIT;
+    g_value_init(&collapsed_val, G_TYPE_BOOLEAN);
+    g_value_set_boolean(&collapsed_val, TRUE);
+    adw_breakpoint_add_setter(breakpoint, G_OBJECT(split_view), "collapsed", &collapsed_val);
+        g_value_unset(&collapsed_val);
+    adw_application_window_add_breakpoint(ADW_APPLICATION_WINDOW(window), breakpoint);
     /* --- Sidebar --- */
     GtkWidget *sidebar_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_widget_add_css_class(sidebar_vbox, "navigation-sidebar");
+    gtk_widget_add_css_class(sidebar_vbox, "sidebar");
 
     /* Sidebar Header */
     GtkWidget *sidebar_header = adw_header_bar_new();
@@ -2737,6 +2745,8 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
         ".navigation-sidebar listitem:selected, .navigation-sidebar row:selected { background: alpha(@theme_fg_color, 0.1); color: inherit; }"
         ".content-header { background: @window_bg_color; }"
         ".menu-item { font-weight: normal; padding: 4px 8px; min-height: 0; }"
+        "overlay-split-view > separator { background: @sidebar_bg_color; min-width: 1px; opacity: 1; }"
+        "headerbar.sidebar { box-shadow: none; border-bottom: none; margin: 0; padding: 0; }"
     );
     gtk_style_context_add_provider_for_display(gdk_display_get_default(), GTK_STYLE_PROVIDER(css_provider), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
 

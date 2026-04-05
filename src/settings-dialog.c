@@ -5,6 +5,7 @@
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <webkit/webkit.h>
+#include <pango/pangocairo.h>
 
 typedef struct _SettingsDialogData {
     AdwDialog          *dialog;
@@ -689,20 +690,45 @@ GtkWidget* settings_dialog_new(GtkWindow *parent, AppSettings *settings,
         "Font used to display dictionary definitions");
     adw_preferences_page_add(appearance_page, font_group);
 
-    /* Font family dropdown */
+    /* Font family dropdown — populated from all Pango/system font families */
     AdwComboRow *font_family_row = ADW_COMBO_ROW(adw_combo_row_new());
     adw_preferences_row_set_title(ADW_PREFERENCES_ROW(font_family_row), "Font Family");
-    GtkStringList *font_model = gtk_string_list_new((const char *[]){
-        "Sans Serif", "Serif", "Monospace", "System UI", "Georgia", "Times New Roman", "Arial", "Verdana", "Courier New", "Comic Sans MS", NULL});
+
+    /* Enumerate system fonts via Pango */
+    PangoFontMap *font_map = pango_cairo_font_map_get_default();
+    PangoFontFamily **families = NULL;
+    int n_families = 0;
+    pango_font_map_list_families(font_map, &families, &n_families);
+
+    /* Sort alphabetically (case-insensitive) */
+    if (n_families > 1) {
+        for (int i = 0; i < n_families - 1; i++) {
+            for (int j = i + 1; j < n_families; j++) {
+                const char *a = pango_font_family_get_name(families[i]);
+                const char *b = pango_font_family_get_name(families[j]);
+                if (g_ascii_strcasecmp(a, b) > 0) {
+                    PangoFontFamily *tmp = families[i];
+                    families[i] = families[j];
+                    families[j] = tmp;
+                }
+            }
+        }
+    }
+
+    /* Build string list and find current setting index */
+    GtkStringList *font_model = gtk_string_list_new(NULL);
+    int font_idx = 0;
+    for (int i = 0; i < n_families; i++) {
+        const char *fname = pango_font_family_get_name(families[i]);
+        gtk_string_list_append(font_model, fname);
+        if (g_strcmp0(settings->font_family, fname) == 0)
+            font_idx = i;
+    }
+    g_free(families);
+
     adw_combo_row_set_model(font_family_row, G_LIST_MODEL(font_model));
     g_object_unref(font_model);
-
-    int font_idx = 0;
-    const char *font_list[] = {"Sans Serif", "Serif", "Monospace", "System UI", "Georgia", "Times New Roman", "Arial", "Verdana", "Courier New", "Comic Sans MS"};
-    for (int i=0; i<10; i++) {
-        if (g_strcmp0(settings->font_family, font_list[i]) == 0) { font_idx = i; break; }
-    }
-    adw_combo_row_set_selected(font_family_row, font_idx);
+    adw_combo_row_set_selected(font_family_row, (guint)font_idx);
     g_signal_connect(font_family_row, "notify::selected", G_CALLBACK(on_font_family_row_changed), data);
     adw_preferences_group_add(font_group, GTK_WIDGET(font_family_row));
 

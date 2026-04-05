@@ -16,7 +16,9 @@ char* dsl_render_to_html(const char *dsl_text,
                          const char *mdx_stylesheet,
                          int dark_mode,
                          const char *theme_name,
-                         const char *render_style);
+                         const char *render_style,
+                         const char *font_family,
+                         int font_size);
 
 typedef struct {
     const char *bg;

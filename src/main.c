@@ -24,6 +24,8 @@ static GtkStringList *related_string_list = NULL;
 static GtkSingleSelection *related_selection_model = NULL;
 static GtkListView *related_list_view = NULL;
 static GPtrArray *related_row_payloads = NULL;
+static WebKitUserContentManager *font_ucm = NULL;       /* shared across web views */
+static WebKitUserStyleSheet *font_user_stylesheet = NULL; /* current injected font CSS */
 
 typedef enum {
     SIDEBAR_ROW_HINT = 0,
@@ -1714,7 +1716,9 @@ static void append_rendered_entry_html(GString *html_res,
         entry->dict->data + res->key_offset, res->key_length,
         entry->format, entry->dict->resource_dir, entry->dict->source_dir, entry->dict->mdx_stylesheet, dark_mode,
         app_settings ? app_settings->color_theme : "default",
-        render_style);
+        render_style,
+        app_settings ? app_settings->font_family : NULL,
+        app_settings ? app_settings->font_size : 0);
     if (!rendered) {
         return;
     }
@@ -2213,13 +2217,59 @@ static void on_style_manager_changed(AdwStyleManager *manager, GParamSpec *pspec
 static void apply_font_to_webview(void *user_data) {
     (void)user_data;
     if (!web_view || !app_settings) return;
+
+    /* Also keep WebKit's default-font settings for non-styled pages */
     WebKitSettings *ws = webkit_web_view_get_settings(web_view);
     if (app_settings->font_family && *app_settings->font_family)
         webkit_settings_set_default_font_family(ws, app_settings->font_family);
     if (app_settings->font_size > 0)
         webkit_settings_set_default_font_size(ws, (guint32)app_settings->font_size);
-    /* Refresh rendered content so HTML re-flows with new font */
-    update_theme_colors(); /* This will also call refresh_search_results */
+
+    /* Inject / replace a user stylesheet that forces the font on every
+     * element with !important.  This overrides any CSS the page itself has,
+     * including MDX dictionaries that ship their own stylesheets. */
+    if (font_ucm) {
+        if (font_user_stylesheet) {
+            webkit_user_content_manager_remove_style_sheet(font_ucm, font_user_stylesheet);
+            webkit_user_style_sheet_unref(font_user_stylesheet);
+            font_user_stylesheet = NULL;
+        }
+
+        const char *ff = (app_settings->font_family && *app_settings->font_family)
+                         ? app_settings->font_family : "sans-serif";
+        char css[512];
+        if (app_settings->font_size > 0) {
+            /* Use em-based size override so relative sizes within the page
+             * still scale correctly (1em = our chosen px at root level). */
+            if (strchr(ff, ' ') && ff[0] != '"' && ff[0] != '\'')
+                g_snprintf(css, sizeof(css),
+                    "* { font-family: \"%s\", sans-serif !important; }"
+                    "body { font-size: %dpx !important; }",
+                    ff, app_settings->font_size);
+            else
+                g_snprintf(css, sizeof(css),
+                    "* { font-family: %s, sans-serif !important; }"
+                    "body { font-size: %dpx !important; }",
+                    ff, app_settings->font_size);
+        } else {
+            if (strchr(ff, ' ') && ff[0] != '"' && ff[0] != '\'')
+                g_snprintf(css, sizeof(css),
+                    "* { font-family: \"%s\", sans-serif !important; }", ff);
+            else
+                g_snprintf(css, sizeof(css),
+                    "* { font-family: %s, sans-serif !important; }", ff);
+        }
+
+        font_user_stylesheet = webkit_user_style_sheet_new(
+            css,
+            WEBKIT_USER_CONTENT_INJECT_ALL_FRAMES,
+            WEBKIT_USER_STYLE_LEVEL_USER,
+            NULL, NULL);
+        webkit_user_content_manager_add_style_sheet(font_ucm, font_user_stylesheet);
+    }
+
+    /* Refresh rendered content so DSL pages also re-generate with new font */
+    update_theme_colors();
 }
 
 static void reload_dictionaries_from_settings(void *user_data) {
@@ -2691,17 +2741,20 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
 
     /* WebKit view */
     web_view = WEBKIT_WEB_VIEW(webkit_web_view_new());
+    font_ucm = webkit_web_view_get_user_content_manager(web_view);
     WebKitSettings *web_settings = webkit_web_view_get_settings(web_view);
     webkit_settings_set_auto_load_images(web_settings, TRUE);
     webkit_settings_set_allow_file_access_from_file_urls(web_settings, TRUE);
     webkit_settings_set_allow_universal_access_from_file_urls(web_settings, TRUE);
 
-    /* Apply saved font preferences */
+    /* Apply saved font preferences (WebKit defaults + user stylesheet) */
     if (app_settings) {
         if (app_settings->font_family && *app_settings->font_family)
             webkit_settings_set_default_font_family(web_settings, app_settings->font_family);
         if (app_settings->font_size > 0)
             webkit_settings_set_default_font_size(web_settings, (guint32)app_settings->font_size);
+        /* Inject initial font user-stylesheet so MDX pages respect the font too */
+        apply_font_to_webview(NULL);
     }
 
     /* Handle internal dict:// links */

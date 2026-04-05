@@ -362,7 +362,17 @@ static char *rewrite_style_for_theme(const char *style, gboolean dark_mode) {
         g_strstrip(val);
 
         char *themed_val = NULL;
-        if (g_ascii_strcasecmp(prop, "color") == 0 ||
+        if (g_ascii_strcasecmp(prop, "font-size") == 0 ||
+            g_ascii_strcasecmp(prop, "font-family") == 0 ||
+            g_ascii_strcasecmp(prop, "font") == 0 ||
+            g_str_has_prefix(prop, "font-size") ||
+            g_str_has_prefix(prop, "font-family")) {
+            /* Drop font settings from MDX so our global user stylesheet applies */
+            g_free(prop);
+            g_free(val);
+            g_free(decl);
+            continue;
+        } else if (g_ascii_strcasecmp(prop, "color") == 0 ||
             g_str_has_suffix(prop, "-color")) {
             gboolean is_background =
                 g_ascii_strcasecmp(prop, "background-color") == 0 ||
@@ -1685,7 +1695,9 @@ char* dsl_render_to_html(const char *dsl_text,
                          const char *mdx_stylesheet,
                          int dark_mode,
                          const char *theme_name,
-                         const char *render_style) {
+                         const char *render_style,
+                         const char *font_family,
+                         int font_size) {
     StrBuf b = {NULL, 0, 0};
     char *styled_text = NULL;
     char *normalized_plain_text = NULL;
@@ -1695,6 +1707,22 @@ char* dsl_render_to_html(const char *dsl_text,
     gboolean slate_style = g_strcmp0(render_style, "slate-card") == 0;
     gboolean paper_style = g_strcmp0(render_style, "paper") == 0;
     gboolean diction_style = !python_style && !goldendict_style && !slate_style && !paper_style;
+
+    /* Build font CSS value from user settings, with sensible fallback */
+    const char *ff = (font_family && *font_family) ? font_family : "system-ui,sans-serif";
+    char font_size_str[32];
+    char body_font_css[256];
+    if (font_size > 0) {
+        g_snprintf(font_size_str, sizeof(font_size_str), ";font-size:%dpx", font_size);
+    } else {
+        font_size_str[0] = '\0';
+    }
+    /* Wrap font name in quotes if it contains spaces and isn't already quoted */
+    if (strchr(ff, ' ') && ff[0] != '"' && ff[0] != '\'') {
+        g_snprintf(body_font_css, sizeof(body_font_css), "\"%s\",sans-serif%s", ff, font_size_str);
+    } else {
+        g_snprintf(body_font_css, sizeof(body_font_css), "%s%s", ff, font_size_str);
+    }
 
     if (format == DICT_FORMAT_MDX) {
         styled_text = substitute_mdx_stylesheet(dsl_text, length, mdx_stylesheet, &length);
@@ -1749,7 +1777,9 @@ char* dsl_render_to_html(const char *dsl_text,
 
     buf_append_str(&b,
         "<style>"
-        "body{font-family:system-ui,sans-serif;line-height:1.45;color:");
+        "body{font-family:");
+    buf_append_str(&b, body_font_css);
+    buf_append_str(&b, ";line-height:1.45;color:");
     buf_append_str(&b, body_color);
     buf_append_str(&b, ";background:");
     buf_append_str(&b, bg_color);
@@ -1896,7 +1926,14 @@ char* dsl_render_to_html(const char *dsl_text,
     buf_append_str(&b, dark_mode ? "0 1px 0 rgba(0,0,0,0.22)" : "none");
     buf_append_str(&b, ";}"
         ".paper-header{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin:0 0 10px 0;}"
-        ".paper-lemma{font-family:Georgia,\"Times New Roman\",serif;font-size:1.32em;font-weight:700;color:");
+        ".paper-lemma{font-family:");
+    /* For paper style, use the user font (or fallback to a nice serif) */
+    if (font_family && *font_family) {
+        buf_append_str(&b, body_font_css);
+    } else {
+        buf_append_str(&b, "Georgia,\"Times New Roman\",serif");
+    }
+    buf_append_str(&b, ";font-size:1.32em;font-weight:700;color:");
     buf_append_str(&b, heading_color);
     buf_append_str(&b, ";}"
         ".paper-dict{font-size:0.82em;letter-spacing:0.03em;text-transform:uppercase;white-space:nowrap;color:");
@@ -2099,6 +2136,12 @@ char* dsl_render_to_html(const char *dsl_text,
                     processed_tag = with_common;
                     buf_append_str(&b, processed_tag);
                     g_free(processed_tag);
+                } else if (strcmp(tag_name, "html") == 0 || strcmp(tag_name, "/html") == 0 ||
+                           strcmp(tag_name, "head") == 0 || strcmp(tag_name, "/head") == 0 ||
+                           strcmp(tag_name, "body") == 0 || strcmp(tag_name, "/body") == 0 ||
+                           g_str_has_prefix(tag_name, "!doctype")) {
+                    /* Strip root structure tags to avoid breaking the wrapper div's DOM */
+                    // Do nothing, just drop the tag
                 } else {
                     /* Other tags - pass through */
                     char *processed_tag = process_html_common_attributes(tag, resource_dir, source_dir, dark_mode);

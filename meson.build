@@ -34,3 +34,27 @@ executable('diction', srcs,
   dependencies: [ gtk_dep, adw_dep, webkit_dep, zlib_dep, json_dep, archive_dep ],
   install: true,
 )
+
+# Install desktop file
+install_data(
+  'data/io.github.fastrizwaan.diction.desktop',
+  install_dir: join_paths(get_option('datadir'), 'applications')
+)
+
+# Install AppData/AppStream metadata
+install_data(
+  'data/io.github.fastrizwaan.diction.metainfo.xml',
+  install_dir: join_paths(get_option('datadir'), 'metainfo')
+)
+
+# Install icon
+install_data(
+  'data/icons/io.github.fastrizwaan.diction.svg',
+  install_dir: join_paths(get_option('datadir'), 'icons', 'hicolor', 'scalable', 'apps')
+)
+
+# Install dice3 symbolic icon (Matches your pyproject requirement)
+install_data(
+  'data/icons/hicolor/scalable/actions/dice3-symbolic.svg',
+  install_dir: join_paths(get_option('datadir'), 'icons', 'hicolor', 'scalable', 'actions')
+)

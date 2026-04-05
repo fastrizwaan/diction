@@ -1,0 +1,50 @@
+[Desktop Entry]
+Type=Application
+Name=Diction
+Exec=diction
+Icon=io.github.fastrizwaan.diction
+Terminal=false
+StartupNotify=true
+Categories=Utility;Education;Dictionary;
+
+# Generic Name (The "What is this?" field)
+GenericName=Dictionary
+GenericName[ru]=Словарь
+GenericName[zh_CN]=词典
+GenericName[es]=Diccionario
+GenericName[nl]=Woordenboek
+GenericName[fr]=Dictionnaire
+GenericName[de]=Wörterbuch
+GenericName[hi]=शब्दकोश
+GenericName[ar]=قاموس
+GenericName[pt]=Dicionário
+GenericName[bn]=অভিধান
+GenericName[ja]=辞書
+
+# Comments (The description/tooltip)
+Comment=Lookup words and explore definitions across multiple dictionary formats
+Comment[ru]=Поиск слов и определений в словарях различных форматов
+Comment[zh_CN]=在多种格式的词库中查询单词与释义
+Comment[es]=Busca palabras y explora definiciones en múltiples formatos de diccionario
+Comment[nl]=Woorden opzoeken en definities ontdekken in verschillende woordenboekformaten
+Comment[fr]=Rechercher des mots et explorer des définitions dans plusieurs formats de dictionnaires
+Comment[de]=Wörter nachschlagen und Definitionen in verschiedenen Wörterbuchformaten durchsuchen
+Comment[hi]=विभिन्न शब्दकोश प्रारूपों में शब्दों को खोजें और परिभाषाओं का पता लगाएं
+Comment[ar]=ابحث عن الكلمات واستكشف التعريفات عبر تنسيقات قواميس متعددة
+Comment[pt]=Pesquisar palavras e explorar definições em vários formatos de dicionário
+Comment[bn]=বিভিন্ন অভিধান ফরম্যাটে শব্দ অনুসন্ধান এবং সংজ্ঞা অন্বেষণ করুন
+Comment[ja]=複数の辞書形式で単語を検索し、定義を探索します
+
+# Keywords (Search terms for the app menu)
+Keywords=dictionary;thesaurus;lexicon;wordbook;meaning;synonym;goldendict;mdict;lingoes;freemdict;stardict;bluedict;wordnet;dict;
+Keywords[ru]=dict;dictionary;словарь;тезаурус;лексикон;значение;синоним;
+Keywords[zh_CN]=dict;dictionary;字典;词典;同义词;词库;查询;
+Keywords[es]=dict;dictionary;diccionario;tesauro;léxico;significado;sinónimo;
+Keywords[nl]=dict;dictionary;woordenboek;thesaurus;lexicon;betekenis;synoniem;
+Keywords[fr]=dict;dictionary;dictionnaire;thésaurus;lexique;sens;synonyme;
+Keywords[de]=dict;dictionary;wörterbuch;thesaurus;lexikon;bedeutung;synonym;
+Keywords[hi]=dict;dictionary;शब्दकोश;थिसॉरस;शब्दावली;अर्थ;पर्यायवाची;
+Keywords[ar]=dict;dictionary;قاموس;مفردات;معجم;معنى;مرادف;
+Keywords[pt]=dict;dictionary;dicionário;tesauro;léxico;significado;sinônimo;
+Keywords[bn]=dict;dictionary;অভিধান;থিসরাস;শব্দকোষ;অর্থ;প্রতিশব্দ;
+Keywords[ja]=dict;dictionary;辞書;辞典;類語辞典;語彙;意味;類義語;

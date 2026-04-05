@@ -2823,7 +2823,7 @@ int main(int argc, char *argv[]) {
     }
     /* No else: settings-based dirs are loaded async in on_activate */
 
-    AdwApplication *app = adw_application_new("org.diction.App", G_APPLICATION_DEFAULT_FLAGS);
+    AdwApplication *app = adw_application_new("io.github.fastrizwaan.diction", G_APPLICATION_DEFAULT_FLAGS);
 
     // Add settings and about actions
     GSimpleAction *settings_action = g_simple_action_new("settings", NULL);

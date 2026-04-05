@@ -1845,8 +1845,8 @@ char* dsl_render_to_html(const char *dsl_text,
     buf_append_str(&b, gold_badge);
     buf_append_str(&b, ";border-radius:10px;background:");
     buf_append_str(&b, gold_surface);
-    buf_append_str(&b, ";content-visibility:auto;contain-intrinsic-height:auto 420px;box-shadow:");
-    buf_append_str(&b, dark_mode ? "0 1px 0 rgba(255,255,255,0.03)" : "0 1px 3px rgba(0,0,0,0.04)");
+    buf_append_str(&b, ";box-shadow:");
+    buf_append_str(&b, "none");
     buf_append_str(&b, ";}"
         ".gddictname{display:inline-flex;align-items:center;gap:0.35em;font-size:12px;font-weight:500;"
         "margin:-4px -8px 8px auto;padding:0.3em 0.7em;border-radius:999px;background:");
@@ -1869,7 +1869,7 @@ char* dsl_render_to_html(const char *dsl_text,
     buf_append_str(&b, ";background:");
     buf_append_str(&b, slate_surface);
     buf_append_str(&b, ";box-shadow:");
-    buf_append_str(&b, dark_mode ? "inset 0 1px 0 rgba(255,255,255,0.03)" : "0 1px 2px rgba(34,56,80,0.06)");
+    buf_append_str(&b, "none");
     buf_append_str(&b, ";}"
         ".slate-header{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin:0 0 12px 0;}"
         ".slate-dict{display:inline-flex;align-items:center;padding:0.28em 0.75em;border-radius:999px;font-size:0.82em;font-weight:600;"
@@ -1893,7 +1893,7 @@ char* dsl_render_to_html(const char *dsl_text,
     buf_append_str(&b, ";background:");
     buf_append_str(&b, paper_surface);
     buf_append_str(&b, ";box-shadow:");
-    buf_append_str(&b, dark_mode ? "0 1px 2px rgba(0,0,0,0.22)" : "0 1px 2px rgba(86,62,26,0.08)");
+    buf_append_str(&b, dark_mode ? "0 1px 0 rgba(0,0,0,0.22)" : "none");
     buf_append_str(&b, ";}"
         ".paper-header{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin:0 0 10px 0;}"
         ".paper-lemma{font-family:Georgia,\"Times New Roman\",serif;font-size:1.32em;font-weight:700;color:");

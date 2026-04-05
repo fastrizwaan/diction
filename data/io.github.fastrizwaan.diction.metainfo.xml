@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop">
+  <id>io.github.fastrizwaan.diction</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Diction</name>
+  <summary>A fast and lightweight dictionary application</summary>
+  <description>
+    <p>Diction is a fast dictionary reader with a clean UI written in C and GTK4.</p>
+  </description>
+  <launchable type="desktop-id">io.github.fastrizwaan.diction.desktop</launchable>
+</component>

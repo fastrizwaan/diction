@@ -158,13 +158,53 @@ static gboolean play_audio_via_pcm_pipeline(const char *audio_path) {
     return ok;
 }
 
+static gboolean play_audio_via_gstreamer(const char *audio_path, gboolean is_spx) {
+    if (!g_find_program_in_path("gst-launch-1.0")) {
+        return FALSE;
+    }
+
+    gboolean ok = FALSE;
+    char *uri = NULL;
+    GError *error = NULL;
+
+    if (looks_like_url(audio_path)) {
+        uri = g_strdup(audio_path);
+    } else {
+        uri = g_filename_to_uri(audio_path, NULL, &error);
+        if (!uri) {
+            g_clear_error(&error);
+            return FALSE;
+        }
+    }
+
+    const guint buffer_size = is_spx ? 262144 : 65536;
+    char *quoted_uri = g_shell_quote(uri);
+    char *cmd = g_strdup_printf(
+        "gst-launch-1.0 -q playbin uri=%s audio-sink='queue max-size-bytes=%u ! autoaudiosink'",
+        quoted_uri, buffer_size);
+
+    ok = spawn_audio_shell_command(cmd, "gst-playbin");
+
+    g_free(cmd);
+    g_free(quoted_uri);
+    g_free(uri);
+    return ok;
+}
+
 static void play_audio_file(const char *audio_path) {
     fprintf(stderr, "[AUDIO PLAY] Attempting to play: %s\n", audio_path);
 
+    /* Prefer GStreamer-based playback which handles many formats
+     * and allows configuring a larger internal queue for `.spx` files
+     * to reduce stuttering. Fall back to ffmpeg->pw-play/aplay if needed. */
+    if (play_audio_via_gstreamer(audio_path, path_has_extension(audio_path, ".spx"))) {
+        return;
+    }
+
     if (!looks_like_url(audio_path) &&
         (path_has_extension(audio_path, ".spx") ||
-        path_has_extension(audio_path, ".ogg") ||
-        path_has_extension(audio_path, ".oga"))) {
+         path_has_extension(audio_path, ".ogg") ||
+         path_has_extension(audio_path, ".oga"))) {
         if (play_audio_via_pcm_pipeline(audio_path)) {
             return;
         }

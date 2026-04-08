@@ -42,5 +42,9 @@ void dict_loader_free(DictEntry *head);
 /* Detect format from file path */
 DictFormat dict_detect_format(const char *path);
 
-/* Load a single dictionary of any supported format */
-DictMmap* dict_load_any(const char *path, DictFormat fmt);
+/* Load a single dictionary of any supported format
+ * `cancel_flag` may be NULL. If non-NULL the loader will check the
+ * cancel flag against `expected_generation` and abort early when they
+ * differ. */
+DictMmap* dict_load_any(const char *path, DictFormat fmt,
+                        volatile gint *cancel_flag, gint expected_generation);

@@ -4,6 +4,7 @@
 #include <string.h>
 #include <glib.h>
 #include <glib/gstdio.h>
+#include <gio/gio.h>
 
 static const char* get_config_dir(void) {
     static const char *config_dir = NULL;
@@ -392,9 +393,150 @@ void settings_remove_directory(AppSettings *settings, const char *path) {
         if (strcmp(g_ptr_array_index(settings->dictionary_dirs, i), path) == 0) {
             // g_ptr_array_remove_index calls g_free via the array's destroy func
             g_ptr_array_remove_index(settings->dictionary_dirs, i);
+            /* Also clear cached files for any dictionaries that were loaded from
+             * this directory and remove their settings entries. */
+            for (gint j = (gint)settings->dictionaries->len - 1; j >= 0; j--) {
+                DictConfig *cfg = g_ptr_array_index(settings->dictionaries, (guint)j);
+                if (g_strcmp0(cfg->source, "directory") == 0 && g_str_has_prefix(cfg->path, path)) {
+                    /* Remove cache and resource directories keyed by the path's SHA1 */
+                    char *hash = g_compute_checksum_for_string(G_CHECKSUM_SHA1, cfg->path, -1);
+                    const char *base = g_get_user_cache_dir();
+                    char *cache_path = g_build_filename(base, "diction", "dicts", hash, NULL);
+                    char *res_dir = g_build_filename(base, "diction", "resources", hash, NULL);
+                    g_free(hash);
+
+                    if (g_file_test(cache_path, G_FILE_TEST_EXISTS)) {
+                        g_remove(cache_path);
+                    }
+                    if (g_file_test(res_dir, G_FILE_TEST_IS_DIR)) {
+                        /* Recursively remove resource directory */
+                        GDir *d = g_dir_open(res_dir, 0, NULL);
+                        if (d) {
+                            const char *name = NULL;
+                            while ((name = g_dir_read_name(d)) != NULL) {
+                                if (name[0] == '.') continue;
+                                char *child = g_build_filename(res_dir, name, NULL);
+                                if (g_file_test(child, G_FILE_TEST_IS_DIR)) {
+                                    /* simple recursion */
+                                    GPtrArray *stack = g_ptr_array_new_with_free_func(g_free);
+                                    g_ptr_array_add(stack, g_strdup(child));
+                                    while (stack->len > 0) {
+                                        char *p = g_ptr_array_index(stack, stack->len - 1);
+                                        g_ptr_array_remove_index(stack, stack->len - 1);
+                                        GDir *sub = g_dir_open(p, 0, NULL);
+                                        if (!sub) { g_free(p); continue; }
+                                        const char *entry;
+                                        while ((entry = g_dir_read_name(sub)) != NULL) {
+                                            if (entry[0] == '.') continue;
+                                            char *child2 = g_build_filename(p, entry, NULL);
+                                            if (g_file_test(child2, G_FILE_TEST_IS_DIR)) {
+                                                g_ptr_array_add(stack, child2);
+                                            } else {
+                                                g_remove(child2);
+                                                g_free(child2);
+                                            }
+                                        }
+                                        g_dir_close(sub);
+                                        g_rmdir(p);
+                                        g_free(p);
+                                    }
+                                    g_ptr_array_free(stack, TRUE);
+                                } else {
+                                    g_remove(child);
+                                    g_free(child);
+                                }
+                            }
+                            g_dir_close(d);
+                        }
+                        g_rmdir(res_dir);
+                    }
+
+                    g_free(cache_path);
+                    g_free(res_dir);
+
+                    /* Remove the dict config entry */
+                    settings_strip_dict_from_groups(settings, cfg->id);
+                    g_ptr_array_remove_index(settings->dictionaries, (guint)j);
+                }
+            }
+            /* Persist changes */
+            settings_save(settings);
             return;
         }
     }
+}
+
+gboolean settings_import_dictionary(AppSettings *settings, const char *src_path) {
+    if (!src_path || !g_file_test(src_path, G_FILE_TEST_EXISTS)) return FALSE;
+
+    const char *data_base = g_get_user_data_dir();
+    char *dest_dir = g_build_filename(data_base, "diction", "dicts", NULL);
+    g_mkdir_with_parents(dest_dir, 0755);
+
+    char *base = g_path_get_basename(src_path);
+    char *dest = g_build_filename(dest_dir, base, NULL);
+    g_free(base);
+
+    /* Avoid overwriting existing file by choosing a unique name */
+    int suffix = 1;
+    while (g_file_test(dest, G_FILE_TEST_EXISTS)) {
+        g_free(dest);
+        base = g_path_get_basename(src_path);
+        char *dot = strrchr(base, '.');
+        if (dot) *dot = '\0';
+        dest = g_strdup_printf("%s/%s-%d.%s", dest_dir, base, suffix, dot ? dot + 1 : "");
+        g_free(base);
+        suffix++;
+    }
+
+    GError *err = NULL;
+    GFile *fsrc = g_file_new_for_path(src_path);
+    GFile *fdst = g_file_new_for_path(dest);
+    gboolean ok = g_file_copy(fsrc, fdst, G_FILE_COPY_NONE, NULL, NULL, NULL, &err);
+    g_object_unref(fsrc);
+    g_object_unref(fdst);
+    if (!ok) {
+        if (err) g_error_free(err);
+        g_free(dest_dir);
+        g_free(dest);
+        return FALSE;
+    }
+
+    /* Attempt to copy existing cache for src -> dest (reuse cache if present) */
+    char *src_hash = g_compute_checksum_for_string(G_CHECKSUM_SHA1, src_path, -1);
+    char *dst_hash = g_compute_checksum_for_string(G_CHECKSUM_SHA1, dest, -1);
+    const char *cache_base = g_get_user_cache_dir();
+    char *src_cache = g_build_filename(cache_base, "diction", "dicts", src_hash, NULL);
+    char *dst_cache = g_build_filename(cache_base, "diction", "dicts", dst_hash, NULL);
+    g_free(src_hash);
+    g_free(dst_hash);
+
+    if (g_file_test(src_cache, G_FILE_TEST_EXISTS) && !g_file_test(dst_cache, G_FILE_TEST_EXISTS)) {
+        GError *cerr = NULL;
+        GFile *fcsrc = g_file_new_for_path(src_cache);
+        GFile *fcdst = g_file_new_for_path(dst_cache);
+        gboolean cok = g_file_copy(fcsrc, fcdst, G_FILE_COPY_NONE, NULL, NULL, NULL, &cerr);
+        if (!cok) {
+            if (cerr) g_error_free(cerr);
+        }
+        g_object_unref(fcsrc);
+        g_object_unref(fcdst);
+    }
+
+    g_free(src_cache);
+    g_free(dst_cache);
+
+    /* Add to settings as manual dictionary */
+    char *name = g_path_get_basename(dest);
+    char *ext = strrchr(name, '.');
+    if (ext) *ext = '\0';
+    settings_add_dictionary(settings, name, dest);
+    g_free(name);
+
+    settings_save(settings);
+    g_free(dest_dir);
+    g_free(dest);
+    return TRUE;
 }
 
 void settings_add_dictionary(AppSettings *settings, const char *name, const char *path) {

@@ -220,7 +220,25 @@ static void write_resource_stamp(const char *resource_dir, const char *zip_path)
     g_free(stamp_path);
 }
 
-static gboolean extract_zip_to_directory(const char *zip_path, const char *output_dir) {
+static gboolean extract_zip_to_directory(const char *zip_path, const char *output_dir, const char *dict_path) {
+    extern void settings_scan_progress_notify(const char *path, int percent);
+    /* Count total entries first so we can compute progress */
+    int total_entries = 0;
+    struct archive *counter = archive_read_new();
+    struct archive_entry *centry = NULL;
+    archive_read_support_filter_all(counter);
+    archive_read_support_format_zip(counter);
+    if (archive_read_open_filename(counter, zip_path, 10240) == ARCHIVE_OK) {
+        int cstatus = ARCHIVE_OK;
+        while ((cstatus = archive_read_next_header(counter, &centry)) == ARCHIVE_OK) {
+            total_entries++;
+            archive_read_data_skip(counter);
+        }
+    }
+    archive_read_close(counter);
+    archive_read_free(counter);
+    if (total_entries == 0) total_entries = 1;
+
     struct archive *reader = archive_read_new();
     struct archive_entry *entry = NULL;
     gboolean ok = TRUE;
@@ -238,6 +256,8 @@ static gboolean extract_zip_to_directory(const char *zip_path, const char *outpu
         goto done;
     }
 
+    int processed = 0;
+    int last_percent = -1;
     while ((status = archive_read_next_header(reader, &entry)) != ARCHIVE_EOF) {
         if (status < ARCHIVE_WARN) {
             fprintf(stderr, "[DSL RESOURCES] Failed reading ZIP entry from %s: %s\n",
@@ -298,6 +318,13 @@ static gboolean extract_zip_to_directory(const char *zip_path, const char *outpu
                 break;
             }
             g_chmod(dest_path, fallback_mode);
+            /* Update progress for this dict */
+            processed++;
+            int pct = (processed * 100) / total_entries;
+            if (pct != last_percent) {
+                last_percent = pct;
+                settings_scan_progress_notify(dict_path ? dict_path : zip_path, pct);
+            }
         } else {
             archive_read_data_skip(reader);
         }
@@ -383,7 +410,7 @@ static char *dsl_prepare_resource_dir(const char *path) {
     }
 
     if ((!dir_has_visible_files(resource_dir) || !resource_stamp_matches(resource_dir, zip_path)) &&
-        !extract_zip_to_directory(zip_path, resource_dir)) {
+        !extract_zip_to_directory(zip_path, resource_dir, path)) {
         g_free(resource_dir);
         g_free(zip_path);
         return NULL;
@@ -588,7 +615,8 @@ static size_t convert_utf16be_to_utf8(const unsigned char *in_buf, size_t in_len
     return out;
 }
 
-DictMmap* dict_mmap_open(const char *path) {
+/* New signature accepts cancel flag and expected generation for cooperative cancellation. */
+DictMmap* dict_mmap_open(const char *path, volatile gint *cancel_flag, gint expected) {
     if (!path) return NULL;
     size_t path_len = strlen(path);
     if (path_len > 4 && strcasecmp(path + path_len - 4, ".mdx") == 0) {
@@ -643,13 +671,45 @@ DictMmap* dict_mmap_open(const char *path) {
         // Fast load: read index from end
         uint64_t count = *(uint64_t*)dict->data;
         int need_index = (count == 0);
-        
+
+        TreeEntry *entries = NULL;
+        size_t index_size = 0;
         if (count > 0) {
-            size_t index_size = count * sizeof(TreeEntry);
+            index_size = count * sizeof(TreeEntry);
             if (dict->size > index_size + 8) {
-                TreeEntry *entries = (TreeEntry*)(dict->data + (dict->size - index_size));
-                insert_balanced(dict->index, entries, 0, (int)count - 1);
-                printf("[DSL] Fast-loaded %lu entries from cache.\n", (unsigned long)count);
+                entries = (TreeEntry*)(dict->data + (dict->size - index_size));
+
+                /* Validate index entries to avoid using stale/corrupt caches
+                 * (which can happen when on-disk cache formats change). If any
+                 * entry points outside the data region, fall back to
+                 * re-indexing by parsing the original file. */
+                size_t data_region_end = dict->size - index_size; /* first byte of index */
+                gboolean valid_index = TRUE;
+                for (uint64_t i = 0; i < count; i++) {
+                    int64_t h_off = entries[i].h_off;
+                    uint64_t h_len = entries[i].h_len;
+                    int64_t d_off = entries[i].d_off;
+                    uint64_t d_len = entries[i].d_len;
+                    /* Basic sanity checks */
+                    if (h_off < 8 || (uint64_t)h_off >= data_region_end) { valid_index = FALSE; break; }
+                    if (d_off < 8 || (uint64_t)d_off >= data_region_end) { valid_index = FALSE; break; }
+                    if (h_len == 0 || d_len == 0) { valid_index = FALSE; break; }
+                    if ((uint64_t)h_off + h_len > data_region_end) { valid_index = FALSE; break; }
+                    if ((uint64_t)d_off + d_len > data_region_end) { valid_index = FALSE; break; }
+                }
+                if (valid_index) {
+                    insert_balanced(dict->index, entries, 0, (int)count - 1);
+                    printf("[DSL] Fast-loaded %lu entries from cache.\n", (unsigned long)count);
+                    /* Ensure a name exists for UI (some caches omit it) */
+                    if (!dict->name) {
+                        char *base = g_path_get_basename(path);
+                        dict->name = g_strdup(base);
+                        g_free(base);
+                    }
+                } else {
+                    fprintf(stderr, "[DSL] Cache index validation failed for %s — rebuilding index.\n", path);
+                    need_index = 1;
+                }
             } else {
                 need_index = 1;
             }
@@ -659,6 +719,16 @@ DictMmap* dict_mmap_open(const char *path) {
             printf("[DSL] Cache exists but lacks index. Performing auto-upgrade...\n");
             TreeEntry *entries = NULL;
             size_t word_count = parse_dsl_into_tree(dict, &entries);
+
+            /* Check for cancellation before attempting to upgrade cache */
+            if (cancel_flag && g_atomic_int_get(cancel_flag) != expected) {
+                // abort and cleanup
+                if (dict->fd >= 0) close(dict->fd);
+                if (dict->tmp_file) fclose(dict->tmp_file);
+                free(dict);
+                g_free(cache_path);
+                return NULL;
+            }
 
             if (word_count > 0 && entries) {
                 // Re-open O_RDWR to upgrade cache
@@ -677,6 +747,14 @@ DictMmap* dict_mmap_open(const char *path) {
                     fstat(dict->fd, &st_new);
                     dict->size = st_new.st_size;
                     dict->data = mmap(NULL, dict->size, PROT_READ, MAP_PRIVATE, dict->fd, 0);
+                        /* Ensure the splay-tree uses the new mmap base pointer
+                         * (parse_dsl_into_tree inserted nodes into dict->index
+                         * while using the previous mapping). Update the tree so
+                         * subsequent searches read from the correct memory. */
+                        if (dict->index) {
+                            dict->index->mmap_data = dict->data;
+                            dict->index->mmap_size = dict->size;
+                        }
                     printf("[DSL] Auto-upgraded cache for %s (%lu entries).\n", path, (unsigned long)word_count);
                 }
                 free(entries);
@@ -759,6 +837,15 @@ DictMmap* dict_mmap_open(const char *path) {
         int bytes_read;
 
         while ((bytes_read = gzread(gz, in_buf + has_pending, 65536 - has_pending)) > 0) {
+            /* Honor cancellation request as soon as possible */
+            if (cancel_flag && g_atomic_int_get(cancel_flag) != expected) {
+                gzclose(gz);
+                fclose(cache_file);
+                unlink(cache_path);
+                g_free(cache_path);
+                free(dict);
+                return NULL;
+            }
             int total = bytes_read + has_pending;
             size_t process_len = total;
 
@@ -849,6 +936,13 @@ DictMmap* dict_mmap_open(const char *path) {
         fstat(dict->fd, &st_final);
         dict->size = st_final.st_size;
         dict->data = mmap(NULL, dict->size, PROT_READ, MAP_PRIVATE, dict->fd, 0);
+        /* If a splay-tree was populated against the previous mapping,
+         * update its mmap base so node comparisons read from the new
+         * mapping address. This avoids use-after-unmap crashes. */
+        if (dict->index) {
+            dict->index->mmap_data = dict->data;
+            dict->index->mmap_size = dict->size;
+        }
     }
 
     return dict;

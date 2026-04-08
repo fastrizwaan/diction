@@ -55,6 +55,44 @@ static SidebarListView favorites_sidebar = {0};
 static SidebarListView groups_sidebar = {0};
 static GtkCssProvider *dynamic_theme_provider = NULL;
 
+/* Safely produce a markup-escaped UTF-8 string from possibly-binary input.
+ * If `len` >= 0, the input is treated as a byte buffer of that length;
+ * otherwise it is treated as a NUL-terminated string. The returned string
+ * is newly allocated and must be freed by the caller. */
+static char *safe_markup_escape_n(const char *buf, gssize len) {
+    char *tmp = NULL;
+    if (len < 0) {
+        tmp = g_strdup(buf ? buf : "");
+    } else {
+        tmp = g_strndup(buf ? buf : "", len);
+    }
+    char *valid = g_utf8_make_valid(tmp, -1);
+    g_free(tmp);
+    char *escaped = g_markup_escape_text(valid, -1);
+    g_free(valid);
+    return escaped;
+}
+
+/* Log a short preview of a markup string safely (prints non-printable
+ * bytes as \xNN). Helps diagnosing invalid markup input without
+ * crashing the UI. */
+static void log_markup_preview(const char *where, const char *markup) {
+    if (!markup) return;
+    size_t len = strlen(markup);
+    size_t max = len > 128 ? 128 : len;
+    fprintf(stderr, "[MARKUP DEBUG] %s: len=%zu preview='", where, len);
+    for (size_t i = 0; i < max; i++) {
+        unsigned char c = (unsigned char)markup[i];
+        if (c >= 32 && c < 127) fputc(c, stderr);
+        else if (c == '\n') fputs("\\n", stderr);
+        else if (c == '\r') fputs("\\r", stderr);
+        else if (c == '\t') fputs("\\t", stderr);
+        else fprintf(stderr, "\\x%02x", c);
+    }
+    if (max < len) fputs("...', (truncated)\n", stderr);
+    else fputs("'\n", stderr);
+}
+
 #define HISTORY_FILE_NAME "history.json"
 #define FAVORITES_FILE_NAME "favorites.json"
 static void populate_dict_sidebar(void);      // forward declaration
@@ -849,8 +887,8 @@ static void sidebar_list_item_bind(GtkSignalListItemFactory *factory, GtkListIte
     SidebarRowPayload *payload = sidebar_payload_at(sidebar, position);
     const char *title = payload && payload->title ? payload->title : "";
     const char *subtitle = payload && payload->subtitle ? payload->subtitle : "";
-    char *safe_title = g_markup_escape_text(title, -1);
-    char *safe_subtitle = g_markup_escape_text(subtitle, -1);
+    char *safe_title = safe_markup_escape_n(title, -1);
+    char *safe_subtitle = safe_markup_escape_n(subtitle, -1);
     char *markup = NULL;
 
     if (payload && payload->type == SIDEBAR_ROW_HINT) {
@@ -867,6 +905,7 @@ static void sidebar_list_item_bind(GtkSignalListItemFactory *factory, GtkListIte
         markup = g_strdup(safe_title);
     }
 
+    log_markup_preview("sidebar_list_item_bind", markup);
     gtk_label_set_markup(GTK_LABEL(label), markup);
     g_free(markup);
     g_free(safe_title);
@@ -1629,6 +1668,7 @@ static void related_list_item_bind(GtkSignalListItemFactory *factory, GtkListIte
     if (payload && payload->type == RELATED_ROW_HINT) {
         char *escaped = g_markup_escape_text(valid_text, -1);
         char *markup = g_strdup_printf("<span alpha='75%%'>%s</span>", escaped);
+        log_markup_preview("related_list_item_bind", markup);
         gtk_label_set_markup(GTK_LABEL(label), markup);
         g_free(markup);
         g_free(escaped);
@@ -1763,8 +1803,8 @@ static void append_rendered_entry_html(GString *html_res,
         return;
     }
 
-    char *escaped_name = g_markup_escape_text(entry->name ? entry->name : "", -1);
-    char *escaped_headword = g_markup_escape_text(entry->dict->data + res->key_offset, (gssize)res->key_length);
+    char *escaped_name = safe_markup_escape_n(entry->name ? entry->name : "", -1);
+    char *escaped_headword = safe_markup_escape_n(entry->dict->data + res->key_offset, (gssize)res->key_length);
     gboolean first_match_for_dict = FALSE;
 
     if (!*dict_header_shown) {
@@ -1848,7 +1888,7 @@ static void execute_search_now(void) {
 
 
     GString *html_res = g_string_new("<html><body>");
-    char *escaped_query_attr = g_markup_escape_text(query, -1);
+    char *escaped_query_attr = safe_markup_escape_n(query, -1);
     g_string_append_printf(html_res, "<div class='word-group' data-word='%s'>", escaped_query_attr);
     g_free(escaped_query_attr);
 
@@ -1889,7 +1929,7 @@ static void execute_search_now(void) {
         int dark_mode = style_manager && adw_style_manager_get_dark(style_manager) ? 1 : 0;
         const char *text_color = dark_mode ? "#aaaaaa" : "#666666";
 
-        char *escaped_query = g_markup_escape_text(query, -1);
+        char *escaped_query = safe_markup_escape_n(query, -1);
         char buf[512];
         snprintf(buf, sizeof(buf),
             "<div style='padding: 20px; color: %s; font-style: italic;'>"
@@ -1945,7 +1985,7 @@ static void append_rendered_word_html(const char *raw_word) {
 
         char *b64 = g_base64_encode((const guchar *)html_res->str, html_res->len);
         char *js_query = g_strescape(query, NULL);
-        char *escaped_attr = g_markup_escape_text(query, -1);
+        char *escaped_attr = safe_markup_escape_n(query, -1);
 
         char *js = g_strdup_printf(
             "var word = '%s';"
@@ -2350,6 +2390,11 @@ static void reload_dictionaries_from_settings(void *user_data) {
     start_async_dict_loading();
 }
 
+/* Request cancellation of the current loader generation (called from UI). */
+void request_loader_cancel(void) {
+    g_atomic_int_inc(&loader_generation);
+}
+
 static void refresh_dictionaries_ui(void *user_data) {
     (void)user_data;
     populate_dict_sidebar();
@@ -2455,6 +2500,9 @@ typedef struct {
 static gboolean on_dict_loaded_idle(gpointer user_data) {
     LoadIdleData *ld = user_data;
 
+    /* Notify any active settings scan dialogs about discovered dictionaries. */
+    extern void settings_scan_notify(const char *name, const char *path, gboolean done);
+
     if (ld->generation != g_atomic_int_get(&loader_generation)) {
         if (ld->entry) {
             dict_loader_free(ld->entry);
@@ -2466,6 +2514,11 @@ static gboolean on_dict_loaded_idle(gpointer user_data) {
     if (!ld->done && ld->entry) {
         DictEntry *e = ld->entry;
         e->next = NULL;
+
+        /* Inform settings dialog(s) of discovered entry */
+        g_printerr("[MAIN] on_dict_loaded_idle: name='%s' path='%s' gen=%d\n",
+                    e->name ? e->name : "(null)", e->path ? e->path : "(null)", ld->generation);
+        settings_scan_notify(e->name ? e->name : "(Unknown)", e->path ? e->path : "", FALSE);
 
         DictConfig *cfg = app_settings ? settings_find_dictionary_by_path(app_settings, e->path) : NULL;
         if (cfg && !cfg->enabled) {
@@ -2516,6 +2569,8 @@ static gboolean on_dict_loaded_idle(gpointer user_data) {
     }
 
     if (ld->done) {
+        /* Notify any settings scan dialogs that loading is complete */
+        settings_scan_notify(NULL, NULL, TRUE);
         sync_settings_dictionaries_from_loaded();
         populate_groups_sidebar();
         populate_history_sidebar();
@@ -2563,7 +2618,7 @@ static gpointer dict_load_thread(gpointer user_data) {
         if (args->generation != g_atomic_int_get(&loader_generation)) break;
         const char *path = args->manual_paths[i];
         DictFormat fmt = dict_detect_format(path);
-        DictMmap *dict = dict_load_any(path, fmt);
+        DictMmap *dict = dict_load_any(path, fmt, &loader_generation, args->generation);
         if (!dict) {
             continue;
         }
@@ -2928,6 +2983,11 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
             "<h2>Welcome to Diction</h2>"
             "<p>Select a dictionary from the sidebar and start searching.</p>", "file:///");
     }
+
+    /* Debug: auto-open preferences for integrated scanning if requested. */
+    if (getenv("DICTION_DEBUG_AUTO_SCAN")) {
+        show_settings_dialog(NULL, NULL, app);
+    }
 }
 
 int main(int argc, char *argv[]) {
@@ -2951,7 +3011,7 @@ int main(int argc, char *argv[]) {
             } else {
                 /* Single file mode */
                 DictFormat fmt = dict_detect_format(argv[1]);
-                DictMmap *d = dict_load_any(argv[1], fmt);
+                DictMmap *d = dict_load_any(argv[1], fmt, NULL, 0);
                 if (d) {
                     DictEntry *e = calloc(1, sizeof(DictEntry));
                     const char *slash = strrchr(argv[1], '/');
@@ -2966,6 +3026,26 @@ int main(int argc, char *argv[]) {
         }
     }
     /* No else: settings-based dirs are loaded async in on_activate */
+
+    /* Optional: support a quick CLI-only scan mode for debugging. If the
+     * environment variable DICTION_SCAN_ONLY is set, scan the provided
+     * directory (argv[1]) and print discovered names/paths to stderr, then exit.
+     */
+    if (getenv("DICTION_SCAN_ONLY")) {
+        const char *scan_dir = NULL;
+        if (argc > 1) scan_dir = argv[1];
+        if (!scan_dir) {
+            g_printerr("[SCAN_ONLY] No directory provided to scan.\n");
+            return 1;
+        }
+        DictEntry *head = dict_loader_scan_directory(scan_dir);
+        for (DictEntry *e = head; e; e = e->next) {
+            g_printerr("[SCAN_ONLY] name='%s' path='%s'\n",
+                        e->name ? e->name : "(null)", e->path ? e->path : "(null)");
+        }
+        dict_loader_free(head);
+        return 0;
+    }
 
     AdwApplication *app = adw_application_new("io.github.fastrizwaan.diction", G_APPLICATION_DEFAULT_FLAGS);
 

@@ -52,6 +52,9 @@ void settings_add_directory(AppSettings *settings, const char *path);
 void settings_remove_directory(AppSettings *settings, const char *path);
 void settings_add_dictionary(AppSettings *settings, const char *name, const char *path);
 void settings_remove_dictionary(AppSettings *settings, const char *id);
+// Import a dictionary file into the app's data directory and add as manual dictionary.
+// Returns TRUE on success and the new path will be added to settings.
+gboolean settings_import_dictionary(AppSettings *settings, const char *src_path);
 void settings_move_dictionary(AppSettings *settings, const char *id, int direction);
 void settings_create_group(AppSettings *settings, const char *name, GPtrArray *dict_ids);
 void settings_remove_group(AppSettings *settings, const char *id);

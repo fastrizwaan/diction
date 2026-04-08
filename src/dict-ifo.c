@@ -495,16 +495,36 @@ static DictMmap *open_cached_stardict(const char *cache_path, char *bookname, ch
     dict->index = splay_tree_new(dict->data, dict->size);
 
     uint64_t count = *(const uint64_t *)dict->data;
-    size_t index_off = (size_t)(dict->size - count * sizeof(TreeEntry));
-    if (index_off >= 8) {
+    size_t index_size = (size_t)count * sizeof(TreeEntry);
+    if (count > 0 && index_size + 8 <= dict->size) {
+        size_t index_off = dict->size - index_size;
         TreeEntry *tree_entries = (TreeEntry *)(dict->data + index_off);
-        insert_balanced(dict->index, tree_entries, 0, (int)count - 1);
+        /* Validate entries before use to avoid reading invalid offsets */
+        size_t data_region_end = dict->size - index_size;
+        gboolean valid_index = TRUE;
+        for (uint64_t i = 0; i < count; i++) {
+            int64_t h_off = tree_entries[i].h_off;
+            uint64_t h_len = tree_entries[i].h_len;
+            int64_t d_off = tree_entries[i].d_off;
+            uint64_t d_len = tree_entries[i].d_len;
+            if (h_off < 8 || (uint64_t)h_off >= data_region_end) { valid_index = FALSE; break; }
+            if (d_off < 8 || (uint64_t)d_off >= data_region_end) { valid_index = FALSE; break; }
+            if (h_len == 0 || d_len == 0) { valid_index = FALSE; break; }
+            if ((uint64_t)h_off + h_len > data_region_end) { valid_index = FALSE; break; }
+            if ((uint64_t)d_off + d_len > data_region_end) { valid_index = FALSE; break; }
+        }
+        if (valid_index) {
+            insert_balanced(dict->index, tree_entries, 0, (int)count - 1);
+        } else {
+            fprintf(stderr, "[IFO] Cache index validation failed for %s — rebuilding index.\n", cache_path);
+        }
     }
 
     return dict;
 }
 
-DictMmap* parse_stardict(const char *ifo_path) {
+DictMmap* parse_stardict(const char *ifo_path, volatile gint *cancel_flag, gint expected) {
+    if (cancel_flag && g_atomic_int_get(cancel_flag) != expected) return NULL;
     fprintf(stderr, "[IFO] Loading StarDict: %s\n", ifo_path);
 
     uint32_t wordcount = 0, idxfilesize = 0;
@@ -552,6 +572,15 @@ DictMmap* parse_stardict(const char *ifo_path) {
     size_t dict_raw_len = 0;
     unsigned char *idx_data = NULL;
     size_t idx_size = 0;
+
+    if (cancel_flag && g_atomic_int_get(cancel_flag) != expected) {
+        g_free(bookname);
+        g_free(resource_dir);
+        g_free(cache_path);
+        g_free(idx_path);
+        g_free(dict_path);
+        return NULL;
+    }
 
     if (!load_file_bytes_auto(dict_path, &dict_raw, &dict_raw_len) ||
         !load_file_bytes_auto(idx_path, &idx_data, &idx_size)) {

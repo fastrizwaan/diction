@@ -459,7 +459,7 @@ static int mdd_res_cmp(const void *a, const void *b) {
     return (oa < ob) ? -1 : (oa > ob) ? 1 : 0;
 }
 
-static gboolean mdx_extract_mdd_resources(const char *mdd_path, const char *dest_dir, int is_v2, int num_size, int encoding_is_utf16, int encrypted) {
+static gboolean mdx_extract_mdd_resources(const char *mdd_path, const char *dest_dir, int is_v2, int num_size, int encoding_is_utf16, int encrypted, volatile gint *cancel_flag, gint expected, const char *dict_path) {
     fprintf(stderr, "[MDD EXTRACT] Starting extraction from: %s\n", mdd_path);
     fprintf(stderr, "[MDD EXTRACT] Destination: %s\n", dest_dir);
     fprintf(stderr, "[MDD EXTRACT] Params: is_v2=%d, num_size=%d, utf16=%d, encrypted=%d\n", is_v2, num_size, encoding_is_utf16, encrypted);
@@ -536,6 +536,7 @@ static gboolean mdx_extract_mdd_resources(const char *mdd_path, const char *dest
             }
         }
         free(header_raw);
+        if (cancel_flag && g_atomic_int_get(cancel_flag) != expected) { fclose(f); return FALSE; }
     } else {
         fseek(f, hts, SEEK_CUR);
     }
@@ -567,6 +568,7 @@ static gboolean mdx_extract_mdd_resources(const char *mdd_path, const char *dest
             (unsigned long long)kbi_comp, (unsigned long long)kb_data_size);
     free(kbh);
     if (mdd_is_v2) fseek(f, 4, SEEK_CUR);
+    if (cancel_flag && g_atomic_int_get(cancel_flag) != expected) { fclose(f); return FALSE; }
     unsigned char *kbi_raw = malloc(kbi_comp);
     if (!kbi_raw) {
         fprintf(stderr, "[MDD EXTRACT] FAILED to allocate KBI\n");
@@ -634,6 +636,7 @@ static gboolean mdx_extract_mdd_resources(const char *mdd_path, const char *dest
     size_t res_count = 0;
     fseek(f, kb_data_pos, SEEK_SET);
     for (size_t bi = 0; bi < kbc; bi++) {
+        if (cancel_flag && g_atomic_int_get(cancel_flag) != expected) break;
         fprintf(stderr, "[MDD EXTRACT] Processing key block %zu/%zu (comp=%llu, decomp=%llu)\n",
                 bi, kbc, (unsigned long long)kbis[bi].comp, (unsigned long long)kbis[bi].decomp);
         unsigned char *comp = malloc(kbis[bi].comp);
@@ -680,6 +683,7 @@ static gboolean mdx_extract_mdd_resources(const char *mdd_path, const char *dest
         }
         fprintf(stderr, "[MDD EXTRACT] Extracted %zu resources from this key block, total res_count=%zu\n", kb_res_count, res_count);
         free(data);
+        if (cancel_flag && g_atomic_int_get(cancel_flag) != expected) break;
     }
     fprintf(stderr, "[MDD EXTRACT] Sorting %zu resources\n", res_count);
     qsort(resources, res_count, sizeof(MDDRes), mdd_res_cmp);
@@ -700,11 +704,12 @@ static gboolean mdx_extract_mdd_resources(const char *mdd_path, const char *dest
             rbis[i].decomp = read_num(&pp, mdd_num_size);
         }
         uint64_t td = 0;
-        for (uint64_t i = 0; i < nrb; i++) td += rbis[i].decomp;
+            for (uint64_t i = 0; i < nrb; i++) td += rbis[i].decomp;
         unsigned char *all_recs = malloc(td);
         if (all_recs) {
             uint64_t co = 0;
             for (uint64_t i = 0; i < nrb; i++) {
+                    if (cancel_flag && g_atomic_int_get(cancel_flag) != expected) break;
                 unsigned char *comp = malloc(rbis[i].comp);
                 if (!comp) continue;
                 if (fread(comp, 1, rbis[i].comp, f) == rbis[i].comp) {
@@ -716,7 +721,9 @@ static gboolean mdx_extract_mdd_resources(const char *mdd_path, const char *dest
             }
             fprintf(stderr, "[MDD EXTRACT] Starting to write %zu resources\n", res_count);
             size_t written_count = 0;
+            int last_pct = -1;
             for (size_t i = 0; i < res_count; i++) {
+                if (cancel_flag && g_atomic_int_get(cancel_flag) != expected) break;
                 if (!resources[i].name[0]) {
                     fprintf(stderr, "[MDD EXTRACT] Skipping empty resource %zu\n", i);
                     continue;
@@ -739,6 +746,14 @@ static gboolean mdx_extract_mdd_resources(const char *mdd_path, const char *dest
                         fclose(rf);
                         fprintf(stderr, "[MDD EXTRACT] Successfully wrote: %s\n", full);
                         written_count++;
+                        if (dict_path) {
+                            int pct = (int)((i * 100) / (res_count ? res_count : 1));
+                            if (pct != last_pct) {
+                                last_pct = pct;
+                                extern void settings_scan_progress_notify(const char *path, int percent);
+                                settings_scan_progress_notify(dict_path, pct);
+                            }
+                        }
                     } else {
                         fprintf(stderr, "[MDD EXTRACT] FAILED to open: %s (errno: %d)\n", full, errno);
                     }
@@ -758,7 +773,7 @@ static gboolean mdx_extract_mdd_resources(const char *mdd_path, const char *dest
     return success;
 }
 
-static char *mdx_prepare_resource_dir(const char *path, int is_v2, int num_size, int encoding_is_utf16, int encrypted) {
+static char *mdx_prepare_resource_dir(const char *path, int is_v2, int num_size, int encoding_is_utf16, int encrypted, volatile gint *cancel_flag, gint expected) {
     char *mdx_dir = g_path_get_dirname(path);
     char *mdx_basename = g_path_get_basename(path);
     char *dot_pos = strrchr(mdx_basename, '.');
@@ -787,14 +802,18 @@ static char *mdx_prepare_resource_dir(const char *path, int is_v2, int num_size,
         }
     }
 
-    if (needs_extract) {
+        if (needs_extract) {
         fprintf(stderr, "[MDX RESOURCES] Found %u MDD file(s); extracting to: %s\n", mdd_paths ? mdd_paths->len : 0, resource_dir);
         g_mkdir_with_parents(resource_dir, 0755);
         gboolean extracted_any = FALSE;
         for (guint i = 0; mdd_paths && i < mdd_paths->len; i++) {
             const char *mdd_path = g_ptr_array_index(mdd_paths, i);
             fprintf(stderr, "[MDX RESOURCES] Extracting MDD %u/%u: %s\n", i + 1, mdd_paths->len, mdd_path);
-            extracted_any = mdx_extract_mdd_resources(mdd_path, resource_dir, is_v2, num_size, encoding_is_utf16, encrypted) || extracted_any;
+                if (cancel_flag && g_atomic_int_get(cancel_flag) != expected) {
+                    /* Abort extraction */
+                    break;
+                }
+                extracted_any = mdx_extract_mdd_resources(mdd_path, resource_dir, is_v2, num_size, encoding_is_utf16, encrypted, cancel_flag, expected, path) || extracted_any;
         }
         if (extracted_any) {
             mdx_write_resource_stamp(resource_dir, mdd_paths);
@@ -828,7 +847,8 @@ static char *mdx_prepare_resource_dir(const char *path, int is_v2, int num_size,
 }
 
 
-DictMmap *parse_mdx_file(const char *path) {
+DictMmap *parse_mdx_file(const char *path, volatile gint *cancel_flag, gint expected) {
+    if (cancel_flag && g_atomic_int_get(cancel_flag) != expected) return NULL;
     ensure_cache_directory();
 
     char *cache_path = get_cached_dict_path(path);
@@ -935,13 +955,33 @@ DictMmap *parse_mdx_file(const char *path) {
 
         /* FAST LOADING: read index array from end of file */
         uint64_t count = *(uint64_t*)dict->data;
-        size_t index_off = (size_t)(dict->size - count * sizeof(TreeEntry));
-        if (index_off >= 8) {
+        size_t index_size = (size_t)count * sizeof(TreeEntry);
+        if (count > 0 && index_size + 8 <= dict->size) {
+            size_t index_off = dict->size - index_size;
             TreeEntry *tree_entries = (TreeEntry*)(dict->data + index_off);
-            insert_balanced(dict->index, tree_entries, 0, (int)count - 1);
+            /* Validate entries to avoid using corrupt or stale indexes */
+            size_t data_region_end = dict->size - index_size;
+            gboolean valid_index = TRUE;
+            for (uint64_t i = 0; i < count; i++) {
+                int64_t h_off = tree_entries[i].h_off;
+                uint64_t h_len = tree_entries[i].h_len;
+                int64_t d_off = tree_entries[i].d_off;
+                uint64_t d_len = tree_entries[i].d_len;
+                if (h_off < 8 || (uint64_t)h_off >= data_region_end) { valid_index = FALSE; break; }
+                if (d_off < 8 || (uint64_t)d_off >= data_region_end) { valid_index = FALSE; break; }
+                if (h_len == 0 || d_len == 0) { valid_index = FALSE; break; }
+                if ((uint64_t)h_off + h_len > data_region_end) { valid_index = FALSE; break; }
+                if ((uint64_t)d_off + d_len > data_region_end) { valid_index = FALSE; break; }
+            }
+            if (valid_index) {
+                insert_balanced(dict->index, tree_entries, 0, (int)count - 1);
+            } else {
+                fprintf(stderr, "[MDX] Cache index validation failed for %s — rebuilding index.\n", path);
+            }
         }
 
-        dict->resource_dir = mdx_prepare_resource_dir(path, is_v2, num_size, encoding_is_utf16, encrypted);
+        if (!(cancel_flag && g_atomic_int_get(cancel_flag) != expected))
+            dict->resource_dir = mdx_prepare_resource_dir(path, is_v2, num_size, encoding_is_utf16, encrypted, cancel_flag, expected);
 
         g_free(stylesheet);
         g_free(source_dir);
@@ -1119,7 +1159,7 @@ DictMmap *parse_mdx_file(const char *path) {
     free(tree_entries);
     g_free(cache_path);
 
-    dict->resource_dir = mdx_prepare_resource_dir(path, is_v2, num_size, encoding_is_utf16, encrypted);
+    dict->resource_dir = mdx_prepare_resource_dir(path, is_v2, num_size, encoding_is_utf16, encrypted, cancel_flag, expected);
 
     return dict;
 }

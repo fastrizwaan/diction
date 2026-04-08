@@ -99,23 +99,23 @@ DictFormat dict_detect_format(const char *path) {
 /* ── single dictionary loader ────────────────────────────── */
 
 /* Forward declarations for format-specific parsers */
-extern DictMmap* parse_bgl_file(const char *path);
-extern DictMmap* parse_mdx_file(const char *path);
-extern DictMmap* parse_stardict(const char *ifo_path);
+extern DictMmap* parse_bgl_file(const char *path, volatile gint *cancel_flag, gint expected);
+extern DictMmap* parse_mdx_file(const char *path, volatile gint *cancel_flag, gint expected);
+extern DictMmap* parse_stardict(const char *ifo_path, volatile gint *cancel_flag, gint expected);
 
-DictMmap* dict_load_any(const char *path, DictFormat fmt) {
+DictMmap* dict_load_any(const char *path, DictFormat fmt, volatile gint *cancel_flag, gint expected_generation) {
     switch (fmt) {
         case DICT_FORMAT_DSL:
-            return dict_mmap_open(path);
+            return dict_mmap_open(path, cancel_flag, expected_generation);
 
         case DICT_FORMAT_STARDICT:
-            return parse_stardict(path);
+            return parse_stardict(path, cancel_flag, expected_generation);
 
         case DICT_FORMAT_MDX:
-            return parse_mdx_file(path);
+            return parse_mdx_file(path, cancel_flag, expected_generation);
 
         case DICT_FORMAT_BGL:
-            return parse_bgl_file(path);
+            return parse_bgl_file(path, cancel_flag, expected_generation);
 
         default:
             return NULL;
@@ -178,9 +178,9 @@ static void scan_recursive(const char *dirpath, DictEntry **head,
             load_path = preferred_path;
         }
 
-        DictMmap *loaded = dict_load_any(load_path, fmt);
+        DictMmap *loaded = dict_load_any(load_path, fmt, cancel_flag, expected_generation);
         if (!loaded && fallback_path && g_strcmp0(fallback_path, load_path) != 0) {
-            loaded = dict_load_any(fallback_path, fmt);
+            loaded = dict_load_any(fallback_path, fmt, cancel_flag, expected_generation);
             if (loaded) {
                 load_path = fallback_path;
             }
@@ -199,7 +199,7 @@ static void scan_recursive(const char *dirpath, DictEntry **head,
         }
 
         DictEntry *entry = calloc(1, sizeof(DictEntry));
-        if (loaded->name) {
+        if (loaded->name && strlen(loaded->name) > 0) {
             char *valid = g_utf8_make_valid(loaded->name, -1);
             entry->name = strdup(valid);
             g_free(valid);
@@ -219,6 +219,9 @@ static void scan_recursive(const char *dirpath, DictEntry **head,
         entry->dict = loaded;
 
         if (callback) {
+            /* Debug: report created entry before callback */
+            g_printerr("[DICT LOADER] Created entry name='%s' path='%s'\n",
+                        entry->name ? entry->name : "(null)", entry->path ? entry->path : "(null)");
             callback(entry, user_data);
         }
 

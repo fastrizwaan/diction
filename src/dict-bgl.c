@@ -89,7 +89,8 @@ static char *find_bgl_resource_dir(const char *path) {
     return NULL;
 }
 
-DictMmap* parse_bgl_file(const char *path) {
+DictMmap* parse_bgl_file(const char *path, volatile gint *cancel_flag, gint expected) {
+    if (cancel_flag && g_atomic_int_get(cancel_flag) != expected) return NULL;
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
 
@@ -166,6 +167,13 @@ DictMmap* parse_bgl_file(const char *path) {
         unsigned char buf[65536];
         int n;
         while ((n = gzread(gz, buf, sizeof(buf))) > 0) {
+            if (cancel_flag && g_atomic_int_get(cancel_flag) != expected) {
+                gzclose(gz);
+                fclose(cache_file);
+                unlink(cache_path);
+                g_free(cache_path);
+                return NULL;
+            }
             fwrite(buf, 1, n, cache_file);
         }
         gzclose(gz);
@@ -219,6 +227,7 @@ DictMmap* parse_bgl_file(const char *path) {
     int word_count = 0;
 
     while (p < end) {
+        if (cancel_flag && g_atomic_int_get(cancel_flag) != expected) break;
         if (p + 1 > end) break;
 
         unsigned int first_byte = p[0];

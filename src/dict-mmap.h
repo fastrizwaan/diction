@@ -1,6 +1,7 @@
 #pragma once
 
 #include "splay-tree.h"
+#include <glib.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -24,7 +25,11 @@ typedef struct DictMmap {
     char *mdx_stylesheet;
 } DictMmap;
 
-DictMmap* dict_mmap_open(const char *path);
-DictMmap* parse_mdx_file(const char *path);
+/* Load/mmap a dictionary. `cancel_flag` may be NULL; if non-NULL the
+ * loader should abort early when g_atomic_int_get(cancel_flag) != expected. */
+DictMmap* dict_mmap_open(const char *path, volatile gint *cancel_flag, gint expected);
+DictMmap* parse_mdx_file(const char *path, volatile gint *cancel_flag, gint expected);
+DictMmap* parse_bgl_file(const char *path, volatile gint *cancel_flag, gint expected);
+DictMmap* parse_stardict(const char *path, volatile gint *cancel_flag, gint expected);
 void dict_mmap_close(DictMmap *dict);
 void insert_balanced(SplayTree *t, TreeEntry *e, int start, int end);

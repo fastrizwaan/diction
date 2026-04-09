@@ -2,9 +2,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <gio/gio.h>
+
+static gboolean path_is_inside_dir(const char *path, const char *dir_path);
+static GPtrArray *settings_collect_mdx_companion_paths(const char *mdx_path);
 
 static const char* get_config_dir(void) {
     static const char *config_dir = NULL;
@@ -24,6 +28,456 @@ static void ensure_config_dir(void) {
     char *dir = g_build_filename(base, "diction", NULL);
     g_mkdir_with_parents(dir, 0755);
     g_free(dir);
+}
+
+static gboolean ends_with_ci(const char *text, const char *suffix) {
+    if (!text || !suffix) {
+        return FALSE;
+    }
+
+    size_t text_len = strlen(text);
+    size_t suffix_len = strlen(suffix);
+    if (text_len < suffix_len) {
+        return FALSE;
+    }
+
+    return g_ascii_strcasecmp(text + text_len - suffix_len, suffix) == 0;
+}
+
+static char *strip_suffix_dup(const char *text, const char *suffix) {
+    if (!text) {
+        return g_strdup("");
+    }
+
+    if (!suffix || !ends_with_ci(text, suffix)) {
+        return g_strdup(text);
+    }
+
+    return g_strndup(text, strlen(text) - strlen(suffix));
+}
+
+static char *get_dictionary_data_dir(void) {
+    return g_build_filename(g_get_user_data_dir(), "diction", "dicts", NULL);
+}
+
+gboolean settings_path_is_in_directory_list(AppSettings *settings, const char *path) {
+    if (!settings || !path || !*path) {
+        return FALSE;
+    }
+
+    for (guint i = 0; i < settings->dictionary_dirs->len; i++) {
+        const char *dir_path = g_ptr_array_index(settings->dictionary_dirs, i);
+        if (path_is_inside_dir(path, dir_path)) {
+            return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
+static gboolean path_is_inside_dir(const char *path, const char *dir_path) {
+    if (!path || !dir_path) {
+        return FALSE;
+    }
+
+    char *canon_path = g_canonicalize_filename(path, NULL);
+    char *canon_dir = g_canonicalize_filename(dir_path, NULL);
+    char *canon_dir_sep = g_str_has_suffix(canon_dir, G_DIR_SEPARATOR_S)
+        ? g_strdup(canon_dir)
+        : g_strconcat(canon_dir, G_DIR_SEPARATOR_S, NULL);
+
+    gboolean inside = g_strcmp0(canon_path, canon_dir) == 0 ||
+                      g_str_has_prefix(canon_path, canon_dir_sep);
+
+    g_free(canon_path);
+    g_free(canon_dir);
+    g_free(canon_dir_sep);
+    return inside;
+}
+
+static gboolean remove_path_recursive(const char *path) {
+    if (!path || !g_file_test(path, G_FILE_TEST_EXISTS)) {
+        return TRUE;
+    }
+
+    if (!g_file_test(path, G_FILE_TEST_IS_DIR)) {
+        return g_remove(path) == 0;
+    }
+
+    GDir *dir = g_dir_open(path, 0, NULL);
+    if (!dir) {
+        return FALSE;
+    }
+
+    gboolean ok = TRUE;
+    const char *name = NULL;
+    while ((name = g_dir_read_name(dir)) != NULL) {
+        char *child = g_build_filename(path, name, NULL);
+        if (!remove_path_recursive(child)) {
+            ok = FALSE;
+        }
+        g_free(child);
+    }
+
+    g_dir_close(dir);
+    if (g_rmdir(path) != 0) {
+        ok = FALSE;
+    }
+
+    return ok;
+}
+
+typedef enum {
+    CLEANUP_CACHE_ONLY = 0,
+    CLEANUP_DELETE_PAYLOAD
+} CleanupKind;
+
+typedef struct {
+    char *path;
+    CleanupKind kind;
+} CleanupTask;
+
+static void cleanup_task_free(CleanupTask *task) {
+    if (!task) {
+        return;
+    }
+
+    g_free(task->path);
+    g_free(task);
+}
+
+static GPtrArray *cleanup_task_array_new(void) {
+    return g_ptr_array_new_with_free_func((GDestroyNotify)cleanup_task_free);
+}
+
+static void queue_cleanup_task(GPtrArray *tasks, const char *path, CleanupKind kind) {
+    if (!tasks || !path || !*path) {
+        return;
+    }
+
+    CleanupTask *task = g_new0(CleanupTask, 1);
+    task->path = g_strdup(path);
+    task->kind = kind;
+    g_ptr_array_add(tasks, task);
+}
+
+static void remove_cache_artifacts_for_path(const char *path) {
+    if (!path || !*path) {
+        return;
+    }
+
+    char *hash = g_compute_checksum_for_string(G_CHECKSUM_SHA1, path, -1);
+    const char *cache_base = g_get_user_cache_dir();
+    char *cache_path = g_build_filename(cache_base, "diction", "dicts", hash, NULL);
+    char *resource_dir = g_build_filename(cache_base, "diction", "resources", hash, NULL);
+    remove_path_recursive(cache_path);
+    remove_path_recursive(resource_dir);
+    g_free(cache_path);
+    g_free(resource_dir);
+    g_free(hash);
+
+    if (ends_with_ci(path, ".mdx")) {
+        char *basename = g_path_get_basename(path);
+        char *stem = strip_suffix_dup(basename, ".mdx");
+        char *mdx_resource_dir = g_build_filename(cache_base, "diction", "resources", stem, NULL);
+        remove_path_recursive(mdx_resource_dir);
+        g_free(mdx_resource_dir);
+        g_free(stem);
+        g_free(basename);
+    }
+}
+
+static void remove_dictionary_payload_for_path(const char *path) {
+    if (!path || !*path) {
+        return;
+    }
+
+    DictFormat fmt = dict_detect_format(path);
+    remove_path_recursive(path);
+
+    if (fmt == DICT_FORMAT_STARDICT) {
+        char *base = strip_suffix_dup(path, ".ifo");
+        const char *suffixes[] = {
+            ".idx", ".idx.gz", ".idx.dz",
+            ".dict", ".dict.dz",
+            ".syn", ".syn.gz",
+            ".files", ".dict.files", ".ifo.files"
+        };
+        for (guint i = 0; i < G_N_ELEMENTS(suffixes); i++) {
+            char *candidate = g_strconcat(base, suffixes[i], NULL);
+            remove_path_recursive(candidate);
+            g_free(candidate);
+        }
+        g_free(base);
+    } else if (fmt == DICT_FORMAT_DSL) {
+        char *without_dz = ends_with_ci(path, ".dsl.dz")
+            ? strip_suffix_dup(path, ".dz")
+            : NULL;
+        const char *suffixes[] = {
+            ".files", ".files.zip", ".dz.files", ".dz.files.zip"
+        };
+
+        for (guint i = 0; i < G_N_ELEMENTS(suffixes); i++) {
+            char *candidate = g_strconcat(path, suffixes[i], NULL);
+            remove_path_recursive(candidate);
+            g_free(candidate);
+        }
+
+        if (without_dz) {
+            char *candidate = g_strconcat(without_dz, ".files", NULL);
+            remove_path_recursive(candidate);
+            g_free(candidate);
+
+            candidate = g_strconcat(without_dz, ".files.zip", NULL);
+            remove_path_recursive(candidate);
+            g_free(candidate);
+            g_free(without_dz);
+        }
+    } else if (fmt == DICT_FORMAT_BGL) {
+        char *base = strip_suffix_dup(path, ".bgl");
+        char *resource_dir = g_strconcat(base, ".files", NULL);
+        remove_path_recursive(resource_dir);
+        g_free(resource_dir);
+        g_free(base);
+    } else if (fmt == DICT_FORMAT_MDX) {
+        GPtrArray *mdd_paths = settings_collect_mdx_companion_paths(path);
+        for (guint i = 0; mdd_paths && i < mdd_paths->len; i++) {
+            const char *candidate = g_ptr_array_index(mdd_paths, i);
+            remove_path_recursive(candidate);
+        }
+        if (mdd_paths) {
+            g_ptr_array_free(mdd_paths, TRUE);
+        }
+    }
+
+    remove_cache_artifacts_for_path(path);
+}
+
+static gpointer cleanup_thread_func(gpointer user_data) {
+    GPtrArray *tasks = user_data;
+    if (!tasks) {
+        return NULL;
+    }
+
+    for (guint i = 0; i < tasks->len; i++) {
+        CleanupTask *task = g_ptr_array_index(tasks, i);
+        if (!task || !task->path || !*task->path) {
+            continue;
+        }
+
+        if (task->kind == CLEANUP_DELETE_PAYLOAD) {
+            remove_dictionary_payload_for_path(task->path);
+        } else {
+            remove_cache_artifacts_for_path(task->path);
+        }
+    }
+
+    g_ptr_array_free(tasks, TRUE);
+    return NULL;
+}
+
+static void dispatch_cleanup_tasks(GPtrArray *tasks) {
+    if (!tasks) {
+        return;
+    }
+
+    if (tasks->len == 0) {
+        g_ptr_array_free(tasks, TRUE);
+        return;
+    }
+
+    GThread *thread = g_thread_new("settings-cleanup", cleanup_thread_func, tasks);
+    g_thread_unref(thread);
+}
+
+static char *find_existing_sibling(const char *base_path, const char * const *suffixes, gsize count, gboolean require_directory) {
+    for (gsize i = 0; i < count; i++) {
+        char *candidate = g_strconcat(base_path, suffixes[i], NULL);
+        gboolean exists = require_directory
+            ? g_file_test(candidate, G_FILE_TEST_IS_DIR)
+            : g_file_test(candidate, G_FILE_TEST_EXISTS);
+        if (exists) {
+            return candidate;
+        }
+        g_free(candidate);
+    }
+
+    return NULL;
+}
+
+static gboolean settings_mdx_filename_matches_numbered_mdd(const char *filename,
+                                                           const char *stem) {
+    if (!filename || !stem || !g_str_has_suffix(filename, ".mdd")) {
+        return FALSE;
+    }
+
+    gsize stem_len = strlen(stem);
+    gsize filename_len = strlen(filename);
+    if (filename_len <= stem_len + 4 || strncmp(filename, stem, stem_len) != 0) {
+        return FALSE;
+    }
+
+    const char *suffix = filename + stem_len;
+    const char *digits = suffix;
+    const char *end = filename + filename_len - 4; /* before ".mdd" */
+
+    if (*digits == '.') {
+        digits++;
+    }
+
+    if (digits >= end) {
+        return FALSE;
+    }
+
+    for (const char *p = digits; p < end; p++) {
+        if (!g_ascii_isdigit(*p)) {
+            return FALSE;
+        }
+    }
+
+    return TRUE;
+}
+
+static int settings_mdx_numbered_mdd_volume(const char *filename) {
+    if (!filename || !g_str_has_suffix(filename, ".mdd")) {
+        return 0;
+    }
+
+    gsize filename_len = strlen(filename);
+    const char *digits_end = filename + filename_len - 4;
+    const char *digits = digits_end;
+
+    while (digits > filename && g_ascii_isdigit(*(digits - 1))) {
+        digits--;
+    }
+
+    if (digits == digits_end) {
+        return 0;
+    }
+
+    return atoi(digits);
+}
+
+static gint settings_mdx_companion_compare(gconstpointer a, gconstpointer b) {
+    const char *path_a = *(char * const *)a;
+    const char *path_b = *(char * const *)b;
+    char *name_a = g_path_get_basename(path_a);
+    char *name_b = g_path_get_basename(path_b);
+    int vol_a = settings_mdx_numbered_mdd_volume(name_a);
+    int vol_b = settings_mdx_numbered_mdd_volume(name_b);
+    gint cmp = (vol_a != vol_b)
+        ? ((vol_a < vol_b) ? -1 : 1)
+        : g_strcmp0(name_a, name_b);
+
+    g_free(name_a);
+    g_free(name_b);
+    return cmp;
+}
+
+static GPtrArray *settings_collect_mdx_companion_paths(const char *mdx_path) {
+    if (!mdx_path) {
+        return NULL;
+    }
+
+    GPtrArray *paths = g_ptr_array_new_with_free_func(g_free);
+    char *base = strip_suffix_dup(mdx_path, ".mdx");
+    char *primary = g_strconcat(base, ".mdd", NULL);
+    if (g_file_test(primary, G_FILE_TEST_EXISTS)) {
+        g_ptr_array_add(paths, primary);
+    } else {
+        g_free(primary);
+    }
+
+    char *dir_path = g_path_get_dirname(base);
+    char *stem = g_path_get_basename(base);
+    GDir *dir = g_dir_open(dir_path, 0, NULL);
+    if (dir) {
+        GPtrArray *numbered = g_ptr_array_new_with_free_func(g_free);
+        const char *name = NULL;
+        while ((name = g_dir_read_name(dir)) != NULL) {
+            if (!settings_mdx_filename_matches_numbered_mdd(name, stem)) {
+                continue;
+            }
+
+            char *candidate = g_build_filename(dir_path, name, NULL);
+            if (g_file_test(candidate, G_FILE_TEST_EXISTS)) {
+                g_ptr_array_add(numbered, candidate);
+            } else {
+                g_free(candidate);
+            }
+        }
+        g_dir_close(dir);
+
+        g_ptr_array_sort(numbered, settings_mdx_companion_compare);
+        for (guint i = 0; i < numbered->len; i++) {
+            g_ptr_array_add(paths, g_ptr_array_index(numbered, i));
+        }
+        g_ptr_array_free(numbered, FALSE);
+    }
+
+    g_free(stem);
+    g_free(dir_path);
+    g_free(base);
+    return paths;
+}
+
+static gboolean copy_path_recursive(const char *src, const char *dest, GError **error) {
+    if (g_file_test(src, G_FILE_TEST_IS_DIR)) {
+        if (g_mkdir_with_parents(dest, 0755) != 0) {
+            g_set_error(error, G_IO_ERROR, g_io_error_from_errno(errno),
+                        "Failed to create directory %s", dest);
+            return FALSE;
+        }
+
+        GDir *dir = g_dir_open(src, 0, error);
+        if (!dir) {
+            return FALSE;
+        }
+
+        gboolean ok = TRUE;
+        const char *name = NULL;
+        while ((name = g_dir_read_name(dir)) != NULL) {
+            char *src_child = g_build_filename(src, name, NULL);
+            char *dest_child = g_build_filename(dest, name, NULL);
+            if (!copy_path_recursive(src_child, dest_child, error)) {
+                ok = FALSE;
+                g_free(src_child);
+                g_free(dest_child);
+                break;
+            }
+            g_free(src_child);
+            g_free(dest_child);
+        }
+
+        g_dir_close(dir);
+        return ok;
+    }
+
+    GFile *src_file = g_file_new_for_path(src);
+    GFile *dest_file = g_file_new_for_path(dest);
+    gboolean ok = g_file_copy(src_file, dest_file, G_FILE_COPY_NONE, NULL, NULL, NULL, error);
+    g_object_unref(src_file);
+    g_object_unref(dest_file);
+    return ok;
+}
+
+static char *make_import_candidate_path(const char *dest_dir, const char *stem, const char *suffix, int copy_index) {
+    char *name = copy_index == 0
+        ? g_strconcat(stem, suffix ? suffix : "", NULL)
+        : g_strdup_printf("%s-%d%s", stem, copy_index, suffix ? suffix : "");
+    char *candidate = g_build_filename(dest_dir, name, NULL);
+    g_free(name);
+    return candidate;
+}
+
+static char *build_unique_import_path(const char *dest_dir, const char *stem, const char *suffix) {
+    for (int copy_index = 0; ; copy_index++) {
+        char *candidate = make_import_candidate_path(dest_dir, stem, suffix, copy_index);
+        if (!g_file_test(candidate, G_FILE_TEST_EXISTS)) {
+            return candidate;
+        }
+        g_free(candidate);
+    }
 }
 
 char* settings_make_dictionary_id(const char *path) {
@@ -73,6 +527,25 @@ static void dict_group_free(DictGroup *grp) {
     }
 }
 
+static void settings_replace_dict_id_in_groups(AppSettings *settings,
+                                               const char *old_id,
+                                               const char *new_id) {
+    if (!settings || !old_id || !new_id) {
+        return;
+    }
+
+    for (guint i = 0; i < settings->dictionary_groups->len; i++) {
+        DictGroup *grp = g_ptr_array_index(settings->dictionary_groups, i);
+        for (guint j = 0; j < grp->members->len; j++) {
+            char *member = g_ptr_array_index(grp->members, j);
+            if (g_strcmp0(member, old_id) == 0) {
+                g_free(member);
+                g_ptr_array_index(grp->members, j) = g_strdup(new_id);
+            }
+        }
+    }
+}
+
 static void settings_strip_dict_from_groups(AppSettings *settings, const char *dict_id) {
     if (!settings || !dict_id) {
         return;
@@ -86,6 +559,47 @@ static void settings_strip_dict_from_groups(AppSettings *settings, const char *d
                 g_ptr_array_remove_index(grp->members, (guint)j);
             }
         }
+    }
+}
+
+gboolean settings_is_dictionary_ignored(AppSettings *settings, const char *path) {
+    if (!settings || !path || !*path || !settings->ignored_dictionary_paths) {
+        return FALSE;
+    }
+
+    for (guint i = 0; i < settings->ignored_dictionary_paths->len; i++) {
+        const char *ignored_path = g_ptr_array_index(settings->ignored_dictionary_paths, i);
+        if (g_strcmp0(ignored_path, path) == 0) {
+            return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
+void settings_set_dictionary_ignored(AppSettings *settings, const char *path, gboolean ignored) {
+    if (!settings || !path || !*path) {
+        return;
+    }
+
+    if (!settings->ignored_dictionary_paths) {
+        settings->ignored_dictionary_paths = g_ptr_array_new_with_free_func(g_free);
+    }
+
+    for (guint i = 0; i < settings->ignored_dictionary_paths->len; i++) {
+        const char *ignored_path = g_ptr_array_index(settings->ignored_dictionary_paths, i);
+        if (g_strcmp0(ignored_path, path) != 0) {
+            continue;
+        }
+
+        if (!ignored) {
+            g_ptr_array_remove_index(settings->ignored_dictionary_paths, i);
+        }
+        return;
+    }
+
+    if (ignored) {
+        g_ptr_array_add(settings->ignored_dictionary_paths, g_strdup(path));
     }
 }
 
@@ -130,7 +644,8 @@ void settings_upsert_dictionary(AppSettings *settings, const char *name, const c
             g_free(cfg->name);
             cfg->name = g_strdup(name);
         }
-        if (source && *source && g_strcmp0(cfg->source, "manual") != 0) {
+        if (source && *source &&
+            (!cfg->source || !*cfg->source || g_strcmp0(cfg->source, "directory") == 0)) {
             g_free(cfg->source);
             cfg->source = g_strdup(source);
         }
@@ -145,6 +660,7 @@ void settings_prune_directory_dictionaries(AppSettings *settings, GHashTable *lo
         return;
     }
 
+    GPtrArray *cleanup_tasks = cleanup_task_array_new();
     for (gint i = (gint)settings->dictionaries->len - 1; i >= 0; i--) {
         DictConfig *cfg = g_ptr_array_index(settings->dictionaries, (guint)i);
         if (g_strcmp0(cfg->source, "directory") != 0) {
@@ -154,9 +670,12 @@ void settings_prune_directory_dictionaries(AppSettings *settings, GHashTable *lo
             continue;
         }
 
+        queue_cleanup_task(cleanup_tasks, cfg->path, CLEANUP_CACHE_ONLY);
         settings_strip_dict_from_groups(settings, cfg->id);
         g_ptr_array_remove_index(settings->dictionaries, (guint)i);
     }
+
+    dispatch_cleanup_tasks(cleanup_tasks);
 }
 
 // Settings load/save
@@ -164,6 +683,7 @@ AppSettings* settings_load(void) {
     AppSettings *settings = g_new0(AppSettings, 1);
     settings->dictionaries = g_ptr_array_new_with_free_func((GDestroyNotify)dict_config_free);
     settings->dictionary_dirs = g_ptr_array_new_with_free_func(g_free);
+    settings->ignored_dictionary_paths = g_ptr_array_new_with_free_func(g_free);
     settings->dictionary_groups = g_ptr_array_new_with_free_func((GDestroyNotify)dict_group_free);
     settings->theme = g_strdup("system");
     settings->font_family = g_strdup("sans-serif");
@@ -246,7 +766,9 @@ AppSettings* settings_load(void) {
     }
 
     // Dictionary directories
-    JsonArray *dirs = json_object_get_array_member(obj, "dictionary_dirs");
+    JsonArray *dirs = json_object_has_member(obj, "dictionary_dirs")
+        ? json_object_get_array_member(obj, "dictionary_dirs")
+        : NULL;
     if (dirs) {
         for (guint i = 0; i < json_array_get_length(dirs); i++) {
             const char *dir = json_array_get_string_element(dirs, i);
@@ -254,8 +776,22 @@ AppSettings* settings_load(void) {
         }
     }
 
+    JsonArray *ignored_paths = json_object_has_member(obj, "ignored_dictionary_paths")
+        ? json_object_get_array_member(obj, "ignored_dictionary_paths")
+        : NULL;
+    if (ignored_paths) {
+        for (guint i = 0; i < json_array_get_length(ignored_paths); i++) {
+            const char *ignored_path = json_array_get_string_element(ignored_paths, i);
+            if (ignored_path && *ignored_path) {
+                g_ptr_array_add(settings->ignored_dictionary_paths, g_strdup(ignored_path));
+            }
+        }
+    }
+
     // Dictionaries
-    JsonArray *dicts = json_object_get_array_member(obj, "dictionaries");
+    JsonArray *dicts = json_object_has_member(obj, "dictionaries")
+        ? json_object_get_array_member(obj, "dictionaries")
+        : NULL;
     if (dicts) {
         for (guint i = 0; i < json_array_get_length(dicts); i++) {
             JsonNode *node = json_array_get_element(dicts, i);
@@ -266,7 +802,7 @@ AppSettings* settings_load(void) {
                 const char *source = json_object_get_string_member(dobj, "source");
                 int enabled = json_object_get_int_member(dobj, "enabled");
                 
-                if (path) {
+                if (path && g_path_is_absolute(path)) {
                     DictConfig *cfg = dict_config_new(name ? name : path, path, source);
                     cfg->enabled = enabled;
                     g_ptr_array_add(settings->dictionaries, cfg);
@@ -276,7 +812,9 @@ AppSettings* settings_load(void) {
     }
 
     // Groups
-    JsonArray *groups = json_object_get_array_member(obj, "dictionary_groups");
+    JsonArray *groups = json_object_has_member(obj, "dictionary_groups")
+        ? json_object_get_array_member(obj, "dictionary_groups")
+        : NULL;
     if (groups) {
         for (guint i = 0; i < json_array_get_length(groups); i++) {
             JsonNode *node = json_array_get_element(groups, i);
@@ -285,7 +823,9 @@ AppSettings* settings_load(void) {
                 const char *gname = json_object_get_string_member(gobj, "name");
                 if (gname) {
                     DictGroup *grp = dict_group_new(gname);
-                    JsonArray *members = json_object_get_array_member(gobj, "members");
+                    JsonArray *members = json_object_has_member(gobj, "members")
+                        ? json_object_get_array_member(gobj, "members")
+                        : NULL;
                     if (members) {
                         for (guint j = 0; j < json_array_get_length(members); j++) {
                             g_ptr_array_add(grp->members, g_strdup(json_array_get_string_element(members, j)));
@@ -322,6 +862,13 @@ void settings_save(AppSettings *settings) {
         json_array_add_string_element(dirs, g_ptr_array_index(settings->dictionary_dirs, i));
     }
     json_object_set_array_member(root, "dictionary_dirs", dirs);
+
+    JsonArray *ignored_paths = json_array_new();
+    for (guint i = 0; i < settings->ignored_dictionary_paths->len; i++) {
+        json_array_add_string_element(ignored_paths,
+            g_ptr_array_index(settings->ignored_dictionary_paths, i));
+    }
+    json_object_set_array_member(root, "ignored_dictionary_paths", ignored_paths);
 
     // Dictionaries
     JsonArray *dicts = json_array_new();
@@ -369,6 +916,7 @@ void settings_free(AppSettings *settings) {
     if (settings) {
         g_ptr_array_free(settings->dictionaries, TRUE);
         g_ptr_array_free(settings->dictionary_dirs, TRUE);
+        g_ptr_array_free(settings->ignored_dictionary_paths, TRUE);
         g_ptr_array_free(settings->dictionary_groups, TRUE);
         g_free(settings->theme);
         g_free(settings->font_family);
@@ -393,112 +941,221 @@ void settings_remove_directory(AppSettings *settings, const char *path) {
         if (strcmp(g_ptr_array_index(settings->dictionary_dirs, i), path) == 0) {
             // g_ptr_array_remove_index calls g_free via the array's destroy func
             g_ptr_array_remove_index(settings->dictionary_dirs, i);
-            /* Also clear cached files for any dictionaries that were loaded from
-             * this directory and remove their settings entries. */
+            GPtrArray *cleanup_tasks = cleanup_task_array_new();
             for (gint j = (gint)settings->dictionaries->len - 1; j >= 0; j--) {
                 DictConfig *cfg = g_ptr_array_index(settings->dictionaries, (guint)j);
-                if (g_strcmp0(cfg->source, "directory") == 0 && g_str_has_prefix(cfg->path, path)) {
-                    /* Remove cache and resource directories keyed by the path's SHA1 */
-                    char *hash = g_compute_checksum_for_string(G_CHECKSUM_SHA1, cfg->path, -1);
-                    const char *base = g_get_user_cache_dir();
-                    char *cache_path = g_build_filename(base, "diction", "dicts", hash, NULL);
-                    char *res_dir = g_build_filename(base, "diction", "resources", hash, NULL);
-                    g_free(hash);
+                if (!path_is_inside_dir(cfg->path, path)) {
+                    continue;
+                }
 
-                    if (g_file_test(cache_path, G_FILE_TEST_EXISTS)) {
-                        g_remove(cache_path);
-                    }
-                    if (g_file_test(res_dir, G_FILE_TEST_IS_DIR)) {
-                        /* Recursively remove resource directory */
-                        GDir *d = g_dir_open(res_dir, 0, NULL);
-                        if (d) {
-                            const char *name = NULL;
-                            while ((name = g_dir_read_name(d)) != NULL) {
-                                if (name[0] == '.') continue;
-                                char *child = g_build_filename(res_dir, name, NULL);
-                                if (g_file_test(child, G_FILE_TEST_IS_DIR)) {
-                                    /* simple recursion */
-                                    GPtrArray *stack = g_ptr_array_new_with_free_func(g_free);
-                                    g_ptr_array_add(stack, g_strdup(child));
-                                    while (stack->len > 0) {
-                                        char *p = g_ptr_array_index(stack, stack->len - 1);
-                                        g_ptr_array_remove_index(stack, stack->len - 1);
-                                        GDir *sub = g_dir_open(p, 0, NULL);
-                                        if (!sub) { g_free(p); continue; }
-                                        const char *entry;
-                                        while ((entry = g_dir_read_name(sub)) != NULL) {
-                                            if (entry[0] == '.') continue;
-                                            char *child2 = g_build_filename(p, entry, NULL);
-                                            if (g_file_test(child2, G_FILE_TEST_IS_DIR)) {
-                                                g_ptr_array_add(stack, child2);
-                                            } else {
-                                                g_remove(child2);
-                                                g_free(child2);
-                                            }
-                                        }
-                                        g_dir_close(sub);
-                                        g_rmdir(p);
-                                        g_free(p);
-                                    }
-                                    g_ptr_array_free(stack, TRUE);
-                                } else {
-                                    g_remove(child);
-                                    g_free(child);
-                                }
-                            }
-                            g_dir_close(d);
-                        }
-                        g_rmdir(res_dir);
-                    }
+                queue_cleanup_task(cleanup_tasks, cfg->path, CLEANUP_CACHE_ONLY);
+                settings_strip_dict_from_groups(settings, cfg->id);
+                g_ptr_array_remove_index(settings->dictionaries, (guint)j);
+            }
 
-                    g_free(cache_path);
-                    g_free(res_dir);
-
-                    /* Remove the dict config entry */
-                    settings_strip_dict_from_groups(settings, cfg->id);
-                    g_ptr_array_remove_index(settings->dictionaries, (guint)j);
+            for (gint j = (gint)settings->ignored_dictionary_paths->len - 1; j >= 0; j--) {
+                const char *ignored_path = g_ptr_array_index(settings->ignored_dictionary_paths, (guint)j);
+                if (path_is_inside_dir(ignored_path, path)) {
+                    queue_cleanup_task(cleanup_tasks, ignored_path, CLEANUP_CACHE_ONLY);
+                    g_ptr_array_remove_index(settings->ignored_dictionary_paths, (guint)j);
                 }
             }
-            /* Persist changes */
+
             settings_save(settings);
+            dispatch_cleanup_tasks(cleanup_tasks);
             return;
         }
     }
 }
 
 gboolean settings_import_dictionary(AppSettings *settings, const char *src_path) {
-    if (!src_path || !g_file_test(src_path, G_FILE_TEST_EXISTS)) return FALSE;
-
-    const char *data_base = g_get_user_data_dir();
-    char *dest_dir = g_build_filename(data_base, "diction", "dicts", NULL);
-    g_mkdir_with_parents(dest_dir, 0755);
-
-    char *base = g_path_get_basename(src_path);
-    char *dest = g_build_filename(dest_dir, base, NULL);
-    g_free(base);
-
-    /* Avoid overwriting existing file by choosing a unique name */
-    int suffix = 1;
-    while (g_file_test(dest, G_FILE_TEST_EXISTS)) {
-        g_free(dest);
-        base = g_path_get_basename(src_path);
-        char *dot = strrchr(base, '.');
-        if (dot) *dot = '\0';
-        dest = g_strdup_printf("%s/%s-%d.%s", dest_dir, base, suffix, dot ? dot + 1 : "");
-        g_free(base);
-        suffix++;
+    if (!settings || !src_path || !g_file_test(src_path, G_FILE_TEST_EXISTS)) {
+        return FALSE;
     }
 
+    char *dest_dir = get_dictionary_data_dir();
+    g_mkdir_with_parents(dest_dir, 0755);
+
+    DictConfig *existing_cfg = settings_find_dictionary_by_path(settings, src_path);
+    gboolean src_in_managed_dir = path_is_inside_dir(src_path, dest_dir);
+    gboolean src_in_watched_dir = settings_path_is_in_directory_list(settings, src_path);
+
+    if (src_in_managed_dir) {
+        char *name = g_path_get_basename(src_path);
+        char *ext = strrchr(name, '.');
+        if (ext) {
+            *ext = '\0';
+        }
+
+        if (existing_cfg) {
+            char *old_id = g_strdup(existing_cfg->id);
+            g_free(existing_cfg->id);
+            existing_cfg->id = settings_make_dictionary_id(src_path);
+            g_free(existing_cfg->name);
+            existing_cfg->name = g_strdup(name);
+            g_free(existing_cfg->source);
+            existing_cfg->source = g_strdup("imported");
+            settings_replace_dict_id_in_groups(settings, old_id, existing_cfg->id);
+            g_free(old_id);
+        } else {
+            settings_upsert_dictionary(settings, name, src_path, "imported");
+        }
+
+        settings_set_dictionary_ignored(settings, src_path, FALSE);
+        settings_save(settings);
+        g_free(name);
+        g_free(dest_dir);
+        return TRUE;
+    }
+
+    DictFormat fmt = dict_detect_format(src_path);
+    const char *primary_suffix = NULL;
+    switch (fmt) {
+        case DICT_FORMAT_DSL:
+            primary_suffix = ends_with_ci(src_path, ".dsl.dz") ? ".dsl.dz" : ".dsl";
+            break;
+        case DICT_FORMAT_STARDICT:
+            primary_suffix = ".ifo";
+            break;
+        case DICT_FORMAT_MDX:
+            primary_suffix = ".mdx";
+            break;
+        case DICT_FORMAT_BGL:
+            primary_suffix = ".bgl";
+            break;
+        default:
+            break;
+    }
+
+    char *basename = g_path_get_basename(src_path);
+    char *stem = (primary_suffix && ends_with_ci(basename, primary_suffix))
+        ? g_strndup(basename, strlen(basename) - strlen(primary_suffix))
+        : strip_suffix_dup(basename, strrchr(basename, '.') ? strrchr(basename, '.') : "");
+    char *dest = build_unique_import_path(dest_dir, stem, primary_suffix ? primary_suffix : "");
     GError *err = NULL;
-    GFile *fsrc = g_file_new_for_path(src_path);
-    GFile *fdst = g_file_new_for_path(dest);
-    gboolean ok = g_file_copy(fsrc, fdst, G_FILE_COPY_NONE, NULL, NULL, NULL, &err);
-    g_object_unref(fsrc);
-    g_object_unref(fdst);
+    gboolean ok = copy_path_recursive(src_path, dest, &err);
+
+    if (ok && fmt == DICT_FORMAT_STARDICT) {
+        char *src_root = strip_suffix_dup(src_path, ".ifo");
+        char *dest_root = strip_suffix_dup(dest, ".ifo");
+        const char *idx_suffixes[] = { ".idx", ".idx.gz", ".idx.dz", ".IDX", ".IDX.GZ", ".IDX.DZ" };
+        const char *dict_suffixes[] = { ".dict.dz", ".dict", ".DICT.DZ", ".DICT" };
+        const char *syn_suffixes[] = { ".syn", ".syn.gz", ".SYN", ".SYN.GZ" };
+        const char *resource_suffixes[] = { ".files", ".dict.files", ".ifo.files" };
+        char *src_idx = find_existing_sibling(src_root, idx_suffixes, G_N_ELEMENTS(idx_suffixes), FALSE);
+        char *src_dict = find_existing_sibling(src_root, dict_suffixes, G_N_ELEMENTS(dict_suffixes), FALSE);
+
+        if (!src_idx || !src_dict) {
+            g_set_error(&err, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
+                        "StarDict import needs matching .idx and .dict files");
+            ok = FALSE;
+        }
+
+        if (ok) {
+            char *dest_idx = g_strconcat(dest_root, src_idx + strlen(src_root), NULL);
+            char *dest_dict = g_strconcat(dest_root, src_dict + strlen(src_root), NULL);
+            ok = copy_path_recursive(src_idx, dest_idx, &err) &&
+                 copy_path_recursive(src_dict, dest_dict, &err);
+            g_free(dest_idx);
+            g_free(dest_dict);
+        }
+
+        if (ok) {
+            char *src_syn = find_existing_sibling(src_root, syn_suffixes, G_N_ELEMENTS(syn_suffixes), FALSE);
+            if (src_syn) {
+                char *dest_syn = g_strconcat(dest_root, src_syn + strlen(src_root), NULL);
+                ok = copy_path_recursive(src_syn, dest_syn, &err);
+                g_free(dest_syn);
+                g_free(src_syn);
+            }
+        }
+
+        if (ok) {
+            char *src_resource = find_existing_sibling(src_root, resource_suffixes, G_N_ELEMENTS(resource_suffixes), TRUE);
+            if (src_resource) {
+                char *dest_resource = g_strconcat(dest_root, src_resource + strlen(src_root), NULL);
+                ok = copy_path_recursive(src_resource, dest_resource, &err);
+                g_free(dest_resource);
+                g_free(src_resource);
+            }
+        }
+
+        g_free(src_idx);
+        g_free(src_dict);
+        g_free(src_root);
+        g_free(dest_root);
+    } else if (ok && fmt == DICT_FORMAT_DSL) {
+        char *without_dz_src = ends_with_ci(src_path, ".dsl.dz") ? strip_suffix_dup(src_path, ".dz") : NULL;
+        char *without_dz_dest = ends_with_ci(dest, ".dsl.dz") ? strip_suffix_dup(dest, ".dz") : NULL;
+        struct {
+            const char *src_base;
+            const char *src_suffix;
+            const char *dest_base;
+            const char *dest_suffix;
+        } candidates[] = {
+            { src_path, ".files", dest, ".files" },
+            { src_path, ".files.zip", dest, ".files.zip" },
+            { src_path, ".dz.files", dest, ".dz.files" },
+            { src_path, ".dz.files.zip", dest, ".dz.files.zip" },
+            { without_dz_src, ".files", without_dz_dest, ".files" },
+            { without_dz_src, ".files.zip", without_dz_dest, ".files.zip" },
+        };
+
+        for (guint i = 0; ok && i < G_N_ELEMENTS(candidates); i++) {
+            if (!candidates[i].src_base || !candidates[i].dest_base) {
+                continue;
+            }
+
+            char *src_companion = g_strconcat(candidates[i].src_base, candidates[i].src_suffix, NULL);
+            if (g_file_test(src_companion, G_FILE_TEST_EXISTS)) {
+                char *dest_companion = g_strconcat(candidates[i].dest_base, candidates[i].dest_suffix, NULL);
+                ok = copy_path_recursive(src_companion, dest_companion, &err);
+                g_free(dest_companion);
+            }
+            g_free(src_companion);
+        }
+
+        g_free(without_dz_src);
+        g_free(without_dz_dest);
+    } else if (ok && fmt == DICT_FORMAT_BGL) {
+        char *src_root = strip_suffix_dup(src_path, ".bgl");
+        char *dest_root = strip_suffix_dup(dest, ".bgl");
+        char *src_resource = g_strconcat(src_root, ".files", NULL);
+        if (g_file_test(src_resource, G_FILE_TEST_IS_DIR)) {
+            char *dest_resource = g_strconcat(dest_root, ".files", NULL);
+            ok = copy_path_recursive(src_resource, dest_resource, &err);
+            g_free(dest_resource);
+        }
+        g_free(src_resource);
+        g_free(src_root);
+        g_free(dest_root);
+    } else if (ok && fmt == DICT_FORMAT_MDX) {
+        char *src_root = strip_suffix_dup(src_path, ".mdx");
+        char *dest_root = strip_suffix_dup(dest, ".mdx");
+        GPtrArray *mdd_paths = settings_collect_mdx_companion_paths(src_path);
+        for (guint i = 0; ok && mdd_paths && i < mdd_paths->len; i++) {
+            const char *src_mdd = g_ptr_array_index(mdd_paths, i);
+            char *dest_mdd = g_strconcat(dest_root, src_mdd + strlen(src_root), NULL);
+            ok = copy_path_recursive(src_mdd, dest_mdd, &err);
+            g_free(dest_mdd);
+        }
+
+        if (mdd_paths) {
+            g_ptr_array_free(mdd_paths, TRUE);
+        }
+        g_free(src_root);
+        g_free(dest_root);
+    }
+
     if (!ok) {
-        if (err) g_error_free(err);
+        remove_dictionary_payload_for_path(dest);
+        if (err) {
+            g_error_free(err);
+        }
         g_free(dest_dir);
         g_free(dest);
+        g_free(stem);
+        g_free(basename);
         return FALSE;
     }
 
@@ -516,8 +1173,8 @@ gboolean settings_import_dictionary(AppSettings *settings, const char *src_path)
         GFile *fcsrc = g_file_new_for_path(src_cache);
         GFile *fcdst = g_file_new_for_path(dst_cache);
         gboolean cok = g_file_copy(fcsrc, fcdst, G_FILE_COPY_NONE, NULL, NULL, NULL, &cerr);
-        if (!cok) {
-            if (cerr) g_error_free(cerr);
+        if (!cok && cerr) {
+            g_error_free(cerr);
         }
         g_object_unref(fcsrc);
         g_object_unref(fcdst);
@@ -526,20 +1183,56 @@ gboolean settings_import_dictionary(AppSettings *settings, const char *src_path)
     g_free(src_cache);
     g_free(dst_cache);
 
-    /* Add to settings as manual dictionary */
     char *name = g_path_get_basename(dest);
     char *ext = strrchr(name, '.');
-    if (ext) *ext = '\0';
-    settings_add_dictionary(settings, name, dest);
-    g_free(name);
+    if (ext) {
+        *ext = '\0';
+    }
+
+    if (existing_cfg) {
+        char *old_id = g_strdup(existing_cfg->id);
+        char *old_path = g_strdup(existing_cfg->path);
+
+        g_free(existing_cfg->id);
+        existing_cfg->id = settings_make_dictionary_id(dest);
+        g_free(existing_cfg->name);
+        existing_cfg->name = g_strdup(name);
+        g_free(existing_cfg->path);
+        existing_cfg->path = g_strdup(dest);
+        g_free(existing_cfg->source);
+        existing_cfg->source = g_strdup("imported");
+        settings_replace_dict_id_in_groups(settings, old_id, existing_cfg->id);
+
+        if (src_in_watched_dir) {
+            settings_set_dictionary_ignored(settings, old_path, TRUE);
+            GPtrArray *cleanup_tasks = cleanup_task_array_new();
+            queue_cleanup_task(cleanup_tasks, old_path, CLEANUP_CACHE_ONLY);
+            dispatch_cleanup_tasks(cleanup_tasks);
+        }
+
+        g_free(old_path);
+        g_free(old_id);
+    } else {
+        settings_set_dictionary_ignored(settings, src_path, src_in_watched_dir);
+        settings_upsert_dictionary(settings, name, dest, "imported");
+        if (src_in_watched_dir) {
+            GPtrArray *cleanup_tasks = cleanup_task_array_new();
+            queue_cleanup_task(cleanup_tasks, src_path, CLEANUP_CACHE_ONLY);
+            dispatch_cleanup_tasks(cleanup_tasks);
+        }
+    }
 
     settings_save(settings);
+    g_free(name);
     g_free(dest_dir);
     g_free(dest);
+    g_free(stem);
+    g_free(basename);
     return TRUE;
 }
 
 void settings_add_dictionary(AppSettings *settings, const char *name, const char *path) {
+    settings_set_dictionary_ignored(settings, path, FALSE);
     settings_upsert_dictionary(settings, name, path, "manual");
 }
 
@@ -547,9 +1240,26 @@ void settings_remove_dictionary(AppSettings *settings, const char *id) {
     for (guint i = 0; i < settings->dictionaries->len; i++) {
         DictConfig *cfg = g_ptr_array_index(settings->dictionaries, i);
         if (strcmp(cfg->id, id) == 0) {
+            char *managed_dir = get_dictionary_data_dir();
+            gboolean managed_payload = path_is_inside_dir(cfg->path, managed_dir);
+            gboolean hidden_from_watch_dirs = settings_path_is_in_directory_list(settings, cfg->path) &&
+                                              !managed_payload;
+            gboolean delete_payload = managed_payload &&
+                                      (g_strcmp0(cfg->source, "manual") == 0 ||
+                                       g_strcmp0(cfg->source, "imported") == 0);
+            GPtrArray *cleanup_tasks = cleanup_task_array_new();
+            queue_cleanup_task(cleanup_tasks, cfg->path,
+                               delete_payload ? CLEANUP_DELETE_PAYLOAD : CLEANUP_CACHE_ONLY);
+            if (hidden_from_watch_dirs) {
+                settings_set_dictionary_ignored(settings, cfg->path, TRUE);
+            } else {
+                settings_set_dictionary_ignored(settings, cfg->path, FALSE);
+            }
+            g_free(managed_dir);
             settings_strip_dict_from_groups(settings, cfg->id);
             // g_ptr_array_remove_index calls dict_config_free via the array's destroy func
             g_ptr_array_remove_index(settings->dictionaries, i);
+            dispatch_cleanup_tasks(cleanup_tasks);
             return;
         }
     }

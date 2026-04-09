@@ -2401,6 +2401,8 @@ static void refresh_dictionaries_ui(void *user_data) {
     populate_history_sidebar();
     populate_favorites_sidebar();
     populate_groups_sidebar();
+    populate_search_sidebar(gtk_editable_get_text(GTK_EDITABLE(search_entry)));
+    refresh_search_results();
 }
 
 static void show_settings_dialog(GSimpleAction *action, GVariant *parameter, gpointer user_data) {
@@ -2487,6 +2489,7 @@ typedef struct {
     int   n_dirs;
     char **manual_paths;  // NULL-terminated array of manually-added dictionary files
     int   n_manual;
+    GHashTable *ignored_paths;
     gint  generation;
 } LoadThreadArgs;
 
@@ -2569,9 +2572,10 @@ static gboolean on_dict_loaded_idle(gpointer user_data) {
     }
 
     if (ld->done) {
-        /* Notify any settings scan dialogs that loading is complete */
-        settings_scan_notify(NULL, NULL, TRUE);
         sync_settings_dictionaries_from_loaded();
+        /* Notify any settings scan dialogs that loading is complete after
+         * settings have been updated, so open dialogs can repaint immediately. */
+        settings_scan_notify(NULL, NULL, TRUE);
         populate_groups_sidebar();
         populate_history_sidebar();
         populate_favorites_sidebar();
@@ -2597,11 +2601,24 @@ static gboolean on_dict_loaded_idle(gpointer user_data) {
 }
 
 static void on_dict_found_streaming(DictEntry *e, void *user_data) {
-    gint *gen_ptr = user_data;
+    LoadThreadArgs *args = user_data;
+    if (!args) {
+        if (e) {
+            dict_loader_free(e);
+        }
+        return;
+    }
+
+    if (e && e->path && args->ignored_paths &&
+        g_hash_table_contains(args->ignored_paths, e->path)) {
+        dict_loader_free(e);
+        return;
+    }
+
     LoadIdleData *ld = g_new0(LoadIdleData, 1);
     ld->entry = e;
     ld->done  = FALSE;
-    ld->generation = *gen_ptr;
+    ld->generation = args->generation;
     g_idle_add(on_dict_loaded_idle, ld);
 }
 
@@ -2617,6 +2634,9 @@ static gpointer dict_load_thread(gpointer user_data) {
     for (int i = 0; i < args->n_manual; i++) {
         if (args->generation != g_atomic_int_get(&loader_generation)) break;
         const char *path = args->manual_paths[i];
+        if (args->ignored_paths && g_hash_table_contains(args->ignored_paths, path)) {
+            continue;
+        }
         DictFormat fmt = dict_detect_format(path);
         DictMmap *dict = dict_load_any(path, fmt, &loader_generation, args->generation);
         if (!dict) {
@@ -2642,12 +2662,12 @@ static gpointer dict_load_thread(gpointer user_data) {
         char *valid_path = g_utf8_make_valid(path, -1);
         entry->path = strdup(valid_path);
         g_free(valid_path);
-        on_dict_found_streaming(entry, &args->generation);
+        on_dict_found_streaming(entry, args);
     }
 
     for (int i = 0; i < args->n_dirs; i++) {
         if (args->generation != g_atomic_int_get(&loader_generation)) break;
-        dict_loader_scan_directory_streaming(args->dirs[i], on_dict_found_streaming, &args->generation, &loader_generation, args->generation);
+        dict_loader_scan_directory_streaming(args->dirs[i], on_dict_found_streaming, args, &loader_generation, args->generation);
     }
 
     g_mutex_unlock(&dict_loader_mutex);
@@ -2666,6 +2686,9 @@ cleanup:
     for (int i = 0; i < args->n_manual; i++)
         g_free(args->manual_paths[i]);
     g_free(args->manual_paths);
+    if (args->ignored_paths) {
+        g_hash_table_unref(args->ignored_paths);
+    }
     g_free(args);
     return NULL;
 }
@@ -2684,7 +2707,9 @@ static void start_async_dict_loading(void) {
     GPtrArray *manual_paths = g_ptr_array_new_with_free_func(g_free);
     for (guint i = 0; i < app_settings->dictionaries->len; i++) {
         DictConfig *cfg = g_ptr_array_index(app_settings->dictionaries, i);
-        if (g_strcmp0(cfg->source, "manual") == 0 && cfg->enabled && cfg->path) {
+        if ((g_strcmp0(cfg->source, "manual") == 0 ||
+             g_strcmp0(cfg->source, "imported") == 0) &&
+            cfg->enabled && cfg->path) {
             g_ptr_array_add(manual_paths, g_strdup(cfg->path));
         }
     }
@@ -2694,6 +2719,14 @@ static void start_async_dict_loading(void) {
         args->manual_paths[i] = g_ptr_array_index(manual_paths, i);
     }
     g_ptr_array_free(manual_paths, FALSE);
+
+    args->ignored_paths = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    for (guint i = 0; i < app_settings->ignored_dictionary_paths->len; i++) {
+        const char *ignored_path = g_ptr_array_index(app_settings->ignored_dictionary_paths, i);
+        if (ignored_path && *ignored_path) {
+            g_hash_table_add(args->ignored_paths, g_strdup(ignored_path));
+        }
+    }
 
     if (args->n_dirs == 0 && args->n_manual == 0) {
         g_free(args->dirs);

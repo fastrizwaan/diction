@@ -12,7 +12,7 @@ typedef struct {
     char *name;
     char *path;
     int enabled;
-    char *source;  // "manual" or "directory"
+    char *source;  // "manual", "imported", or "directory"
 } DictConfig;
 
 typedef struct {
@@ -24,6 +24,7 @@ typedef struct {
 typedef struct {
     GPtrArray *dictionaries;      // Array of DictConfig*
     GPtrArray *dictionary_dirs;   // Array of char* (paths)
+    GPtrArray *ignored_dictionary_paths; // Array of char* (paths hidden from watched folders)
     GPtrArray *dictionary_groups; // Array of DictGroup*
     char *theme;                  // "system", "light", "dark"
     char *font_family;            // e.g. "sans-serif"
@@ -63,3 +64,6 @@ DictConfig* settings_find_dictionary_by_id(AppSettings *settings, const char *id
 DictConfig* settings_find_dictionary_by_path(AppSettings *settings, const char *path);
 void settings_upsert_dictionary(AppSettings *settings, const char *name, const char *path, const char *source);
 void settings_prune_directory_dictionaries(AppSettings *settings, GHashTable *loaded_paths);
+gboolean settings_path_is_in_directory_list(AppSettings *settings, const char *path);
+gboolean settings_is_dictionary_ignored(AppSettings *settings, const char *path);
+void settings_set_dictionary_ignored(AppSettings *settings, const char *path, gboolean ignored);

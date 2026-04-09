@@ -366,6 +366,87 @@ static char *mdx_resource_stamp_path(const char *resource_dir) {
     return g_build_filename(resource_dir, ".diction-mdd-stamp", NULL);
 }
 
+static gboolean mdx_filename_matches_numbered_mdd(const char *filename,
+                                                  const char *stem,
+                                                  int *volume_out) {
+    if (!filename || !stem || !g_str_has_suffix(filename, ".mdd")) {
+        return FALSE;
+    }
+
+    gsize stem_len = strlen(stem);
+    gsize filename_len = strlen(filename);
+    if (filename_len <= stem_len + 4 || strncmp(filename, stem, stem_len) != 0) {
+        return FALSE;
+    }
+
+    const char *suffix = filename + stem_len;
+    const char *digits = suffix;
+    const char *end = filename + filename_len - 4; /* before ".mdd" */
+
+    if (*digits == '.') {
+        digits++;
+    }
+
+    if (digits >= end) {
+        return FALSE;
+    }
+
+    for (const char *p = digits; p < end; p++) {
+        if (!g_ascii_isdigit(*p)) {
+            return FALSE;
+        }
+    }
+
+    if (volume_out) {
+        *volume_out = atoi(digits);
+    }
+    return TRUE;
+}
+
+static int mdx_numbered_mdd_volume(const char *filename) {
+    if (!filename || !g_str_has_suffix(filename, ".mdd")) {
+        return 0;
+    }
+
+    gsize filename_len = strlen(filename);
+    const char *digits_end = filename + filename_len - 4; /* before ".mdd" */
+    const char *digits = digits_end;
+
+    while (digits > filename && g_ascii_isdigit(*(digits - 1))) {
+        digits--;
+    }
+
+    if (digits == digits_end) {
+        return 0;
+    }
+
+    if (digits > filename && *(digits - 1) == '.') {
+        return atoi(digits);
+    }
+
+    return atoi(digits);
+}
+
+static gint mdx_numbered_mdd_path_compare(gconstpointer a, gconstpointer b) {
+    const char *path_a = *(char * const *)a;
+    const char *path_b = *(char * const *)b;
+    char *name_a = g_path_get_basename(path_a);
+    char *name_b = g_path_get_basename(path_b);
+    int vol_a = mdx_numbered_mdd_volume(name_a);
+    int vol_b = mdx_numbered_mdd_volume(name_b);
+    gint cmp = 0;
+
+    if (vol_a != vol_b) {
+        cmp = (vol_a < vol_b) ? -1 : 1;
+    } else {
+        cmp = g_strcmp0(name_a, name_b);
+    }
+
+    g_free(name_a);
+    g_free(name_b);
+    return cmp;
+}
+
 static GPtrArray *mdx_collect_mdd_paths(const char *mdx_path) {
     if (!mdx_path) {
         return NULL;
@@ -385,15 +466,35 @@ static GPtrArray *mdx_collect_mdd_paths(const char *mdx_path) {
         g_free(primary);
     }
 
-    for (int vol = 1;; vol++) {
-        char *candidate = g_strdup_printf("%s.%d.mdd", base, vol);
-        if (!g_file_test(candidate, G_FILE_TEST_EXISTS)) {
-            g_free(candidate);
-            break;
+    char *dir_path = g_path_get_dirname(base);
+    char *stem = g_path_get_basename(base);
+    GDir *dir = g_dir_open(dir_path, 0, NULL);
+    if (dir) {
+        GPtrArray *numbered = g_ptr_array_new_with_free_func(g_free);
+        const char *name = NULL;
+        while ((name = g_dir_read_name(dir)) != NULL) {
+            if (!mdx_filename_matches_numbered_mdd(name, stem, NULL)) {
+                continue;
+            }
+
+            char *candidate = g_build_filename(dir_path, name, NULL);
+            if (g_file_test(candidate, G_FILE_TEST_EXISTS)) {
+                g_ptr_array_add(numbered, candidate);
+            } else {
+                g_free(candidate);
+            }
         }
-        g_ptr_array_add(paths, candidate);
+        g_dir_close(dir);
+
+        g_ptr_array_sort(numbered, mdx_numbered_mdd_path_compare);
+        for (guint i = 0; i < numbered->len; i++) {
+            g_ptr_array_add(paths, g_ptr_array_index(numbered, i));
+        }
+        g_ptr_array_free(numbered, FALSE);
     }
 
+    g_free(stem);
+    g_free(dir_path);
     g_free(base);
     return paths;
 }

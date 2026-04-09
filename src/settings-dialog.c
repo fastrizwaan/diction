@@ -25,11 +25,20 @@ typedef struct _SettingsDialogData {
     GtkListBox         *dir_list;
     GtkListBox         *dict_list;
     GtkListBox         *group_list;
+    AdwActionRow       *dict_library_row;
+    AdwActionRow       *dict_selection_row;
+    AdwActionRow       *dict_activity_row;
+    AdwBanner          *dict_banner;
     GtkWidget          *move_up_btn;
     GtkWidget          *move_down_btn;
     GtkWidget          *create_group_btn;
     char               *selected_dict_id;
     GHashTable         *group_selection_ids;
+    guint               banner_timeout_id;
+    guint               session_added_count;
+    guint               session_imported_count;
+    guint               session_removed_count;
+    gboolean            closed;
     AdwStyleManager    *style_manager;
     GtkWindow          *parent_window; /* Parent window for file dialogs */
     void (*reload_callback)(void *);
@@ -45,6 +54,188 @@ static void update_dir_list(SettingsDialogData *data);
 static void update_dict_list(SettingsDialogData *data);
 static void update_group_list(SettingsDialogData *data);
 static void refresh_move_buttons(SettingsDialogData *data);
+static void refresh_dictionary_lists(SettingsDialogData *data);
+static void update_dictionary_overview(SettingsDialogData *data);
+static void present_dictionary_feedback(SettingsDialogData *data,
+                                        guint added_delta,
+                                        guint imported_delta,
+                                        guint removed_delta,
+                                        const char *title);
+static gboolean settings_dialog_is_active(SettingsDialogData *data);
+static char *format_name_list(GPtrArray *names);
+
+static gboolean settings_dialog_is_active(SettingsDialogData *data) {
+    return data && !data->closed;
+}
+
+static void refresh_dictionary_lists(SettingsDialogData *data) {
+    if (!settings_dialog_is_active(data)) {
+        return;
+    }
+
+    update_dir_list(data);
+    update_dict_list(data);
+    update_group_list(data);
+    refresh_move_buttons(data);
+}
+
+static void settings_dialog_data_free(gpointer user_data) {
+    SettingsDialogData *data = user_data;
+    if (!data) {
+        return;
+    }
+
+    if (data->banner_timeout_id != 0) {
+        g_source_remove(data->banner_timeout_id);
+    }
+
+    g_free(data->selected_dict_id);
+    if (data->group_selection_ids) {
+        g_hash_table_unref(data->group_selection_ids);
+    }
+    g_free(data);
+}
+
+static char *format_name_list(GPtrArray *names) {
+    if (!names || names->len == 0) {
+        return g_strdup("");
+    }
+
+    GString *buf = g_string_new("");
+    guint shown = MIN(names->len, 3);
+    for (guint i = 0; i < shown; i++) {
+        const char *name = g_ptr_array_index(names, i);
+        if (i > 0) {
+            g_string_append(buf, ", ");
+        }
+        g_string_append(buf, name ? name : "(unknown)");
+    }
+
+    if (names->len > shown) {
+        g_string_append_printf(buf, " +%u more", names->len - shown);
+    }
+
+    return g_string_free(buf, FALSE);
+}
+
+static gboolean dialog_path_is_inside_dir(const char *path, const char *dir_path) {
+    if (!path || !dir_path) {
+        return FALSE;
+    }
+
+    char *canon_path = g_canonicalize_filename(path, NULL);
+    char *canon_dir = g_canonicalize_filename(dir_path, NULL);
+    char *canon_dir_sep = g_str_has_suffix(canon_dir, G_DIR_SEPARATOR_S)
+        ? g_strdup(canon_dir)
+        : g_strconcat(canon_dir, G_DIR_SEPARATOR_S, NULL);
+    gboolean inside = g_strcmp0(canon_path, canon_dir) == 0 ||
+                      g_str_has_prefix(canon_path, canon_dir_sep);
+    g_free(canon_path);
+    g_free(canon_dir);
+    g_free(canon_dir_sep);
+    return inside;
+}
+
+static gboolean hide_dictionary_feedback_banner(gpointer user_data) {
+    SettingsDialogData *data = user_data;
+    if (!settings_dialog_is_active(data)) {
+        return G_SOURCE_REMOVE;
+    }
+    data->banner_timeout_id = 0;
+    if (data->dict_banner) {
+        adw_banner_set_revealed(data->dict_banner, FALSE);
+    }
+    return G_SOURCE_REMOVE;
+}
+
+static void update_dictionary_overview(SettingsDialogData *data) {
+    if (!settings_dialog_is_active(data)) {
+        return;
+    }
+
+    guint total = data->settings ? data->settings->dictionaries->len : 0;
+    guint enabled = 0;
+    for (guint i = 0; data->settings && i < data->settings->dictionaries->len; i++) {
+        DictConfig *cfg = g_ptr_array_index(data->settings->dictionaries, i);
+        if (cfg->enabled) {
+            enabled++;
+        }
+    }
+
+    if (data->dict_library_row) {
+        char *subtitle = g_strdup_printf("%u total • %u enabled • %u disabled • %u folders watched",
+                                         total,
+                                         enabled,
+                                         total >= enabled ? total - enabled : 0,
+                                         data->settings ? data->settings->dictionary_dirs->len : 0);
+        adw_action_row_set_subtitle(data->dict_library_row, subtitle);
+        g_free(subtitle);
+    }
+
+    if (data->dict_selection_row) {
+        guint grouped = data->group_selection_ids ? g_hash_table_size(data->group_selection_ids) : 0;
+        char *subtitle = NULL;
+        if (data->selected_dict_id || grouped > 0) {
+            if (grouped > 0) {
+                subtitle = g_strdup_printf("%s • %u checked for group creation",
+                                           data->selected_dict_id ? "1 row selected for priority"
+                                                                  : "No row selected for priority",
+                                           grouped);
+            } else {
+                subtitle = g_strdup(data->selected_dict_id
+                    ? "1 row selected for priority."
+                    : "No row selected for priority.");
+            }
+        } else {
+            subtitle = g_strdup("Click a row to reorder priority. Tick checkboxes to build a custom group.");
+        }
+        adw_action_row_set_subtitle(data->dict_selection_row, subtitle);
+        g_free(subtitle);
+    }
+
+    if (data->dict_activity_row) {
+        char *subtitle = NULL;
+        if (data->session_added_count == 0 &&
+            data->session_imported_count == 0 &&
+            data->session_removed_count == 0) {
+            subtitle = g_strdup("No dictionary changes yet in this session.");
+        } else {
+            subtitle = g_strdup_printf("This session: %u added • %u imported • %u removed",
+                                       data->session_added_count,
+                                       data->session_imported_count,
+                                       data->session_removed_count);
+        }
+        adw_action_row_set_subtitle(data->dict_activity_row, subtitle);
+        g_free(subtitle);
+    }
+}
+
+static void present_dictionary_feedback(SettingsDialogData *data,
+                                        guint added_delta,
+                                        guint imported_delta,
+                                        guint removed_delta,
+                                        const char *title) {
+    if (!settings_dialog_is_active(data)) {
+        return;
+    }
+
+    data->session_added_count += added_delta;
+    data->session_imported_count += imported_delta;
+    data->session_removed_count += removed_delta;
+    update_dictionary_overview(data);
+
+    if (!data->dict_banner || !title || !*title) {
+        return;
+    }
+
+    adw_banner_set_title(data->dict_banner, title);
+    adw_banner_set_revealed(data->dict_banner, TRUE);
+
+    if (data->banner_timeout_id != 0) {
+        g_source_remove(data->banner_timeout_id);
+    }
+    data->banner_timeout_id = g_timeout_add_seconds(6, hide_dictionary_feedback_banner, data);
+}
 
 
 /* ---- Directory callbacks ---- */
@@ -66,6 +257,10 @@ static void dir_remove_data_destroy(gpointer data, GClosure *closure) {
 static void on_add_directory_response(GObject *source, GAsyncResult *result, gpointer user_data) {
     GtkFileDialog *chooser = GTK_FILE_DIALOG(source);
     SettingsDialogData *data = user_data;
+    if (!settings_dialog_is_active(data)) {
+        g_object_unref(chooser);
+        return;
+    }
     GError *error = NULL;
     GFile *file = gtk_file_dialog_select_folder_finish(chooser, result, &error);
     if (file) {
@@ -74,8 +269,18 @@ static void on_add_directory_response(GObject *source, GAsyncResult *result, gpo
             /* Add to configured directories and show a scanning dialog that
              * lists discovered dictionaries and shows progress. After the
              * scan completes we trigger a full reload. */
+            guint before = data->settings->dictionary_dirs->len;
             settings_add_directory(data->settings, path);
             update_dir_list(data);
+            update_dict_list(data);
+            update_group_list(data);
+            char *name = g_path_get_basename(path);
+            char *message = data->settings->dictionary_dirs->len > before
+                ? g_strdup_printf("Added folder: %s", name)
+                : g_strdup_printf("Folder already added: %s", name);
+            present_dictionary_feedback(data, 0, 0, 0, message);
+            g_free(message);
+            g_free(name);
             /* Prepare single-entry dir array for scanner helper */
             char **dirs = g_new0(char *, 2);
             dirs[0] = g_strdup(path);
@@ -101,19 +306,55 @@ static void on_add_directory(GtkButton *btn, SettingsDialogData *data) {
 
 static gboolean on_remove_directory_idle(gpointer user_data) {
     SettingsDialogData *data = user_data;
+    if (!settings_dialog_is_active(data)) {
+        return G_SOURCE_REMOVE;
+    }
     update_dir_list(data);
+    update_dict_list(data);
+    update_group_list(data);
     return G_SOURCE_REMOVE;
 }
 
 static void on_remove_directory_clicked(GtkButton *btn, DirRemoveData *d) {
     (void)btn;
+    if (!settings_dialog_is_active(d->data)) {
+        return;
+    }
+    guint before = d->data->settings->dictionaries->len;
+    GPtrArray *removed_names = g_ptr_array_new_with_free_func(g_free);
+    for (guint i = 0; i < d->data->settings->dictionaries->len; i++) {
+        DictConfig *cfg = g_ptr_array_index(d->data->settings->dictionaries, i);
+        if (dialog_path_is_inside_dir(cfg->path, d->path)) {
+            g_ptr_array_add(removed_names, g_strdup(cfg->name));
+        }
+    }
     settings_remove_directory(d->data->settings, d->path);
+    guint removed = before > d->data->settings->dictionaries->len
+        ? before - d->data->settings->dictionaries->len
+        : 0;
+    char *dir_name = g_path_get_basename(d->path);
+    char *removed_list = format_name_list(removed_names);
+    char *message = NULL;
+    if (removed > 0 && removed_list[0] != '\0') {
+        message = g_strdup_printf("Removed folder %s and %u dictionaries: %s",
+                                  dir_name, removed, removed_list);
+    } else {
+        message = g_strdup_printf("Removed folder: %s", dir_name);
+    }
+    present_dictionary_feedback(d->data, 0, 0, removed, message);
+    g_free(message);
+    g_free(removed_list);
+    g_free(dir_name);
+    g_ptr_array_free(removed_names, TRUE);
     if (d->data->reload_callback) d->data->reload_callback(d->data->user_data);
     g_idle_add(on_remove_directory_idle, d->data);
 }
 
 static void on_rescan_directories(GtkButton *btn, SettingsDialogData *data) {
     (void)btn;
+    if (!settings_dialog_is_active(data)) {
+        return;
+    }
     /* Save settings and show a scanning dialog for all configured
      * directories. When the scan finishes we trigger a full reload. */
     settings_save(data->settings);
@@ -145,6 +386,7 @@ typedef struct {
     int found_count;
     int total_dirs;
     gboolean call_reload;
+    gboolean cancelled;
     /* When integrating with main loader, only show entries from these dirs */
     char **scan_dirs;
     int n_scan_dirs;
@@ -157,6 +399,7 @@ typedef struct {
     char *path;
     gboolean done;
     gboolean is_progress_update;
+    gboolean is_status_update;
     int progress;
 } ScanIdleData;
 
@@ -173,8 +416,12 @@ static gboolean scan_idle_add_entry(gpointer user_data) {
     ScanIdleData *sid = user_data;
     ScanContext *ctx = sid->ctx;
 
-    /* Progress update for an existing row */
-    if (sid->is_progress_update) {
+    if (sid->is_status_update) {
+        if (ctx->status_label) {
+            gtk_label_set_text(GTK_LABEL(ctx->status_label), sid->name ? sid->name : "");
+        }
+    } else if (sid->is_progress_update) {
+        /* Progress update for an existing row */
         if (sid->path && ctx->row_map) {
             gpointer val = g_hash_table_lookup(ctx->row_map, sid->path);
             if (val) {
@@ -219,11 +466,20 @@ static gboolean scan_idle_add_entry(gpointer user_data) {
         /* Scan finished */
         gtk_spinner_stop(GTK_SPINNER(ctx->spinner));
         char buf[256];
-        g_snprintf(buf, sizeof(buf), "Scan complete — %d dictionaries found", ctx->found_count);
+        g_snprintf(buf, sizeof(buf), "%s — %d dictionaries found",
+                   ctx->cancelled ? "Scan canceled" : "Scan complete",
+                   ctx->found_count);
         gtk_label_set_text(GTK_LABEL(ctx->status_label), buf);
         if (ctx->close_btn) gtk_widget_set_sensitive(ctx->close_btn, TRUE);
         if (ctx->cancel_btn) gtk_widget_set_sensitive(ctx->cancel_btn, FALSE);
-        if (!ctx->call_reload && ctx->data && ctx->data->reload_callback) ctx->data->reload_callback(ctx->data->user_data);
+        if (!ctx->cancelled && ctx->call_reload &&
+            ctx->data && settings_dialog_is_active(ctx->data)) {
+            refresh_dictionary_lists(ctx->data);
+        }
+        if (!ctx->cancelled && !ctx->call_reload &&
+            ctx->data && settings_dialog_is_active(ctx->data) && ctx->data->reload_callback) {
+            ctx->data->reload_callback(ctx->data->user_data);
+        }
     }
 
     g_free(sid->name);
@@ -272,6 +528,7 @@ static gpointer scan_thread_func(gpointer user_data) {
         st->name = g_strdup(status_buf);
         st->path = g_strdup("");
         st->done = FALSE;
+        st->is_status_update = TRUE;
         g_idle_add(scan_idle_add_entry, st);
 
         dict_loader_scan_directory_streaming(args->dirs[i], scan_worker_callback, ctx, &ctx->generation, expected);
@@ -295,6 +552,7 @@ static gpointer scan_thread_func(gpointer user_data) {
 
 static void on_scan_cancel_clicked(GtkButton *btn, ScanContext *ctx) {
     (void)btn;
+    ctx->cancelled = TRUE;
     /* Increment generation to request cancellation */
     if (ctx->call_reload) {
         /* Integrated with main loader: request loader cancellation */
@@ -305,6 +563,8 @@ static void on_scan_cancel_clicked(GtkButton *btn, ScanContext *ctx) {
         g_atomic_int_inc(&ctx->generation);
     }
     if (ctx->cancel_btn) gtk_widget_set_sensitive(ctx->cancel_btn, FALSE);
+    if (ctx->close_btn) gtk_widget_set_sensitive(ctx->close_btn, TRUE);
+    if (ctx->spinner) gtk_spinner_stop(GTK_SPINNER(ctx->spinner));
     if (ctx->status_label) gtk_label_set_text(GTK_LABEL(ctx->status_label), "Canceling…");
 }
 
@@ -396,36 +656,75 @@ void settings_scan_progress_notify(const char *path, int percent) {
 
 /* Public helper used by handlers above */
 void show_scan_dialog_for_dirs(SettingsDialogData *data, char **dirs, int n_dirs, gboolean call_reload) {
-    /* Build dialog */
-    AdwDialog *dialog = adw_alert_dialog_new("Scanning Directories", NULL);
-    adw_alert_dialog_set_body(ADW_ALERT_DIALOG(dialog), "Scanning directories for dictionaries…");
+    AdwDialog *dialog = adw_dialog_new();
+    adw_dialog_set_title(dialog, "Scanning Dictionaries");
+    adw_dialog_set_content_width(dialog, 720);
+    adw_dialog_set_content_height(dialog, 520);
+    adw_dialog_set_follows_content_size(dialog, FALSE);
 
-    GtkWidget *extra = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    GtkWidget *toolbar_view = adw_toolbar_view_new();
 
+    GtkWidget *header_bar = adw_header_bar_new();
+    gtk_widget_add_css_class(header_bar, "flat");
+    GtkWidget *title = gtk_label_new("Scanning Dictionaries");
+    gtk_widget_add_css_class(title, "title");
+    adw_header_bar_set_title_widget(ADW_HEADER_BAR(header_bar), title);
+    adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(toolbar_view), header_bar);
+
+    GtkWidget *content = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
+    gtk_widget_set_margin_top(content, 18);
+    gtk_widget_set_margin_bottom(content, 18);
+    gtk_widget_set_margin_start(content, 18);
+    gtk_widget_set_margin_end(content, 18);
+
+    GtkWidget *status_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
     GtkWidget *spinner = gtk_spinner_new();
     gtk_spinner_start(GTK_SPINNER(spinner));
-    gtk_box_append(GTK_BOX(extra), spinner);
+    gtk_box_append(GTK_BOX(status_box), spinner);
 
-    GtkWidget *status = gtk_label_new("Starting scan...");
-    gtk_box_append(GTK_BOX(extra), status);
+    GtkWidget *status = gtk_label_new("Preparing dictionary scan…");
+    gtk_label_set_wrap(GTK_LABEL(status), TRUE);
+    gtk_label_set_xalign(GTK_LABEL(status), 0.0f);
+    gtk_widget_set_hexpand(status, TRUE);
+    gtk_box_append(GTK_BOX(status_box), status);
+    gtk_box_append(GTK_BOX(content), status_box);
+
+    GtkWidget *description = gtk_label_new("Discovered dictionaries will appear here as they are loaded.");
+    gtk_label_set_xalign(GTK_LABEL(description), 0.0f);
+    gtk_widget_add_css_class(description, "dim-label");
+    gtk_box_append(GTK_BOX(content), description);
+
+    GtkWidget *scroller = gtk_scrolled_window_new();
+    gtk_widget_set_vexpand(scroller, TRUE);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroller),
+                                   GTK_POLICY_NEVER,
+                                   GTK_POLICY_AUTOMATIC);
 
     GtkListBox *list = GTK_LIST_BOX(gtk_list_box_new());
     gtk_list_box_set_selection_mode(list, GTK_SELECTION_NONE);
     gtk_widget_add_css_class(GTK_WIDGET(list), "boxed-list");
-    gtk_widget_set_size_request(GTK_WIDGET(list), 600, 240);
-    gtk_box_append(GTK_BOX(extra), GTK_WIDGET(list));
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroller), GTK_WIDGET(list));
+    gtk_box_append(GTK_BOX(content), scroller);
 
-    /* Buttons area inside extra child */
-    GtkWidget *btn_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
-    gtk_widget_set_halign(btn_box, GTK_ALIGN_END);
+    adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(toolbar_view), content);
+
+    GtkWidget *footer = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_widget_set_margin_top(footer, 12);
+    gtk_widget_set_margin_bottom(footer, 12);
+    gtk_widget_set_margin_start(footer, 18);
+    gtk_widget_set_margin_end(footer, 18);
+    GtkWidget *spacer = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_widget_set_hexpand(spacer, TRUE);
+    gtk_box_append(GTK_BOX(footer), spacer);
+
     GtkWidget *cancel_btn = gtk_button_new_with_label("Cancel");
     GtkWidget *close_btn = gtk_button_new_with_label("Close");
     gtk_widget_set_sensitive(close_btn, FALSE);
-    gtk_box_append(GTK_BOX(btn_box), cancel_btn);
-    gtk_box_append(GTK_BOX(btn_box), close_btn);
-    gtk_box_append(GTK_BOX(extra), btn_box);
+    gtk_box_append(GTK_BOX(footer), cancel_btn);
+    gtk_box_append(GTK_BOX(footer), close_btn);
+    adw_toolbar_view_add_bottom_bar(ADW_TOOLBAR_VIEW(toolbar_view), footer);
 
-    adw_alert_dialog_set_extra_child(ADW_ALERT_DIALOG(dialog), extra);
+    adw_dialog_set_child(dialog, toolbar_view);
 
     /* Create context */
     ScanContext *ctx = g_new0(ScanContext, 1);
@@ -465,6 +764,11 @@ void show_scan_dialog_for_dirs(SettingsDialogData *data, char **dirs, int n_dirs
                 char *full = g_build_filename(dpath, ename, NULL);
                 char *canon = normalize_scan_path(full);
                 if (!canon) { g_free(full); continue; }
+                if (data && data->settings && settings_is_dictionary_ignored(data->settings, canon)) {
+                    g_free(full);
+                    g_free(canon);
+                    continue;
+                }
 
                 /* Create a pending row if not already present */
                 if (!ctx->row_map) ctx->row_map = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
@@ -495,7 +799,7 @@ void show_scan_dialog_for_dirs(SettingsDialogData *data, char **dirs, int n_dirs
 
     /* Present dialog and either integrate with the main loader or
      * perform a local scan depending on `call_reload`. */
-    if (call_reload && data && data->reload_callback) {
+    if (call_reload && settings_dialog_is_active(data) && data->reload_callback) {
         /* Copy requested dirs into context for filtering notifications (canonicalized) */
         ctx->scan_dirs = g_new0(char *, n_dirs + 1);
         for (int i = 0; i < n_dirs; i++) ctx->scan_dirs[i] = normalize_scan_path(dirs[i]);
@@ -565,9 +869,14 @@ static void import_row_data_destroy(gpointer data, GClosure *closure) {
 
 static void on_import_row_clicked(GtkButton *btn, ImportRowData *d) {
     (void)btn;
-    if (!d || !d->path || !d->data) return;
+    if (!d || !d->path || !settings_dialog_is_active(d->data)) return;
     if (settings_import_dictionary(d->data->settings, d->path)) {
         update_dict_list(d->data);
+        char *name = g_path_get_basename(d->path);
+        char *message = g_strdup_printf("Imported dictionary: %s", name);
+        present_dictionary_feedback(d->data, 0, 1, 0, message);
+        g_free(message);
+        g_free(name);
         if (d->data->reload_callback) d->data->reload_callback(d->data->user_data);
     } else {
         g_printerr("Import failed for %s\n", d->path);
@@ -596,9 +905,15 @@ static void on_move_dictionary(GtkButton *btn, DictMoveData *d) {
 static void on_add_dictionary_file_response(GObject *source, GAsyncResult *result, gpointer user_data) {
     GtkFileDialog *chooser = GTK_FILE_DIALOG(source);
     SettingsDialogData *data = user_data;
+    if (!settings_dialog_is_active(data)) {
+        g_object_unref(chooser);
+        return;
+    }
     GError *error = NULL;
     GListModel *files = gtk_file_dialog_open_multiple_finish(chooser, result, &error);
     if (files) {
+        guint before = data->settings->dictionaries->len;
+        GPtrArray *added_names = g_ptr_array_new_with_free_func(g_free);
         guint n = g_list_model_get_n_items(files);
         for (guint i = 0; i < n; i++) {
             GObject *obj = g_list_model_get_item(files, i);
@@ -609,6 +924,7 @@ static void on_add_dictionary_file_response(GObject *source, GAsyncResult *resul
                 char *ext = strrchr(name, '.');
                 if (ext) *ext = '\0';
                 settings_add_dictionary(data->settings, name, path);
+                g_ptr_array_add(added_names, g_strdup(name));
                 g_free(name);
                 g_free(path);
             }
@@ -616,6 +932,19 @@ static void on_add_dictionary_file_response(GObject *source, GAsyncResult *resul
         }
         g_object_unref(files);
         update_dict_list(data);
+        guint added = data->settings->dictionaries->len > before
+            ? data->settings->dictionaries->len - before
+            : 0;
+        if (added > 0) {
+            char *name_list = format_name_list(added_names);
+            char *message = name_list[0] != '\0'
+                ? g_strdup_printf("Added %u dictionaries: %s", added, name_list)
+                : g_strdup_printf("Added %u dictionary files.", added);
+            present_dictionary_feedback(data, added, 0, 0, message);
+            g_free(message);
+            g_free(name_list);
+        }
+        g_ptr_array_free(added_names, TRUE);
         if (data->reload_callback) data->reload_callback(data->user_data);
     } else if (error) {
         g_error_free(error);
@@ -648,9 +977,15 @@ static void on_add_dictionary_file(GtkButton *btn, SettingsDialogData *data) {
 static void on_import_dictionary_files_response(GObject *source, GAsyncResult *result, gpointer user_data) {
     GtkFileDialog *chooser = GTK_FILE_DIALOG(source);
     SettingsDialogData *data = user_data;
+    if (!settings_dialog_is_active(data)) {
+        g_object_unref(chooser);
+        return;
+    }
     GError *error = NULL;
     GListModel *files = gtk_file_dialog_open_multiple_finish(chooser, result, &error);
     if (files) {
+        guint imported = 0;
+        GPtrArray *imported_names = g_ptr_array_new_with_free_func(g_free);
         guint n = g_list_model_get_n_items(files);
         for (guint i = 0; i < n; i++) {
             GObject *obj = g_list_model_get_item(files, i);
@@ -660,6 +995,13 @@ static void on_import_dictionary_files_response(GObject *source, GAsyncResult *r
                 /* Import (copy) into app data and add to settings */
                 if (!settings_import_dictionary(data->settings, path)) {
                     g_printerr("Failed to import: %s\n", path);
+                } else {
+                    imported++;
+                    char *name = g_path_get_basename(path);
+                    char *ext = strrchr(name, '.');
+                    if (ext) *ext = '\0';
+                    g_ptr_array_add(imported_names, g_strdup(name));
+                    g_free(name);
                 }
                 g_free(path);
             }
@@ -667,6 +1009,16 @@ static void on_import_dictionary_files_response(GObject *source, GAsyncResult *r
         }
         g_object_unref(files);
         update_dict_list(data);
+        if (imported > 0) {
+            char *name_list = format_name_list(imported_names);
+            char *message = name_list[0] != '\0'
+                ? g_strdup_printf("Imported %u dictionaries: %s", imported, name_list)
+                : g_strdup_printf("Imported %u dictionaries into Diction-managed storage.", imported);
+            present_dictionary_feedback(data, 0, imported, 0, message);
+            g_free(message);
+            g_free(name_list);
+        }
+        g_ptr_array_free(imported_names, TRUE);
         if (data->reload_callback) data->reload_callback(data->user_data);
     } else if (error) {
         g_error_free(error);
@@ -713,15 +1065,25 @@ static void dict_remove_data_destroy(gpointer data, GClosure *closure) {
 
 static gboolean on_remove_dictionary_idle(gpointer user_data) {
     SettingsDialogData *data = user_data;
+    if (!settings_dialog_is_active(data)) {
+        return G_SOURCE_REMOVE;
+    }
     update_dict_list(data);
+    update_group_list(data);
     refresh_move_buttons(data);
     return G_SOURCE_REMOVE;
 }
 
 static void on_remove_dictionary_clicked(GtkButton *btn, DictRemoveData *d) {
     (void)btn;
+    if (!settings_dialog_is_active(d->data)) {
+        return;
+    }
     /* Save id before removal because settings_remove_dictionary frees cfg */
     char *id_copy = g_strdup(d->id);
+    guint before = d->data->settings->dictionaries->len;
+    DictConfig *cfg = settings_find_dictionary_by_id(d->data->settings, d->id);
+    char *dict_name = cfg ? g_strdup(cfg->name) : g_strdup("dictionary");
     settings_remove_dictionary(d->data->settings, id_copy);
     g_hash_table_remove(d->data->group_selection_ids, id_copy);
     if (d->data->selected_dict_id &&
@@ -732,7 +1094,14 @@ static void on_remove_dictionary_clicked(GtkButton *btn, DictRemoveData *d) {
     g_free(id_copy);
     /* Save immediately so a re-scan doesn't re-add it */
     settings_save(d->data->settings);
-    if (d->data->soft_reload_callback) d->data->soft_reload_callback(d->data->user_data);
+    if (before > d->data->settings->dictionaries->len) {
+        char *message = g_strdup_printf("Removed dictionary: %s", dict_name);
+        present_dictionary_feedback(d->data, 0, 0, before - d->data->settings->dictionaries->len,
+                                    message);
+        g_free(message);
+    }
+    g_free(dict_name);
+    if (d->data->reload_callback) d->data->reload_callback(d->data->user_data);
     g_idle_add(on_remove_dictionary_idle, d->data);
 }
 
@@ -753,6 +1122,9 @@ static void dict_switch_data_destroy(gpointer data, GClosure *closure) {
 
 static gboolean on_dict_switch_state(GtkSwitch *sw, gboolean state, DictSwitchData *sd) {
     (void)sw;
+    if (!settings_dialog_is_active(sd->data)) {
+        return FALSE;
+    }
     /* Look up cfg by id — safe even after list rebuilds */
     DictConfig *cfg = settings_find_dictionary_by_id(sd->data->settings, sd->dict_id);
     if (cfg) {
@@ -810,6 +1182,7 @@ static void refresh_move_buttons(SettingsDialogData *data) {
     gtk_widget_set_sensitive(data->move_up_btn,     has_selection && can_move_up);
     gtk_widget_set_sensitive(data->move_down_btn,   has_selection && can_move_down);
     gtk_widget_set_sensitive(data->create_group_btn, has_group_selection);
+    update_dictionary_overview(data);
 }
 
 /* ---- Group callbacks ---- */
@@ -830,18 +1203,27 @@ static void group_remove_data_destroy(gpointer data, GClosure *closure) {
 
 static gboolean on_remove_group_idle(gpointer user_data) {
     SettingsDialogData *data = user_data;
+    if (!settings_dialog_is_active(data)) {
+        return G_SOURCE_REMOVE;
+    }
     update_group_list(data);
     return G_SOURCE_REMOVE;
 }
 
 static void on_remove_group_clicked(GtkButton *btn, GroupRemoveData *d) {
     (void)btn;
+    if (!settings_dialog_is_active(d->data)) {
+        return;
+    }
     settings_remove_group(d->data->settings, d->id);
     g_idle_add(on_remove_group_idle, d->data);
 }
 
 static void on_create_group_response(AdwAlertDialog *dialog, const char *response, GtkEntry *entry) {
     SettingsDialogData *data = g_object_get_data(G_OBJECT(dialog), "settings-data");
+    if (!settings_dialog_is_active(data)) {
+        return;
+    }
 
     if (strcmp(response, "create") == 0) {
         const char *name = gtk_editable_get_text(GTK_EDITABLE(entry));
@@ -887,6 +1269,52 @@ static void on_create_group_from_selected(GtkButton *btn, SettingsDialogData *da
 
 /* ---- UI update functions ---- */
 
+static const char *dictionary_source_label(const DictConfig *cfg) {
+    if (!cfg) {
+        return "Unknown";
+    }
+
+    if (g_strcmp0(cfg->source, "directory") == 0) {
+        return "Directory";
+    }
+
+    if (g_strcmp0(cfg->source, "imported") == 0) {
+        return "Imported";
+    }
+
+    char *managed_dir = g_build_filename(g_get_user_data_dir(), "diction", "dicts", NULL);
+    gboolean imported = cfg->path && g_str_has_prefix(cfg->path, managed_dir);
+    g_free(managed_dir);
+    return imported ? "Imported" : "Manual";
+}
+
+static const char *dictionary_source_icon(const DictConfig *cfg) {
+    if (!cfg) {
+        return "help-about-symbolic";
+    }
+
+    if (g_strcmp0(cfg->source, "directory") == 0) {
+        return "folder-visiting-symbolic";
+    }
+
+    if (g_strcmp0(cfg->source, "imported") == 0) {
+        return "folder-download-symbolic";
+    }
+
+    char *managed_dir = g_build_filename(g_get_user_data_dir(), "diction", "dicts", NULL);
+    gboolean imported = cfg->path && g_str_has_prefix(cfg->path, managed_dir);
+    g_free(managed_dir);
+    return imported ? "folder-download-symbolic" : "document-open-symbolic";
+}
+
+static GtkWidget *create_source_badge(const DictConfig *cfg) {
+    GtkWidget *label = gtk_label_new(dictionary_source_label(cfg));
+    gtk_widget_add_css_class(label, "caption");
+    gtk_widget_add_css_class(label, "dim-label");
+    gtk_widget_set_valign(label, GTK_ALIGN_CENTER);
+    return label;
+}
+
 static void update_dir_list(SettingsDialogData *data) {
     GtkWidget *child;
     while ((child = gtk_widget_get_first_child(GTK_WIDGET(data->dir_list))))
@@ -898,6 +1326,7 @@ static void update_dir_list(SettingsDialogData *data) {
         adw_action_row_set_subtitle(ADW_ACTION_ROW(row), "Add one or more folders containing dictionaries");
         gtk_widget_set_sensitive(row, FALSE);
         gtk_list_box_append(data->dir_list, GTK_WIDGET(row));
+        update_dictionary_overview(data);
         return;
     }
 
@@ -924,6 +1353,8 @@ static void update_dir_list(SettingsDialogData *data) {
         adw_action_row_add_suffix(ADW_ACTION_ROW(row), remove_btn);
         gtk_list_box_append(data->dir_list, GTK_WIDGET(row));
     }
+
+    update_dictionary_overview(data);
 }
 
 static void update_dict_list(SettingsDialogData *data) {
@@ -961,6 +1392,10 @@ static void update_dict_list(SettingsDialogData *data) {
         g_signal_connect(group_check, "toggled", G_CALLBACK(on_group_select_toggled), data);
         adw_action_row_add_prefix(ADW_ACTION_ROW(row), group_check);
 
+        GtkWidget *source_icon = gtk_image_new_from_icon_name(dictionary_source_icon(cfg));
+        gtk_widget_set_valign(source_icon, GTK_ALIGN_CENTER);
+        adw_action_row_add_prefix(ADW_ACTION_ROW(row), source_icon);
+
         /* Enable/disable switch — use id string, not raw cfg* */
         GtkWidget *switch_widget = gtk_switch_new();
         gtk_switch_set_active(GTK_SWITCH(switch_widget), cfg->enabled);
@@ -971,6 +1406,7 @@ static void update_dict_list(SettingsDialogData *data) {
         sd->dict_id = g_strdup(cfg->id);
         g_signal_connect_data(switch_widget, "state-set", G_CALLBACK(on_dict_switch_state),
             sd, dict_switch_data_destroy, 0);
+        adw_action_row_add_suffix(ADW_ACTION_ROW(row), create_source_badge(cfg));
         adw_action_row_add_suffix(ADW_ACTION_ROW(row), switch_widget);
 
         /* Remove button — use id string, not raw cfg* */
@@ -984,9 +1420,9 @@ static void update_dict_list(SettingsDialogData *data) {
         gtk_widget_add_css_class(import_btn, "flat");
         gtk_widget_set_valign(import_btn, GTK_ALIGN_CENTER);
         /* Disable import for dictionaries that are already manual/managed */
-        const char *data_root = g_build_filename(g_get_user_data_dir(), "diction", "dicts", NULL);
+        char *data_root = g_build_filename(g_get_user_data_dir(), "diction", "dicts", NULL);
         gboolean already_managed = cfg->path && g_str_has_prefix(cfg->path, data_root);
-        g_free((gpointer)data_root);
+        g_free(data_root);
         if (already_managed) gtk_widget_set_sensitive(import_btn, FALSE);
 
         ImportRowData *ird = g_new0(ImportRowData, 1);
@@ -1006,6 +1442,7 @@ static void update_dict_list(SettingsDialogData *data) {
     }
 
     refresh_move_buttons(data);
+    update_dictionary_overview(data);
 }
 
 static void update_group_list(SettingsDialogData *data) {
@@ -1047,6 +1484,8 @@ static void update_group_list(SettingsDialogData *data) {
         adw_action_row_add_suffix(ADW_ACTION_ROW(row), remove_btn);
         gtk_list_box_append(data->group_list, GTK_WIDGET(row));
     }
+
+    update_dictionary_overview(data);
 }
 
 static void on_theme_row_changed(AdwComboRow *r, GParamSpec *p, SettingsDialogData *d) {
@@ -1120,13 +1559,18 @@ static void on_render_style_row_changed(AdwComboRow *row, GParamSpec *pspec, Set
 /* ---- Dialog closed ---- */
 
 static void on_dialog_closed(SettingsDialogData *data) {
+    if (!data) {
+        return;
+    }
+
+    data->closed = TRUE;
     settings_save(data->settings);
     /* Do NOT call reload_callback here — it's only needed on explicit Rescan.
        Calling it unconditionally on close caused double-reload jank. */
-    g_free(data->selected_dict_id);
-    if (data->group_selection_ids)
-        g_hash_table_unref(data->group_selection_ids);
-    g_free(data);
+    if (data->banner_timeout_id != 0) {
+        g_source_remove(data->banner_timeout_id);
+        data->banner_timeout_id = 0;
+    }
 }
 
 /* ================================================================
@@ -1152,7 +1596,7 @@ GtkWidget* settings_dialog_new(GtkWindow *parent, AppSettings *settings,
     adw_preferences_dialog_set_search_enabled(ADW_PREFERENCES_DIALOG(dialog), FALSE);
     data->dialog = dialog;
     /* Store data pointer so settings_dialog_set_font_callback can find it */
-    g_object_set_data(G_OBJECT(dialog), "sdd", data);
+    g_object_set_data_full(G_OBJECT(dialog), "sdd", data, settings_dialog_data_free);
 
     /* ============================================================
        TAB 1 — Appearance
@@ -1292,13 +1736,37 @@ GtkWidget* settings_dialog_new(GtkWindow *parent, AppSettings *settings,
     AdwPreferencesPage *dict_page = ADW_PREFERENCES_PAGE(adw_preferences_page_new());
     adw_preferences_page_set_title(dict_page, "Dictionaries");
     adw_preferences_page_set_icon_name(dict_page, "accessories-dictionary-symbolic");
+    adw_preferences_page_set_description(dict_page,
+        "Manage scanned folders, one-off dictionary files, and imported copies.");
     adw_preferences_dialog_add(ADW_PREFERENCES_DIALOG(dialog), dict_page);
+
+    data->dict_banner = ADW_BANNER(adw_banner_new("Dictionary changes will appear here."));
+    adw_banner_set_revealed(data->dict_banner, FALSE);
+    adw_preferences_page_set_banner(dict_page, data->dict_banner);
+
+    AdwPreferencesGroup *overview_group = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
+    adw_preferences_group_set_title(overview_group, "Overview");
+    adw_preferences_group_set_description(overview_group,
+        "Keep an eye on your library size, current selection, and session changes.");
+    adw_preferences_page_add(dict_page, overview_group);
+
+    data->dict_library_row = ADW_ACTION_ROW(adw_action_row_new());
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(data->dict_library_row), "Library");
+    adw_preferences_group_add(overview_group, GTK_WIDGET(data->dict_library_row));
+
+    data->dict_selection_row = ADW_ACTION_ROW(adw_action_row_new());
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(data->dict_selection_row), "Selection");
+    adw_preferences_group_add(overview_group, GTK_WIDGET(data->dict_selection_row));
+
+    data->dict_activity_row = ADW_ACTION_ROW(adw_action_row_new());
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(data->dict_activity_row), "Session Changes");
+    adw_preferences_group_add(overview_group, GTK_WIDGET(data->dict_activity_row));
 
     /* --- Directory group --- */
     AdwPreferencesGroup *dir_group = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
-    adw_preferences_group_set_title(dir_group, "Dictionary Directories");
+    adw_preferences_group_set_title(dir_group, "Scanned Folders");
     adw_preferences_group_set_description(dir_group,
-        "Diction scans these folders and auto-adds all supported dictionaries");
+        "Folders are watched in bulk and all supported dictionaries inside them are loaded automatically.");
     adw_preferences_page_add(dict_page, dir_group);
 
     data->dir_list = GTK_LIST_BOX(gtk_list_box_new());
@@ -1320,9 +1788,9 @@ GtkWidget* settings_dialog_new(GtkWindow *parent, AppSettings *settings,
 
     /* --- Dictionaries group --- */
     AdwPreferencesGroup *dict_group = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
-    adw_preferences_group_set_title(dict_group, "Dictionaries");
+    adw_preferences_group_set_title(dict_group, "Library");
     adw_preferences_group_set_description(dict_group,
-        "Toggle enabled/disabled, reorder priority, or add individual files");
+        "Click a row to change priority. Tick checkboxes to create groups. Import copies files into Diction-managed storage.");
     adw_preferences_page_add(dict_page, dict_group);
 
     data->dict_list = GTK_LIST_BOX(gtk_list_box_new());
@@ -1332,6 +1800,7 @@ GtkWidget* settings_dialog_new(GtkWindow *parent, AppSettings *settings,
     adw_preferences_group_add(dict_group, GTK_WIDGET(data->dict_list));
 
     GtkWidget *reorder_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_widget_set_hexpand(reorder_box, TRUE);
 
     data->move_up_btn = gtk_button_new_from_icon_name("go-up-symbolic");
     gtk_widget_set_tooltip_text(data->move_up_btn, "Move selected dictionary up");
@@ -1355,20 +1824,28 @@ GtkWidget* settings_dialog_new(GtkWindow *parent, AppSettings *settings,
     g_signal_connect(data->create_group_btn, "clicked",
         G_CALLBACK(on_create_group_from_selected), data);
 
-    gtk_box_append(GTK_BOX(reorder_box), data->move_up_btn);
-    gtk_box_append(GTK_BOX(reorder_box), data->move_down_btn);
+    GtkWidget *move_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_widget_add_css_class(move_box, "linked");
+    gtk_box_append(GTK_BOX(move_box), data->move_up_btn);
+    gtk_box_append(GTK_BOX(move_box), data->move_down_btn);
+
+    gtk_box_append(GTK_BOX(reorder_box), move_box);
+    GtkWidget *reorder_spacer = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_widget_set_hexpand(reorder_spacer, TRUE);
+    gtk_box_append(GTK_BOX(reorder_box), reorder_spacer);
     gtk_box_append(GTK_BOX(reorder_box), data->create_group_btn);
     adw_preferences_group_add(dict_group, reorder_box);
 
-    GtkWidget *add_file_btn = gtk_button_new_with_label("Add Dictionary File…");
-    gtk_widget_add_css_class(add_file_btn, "suggested-action");
+    GtkWidget *action_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *add_file_btn = gtk_button_new_with_label("Add File…");
     g_signal_connect(add_file_btn, "clicked", G_CALLBACK(on_add_dictionary_file), data);
-    adw_preferences_group_add(dict_group, add_file_btn);
+    gtk_box_append(GTK_BOX(action_box), add_file_btn);
 
-    GtkWidget *import_btn = gtk_button_new_with_label("Import Files…");
+    GtkWidget *import_btn = gtk_button_new_with_label("Import into Diction…");
     gtk_widget_add_css_class(import_btn, "suggested-action");
     g_signal_connect(import_btn, "clicked", G_CALLBACK(on_import_dictionary_files), data);
-    adw_preferences_group_add(dict_group, import_btn);
+    gtk_box_append(GTK_BOX(action_box), import_btn);
+    adw_preferences_group_add(dict_group, action_box);
 
     /* --- Groups group --- */
     AdwPreferencesGroup *group_group = ADW_PREFERENCES_GROUP(adw_preferences_group_new());

@@ -198,23 +198,25 @@ static void scan_recursive(const char *dirpath, DictEntry **head,
             family_key = NULL;
         }
 
+        char *owned_load_path = g_strdup(load_path);
         DictEntry *entry = calloc(1, sizeof(DictEntry));
         if (loaded->name && strlen(loaded->name) > 0) {
             char *valid = g_utf8_make_valid(loaded->name, -1);
             entry->name = strdup(valid);
             g_free(valid);
         } else {
-            char *base = basename_noext(load_path);
+            char *base = basename_noext(owned_load_path);
             char *valid = g_utf8_make_valid(base, -1);
             entry->name = strdup(valid);
             g_free(valid);
             free(base);
         }
-        free(full);
-        
-        char *valid_path = g_utf8_make_valid(load_path, -1);
+
+        char *valid_path = g_utf8_make_valid(owned_load_path, -1);
         entry->path = strdup(valid_path);
         g_free(valid_path);
+        g_free(owned_load_path);
+        free(full);
         entry->format = fmt;
         entry->dict = loaded;
 

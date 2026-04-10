@@ -2150,6 +2150,8 @@ static void on_favorites_item_activated(GtkListView *view, guint position, gpoin
     }
 }
 
+
+
 static void on_groups_item_activated(GtkListView *view, guint position, gpointer user_data) {
     (void)view;
     SidebarListView *sidebar = user_data;
@@ -3619,6 +3621,21 @@ static gboolean start_async_dict_loading(gboolean discover_from_dirs) {
     return TRUE;
 }
 
+static void on_toggle_sidebar(GSimpleAction *action, GVariant *parameter, gpointer user_data) {
+    (void)action; (void)parameter;
+    AdwOverlaySplitView *split_view = ADW_OVERLAY_SPLIT_VIEW(user_data);
+    adw_overlay_split_view_set_show_sidebar(split_view, !adw_overlay_split_view_get_show_sidebar(split_view));
+}
+
+static void update_content_menu_button_visibility(GObject *obj, GParamSpec *pspec, gpointer user_data) {
+    (void)pspec;
+    AdwOverlaySplitView *split_view = ADW_OVERLAY_SPLIT_VIEW(obj);
+    GtkWidget *btn = GTK_WIDGET(user_data);
+    gboolean show_sidebar = adw_overlay_split_view_get_show_sidebar(split_view);
+    gboolean collapsed = adw_overlay_split_view_get_collapsed(split_view);
+    gtk_widget_set_visible(btn, !show_sidebar || collapsed);
+}
+
 static void on_activate(GtkApplication *app, gpointer user_data) {
     (void)user_data;
     AdwApplicationWindow *window = ADW_APPLICATION_WINDOW(adw_application_window_new(app));
@@ -3662,11 +3679,18 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     GtkWidget *settings_btn = gtk_menu_button_new();
     gtk_menu_button_set_icon_name(GTK_MENU_BUTTON(settings_btn), "open-menu-symbolic");
     gtk_widget_add_css_class(settings_btn, "flat");
+    
     GMenu *menu = g_menu_new();
     g_menu_append(menu, "Preferences", "app.settings");
+    
+    GMenu *view_menu = g_menu_new();
+    g_menu_append(view_menu, "Show/Hide Sidebar", "app.toggle-sidebar");
+    g_menu_append_submenu(menu, "View", G_MENU_MODEL(view_menu));
+    g_object_unref(view_menu);
+
     g_menu_append(menu, "About", "app.about");
+    
     gtk_menu_button_set_menu_model(GTK_MENU_BUTTON(settings_btn), G_MENU_MODEL(menu));
-    g_object_unref(menu);
     adw_header_bar_pack_end(ADW_HEADER_BAR(sidebar_header), settings_btn);
 
     gtk_box_append(GTK_BOX(sidebar_vbox), sidebar_header);
@@ -3782,14 +3806,13 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     gtk_widget_add_css_class(content_header, "content-header");
     adw_toolbar_view_add_top_bar(toolbar_view, content_header);
 
-    /* Sidebar toggle */
-    GtkWidget *sidebar_toggle = gtk_toggle_button_new();
-    gtk_button_set_icon_name(GTK_BUTTON(sidebar_toggle), "sidebar-show-symbolic");
-    g_object_bind_property(split_view, "show-sidebar", sidebar_toggle, "active", G_BINDING_BIDIRECTIONAL | G_BINDING_SYNC_CREATE);
-    adw_header_bar_pack_start(ADW_HEADER_BAR(content_header), sidebar_toggle);
+    /* Sidebar toggle action */
+    GSimpleAction *toggle_sidebar_action = g_simple_action_new("toggle-sidebar", NULL);
+    g_signal_connect(toggle_sidebar_action, "activate", G_CALLBACK(on_toggle_sidebar), split_view);
+    g_action_map_add_action(G_ACTION_MAP(app), G_ACTION(toggle_sidebar_action));
 
     GtkWidget *search_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
-    gtk_widget_set_halign(search_box, GTK_ALIGN_CENTER);
+    gtk_widget_set_hexpand(search_box, TRUE);
 
     nav_back_btn = gtk_button_new_from_icon_name("go-previous-symbolic");
     gtk_widget_add_css_class(nav_back_btn, "flat");
@@ -3802,11 +3825,14 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     gtk_widget_set_sensitive(nav_forward_btn, FALSE);
 
     search_entry = GTK_SEARCH_ENTRY(gtk_search_entry_new());
-    gtk_widget_set_size_request(GTK_WIDGET(search_entry), 350, -1);
+    gtk_widget_set_hexpand(GTK_WIDGET(search_entry), TRUE);
     g_signal_connect(search_entry, "search-changed", G_CALLBACK(on_search_changed), NULL);
 
-    gtk_box_append(GTK_BOX(search_box), nav_back_btn);
-    gtk_box_append(GTK_BOX(search_box), nav_forward_btn);
+
+
+    adw_header_bar_pack_start(ADW_HEADER_BAR(content_header), nav_back_btn);
+    adw_header_bar_pack_start(ADW_HEADER_BAR(content_header), nav_forward_btn);
+
     gtk_box_append(GTK_BOX(search_box), GTK_WIDGET(search_entry));
 
     adw_header_bar_set_title_widget(ADW_HEADER_BAR(content_header), search_box);
@@ -3815,6 +3841,18 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     gtk_widget_add_css_class(favorite_toggle_btn, "flat");
     g_signal_connect(favorite_toggle_btn, "clicked", G_CALLBACK(on_favorite_toggle_clicked), NULL);
     adw_header_bar_pack_end(ADW_HEADER_BAR(content_header), favorite_toggle_btn);
+
+    GtkWidget *content_settings_btn = gtk_menu_button_new();
+    gtk_menu_button_set_icon_name(GTK_MENU_BUTTON(content_settings_btn), "open-menu-symbolic");
+    gtk_widget_add_css_class(content_settings_btn, "flat");
+    gtk_menu_button_set_menu_model(GTK_MENU_BUTTON(content_settings_btn), G_MENU_MODEL(menu));
+    g_object_unref(menu);
+    adw_header_bar_pack_end(ADW_HEADER_BAR(content_header), content_settings_btn);
+
+    // Initial visibility and binding for the duplicate menu button
+    update_content_menu_button_visibility(G_OBJECT(split_view), NULL, content_settings_btn);
+    g_signal_connect(split_view, "notify::show-sidebar", G_CALLBACK(update_content_menu_button_visibility), content_settings_btn);
+    g_signal_connect(split_view, "notify::collapsed", G_CALLBACK(update_content_menu_button_visibility), content_settings_btn);
 
     /* WebKit view */
     web_view = WEBKIT_WEB_VIEW(webkit_web_view_new());

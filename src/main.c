@@ -18,6 +18,25 @@ static AppSettings *app_settings = NULL;
 static GtkWidget *favorite_toggle_btn = NULL;
 static GPtrArray *history_words = NULL;
 static GPtrArray *favorite_words = NULL;
+static GPtrArray *nav_history = NULL;
+
+typedef struct {
+    char *view_word;
+    char *search_query;
+} NavHistoryItem;
+
+static void nav_history_item_free(gpointer data) {
+    NavHistoryItem *item = data;
+    if (item) {
+        g_free(item->view_word);
+        g_free(item->search_query);
+        g_free(item);
+    }
+}
+
+static int nav_history_index = -1;
+static GtkWidget *nav_back_btn = NULL;
+static GtkWidget *nav_forward_btn = NULL;
 static char *active_scope_id = NULL;
 static guint search_execute_source_id = 0;
 static GtkStringList *related_string_list = NULL;
@@ -2285,6 +2304,95 @@ static void append_rendered_entry_html(GString *html_res,
     free(rendered);
 }
 
+static void update_nav_buttons_state(void) {
+    if (nav_back_btn) {
+        gtk_widget_set_sensitive(nav_back_btn, nav_history && nav_history_index > 0);
+    }
+    if (nav_forward_btn) {
+        gtk_widget_set_sensitive(nav_forward_btn, nav_history && nav_history_index < (int)nav_history->len - 1);
+    }
+}
+
+static void push_to_nav_history(const char *view_word, const char *search_query) {
+    char *clean_view = sanitize_user_word(view_word);
+    char *clean_query = sanitize_user_word(search_query);
+    if (!clean_view || !clean_query) {
+        g_free(clean_view);
+        g_free(clean_query);
+        return;
+    }
+    
+    if (!nav_history) nav_history = g_ptr_array_new_with_free_func(nav_history_item_free);
+    
+    if (nav_history_index >= 0 && nav_history_index < (int)nav_history->len) {
+        NavHistoryItem *current = g_ptr_array_index(nav_history, nav_history_index);
+        if (g_ascii_strcasecmp(current->view_word, clean_view) == 0 &&
+            g_ascii_strcasecmp(current->search_query, clean_query) == 0) {
+            g_free(clean_view);
+            g_free(clean_query);
+            return;
+        }
+    }
+    
+    if (nav_history_index >= 0 && nav_history_index < (int)nav_history->len - 1) {
+        g_ptr_array_remove_range(nav_history, nav_history_index + 1, nav_history->len - nav_history_index - 1);
+    }
+    
+    if (nav_history->len > 0) {
+        NavHistoryItem *last = g_ptr_array_index(nav_history, nav_history->len - 1);
+        if (g_ascii_strcasecmp(last->view_word, clean_view) == 0 &&
+            g_ascii_strcasecmp(last->search_query, clean_query) == 0) {
+            g_free(clean_view);
+            g_free(clean_query);
+            return;
+        }
+    }
+    
+    NavHistoryItem *item = g_new0(NavHistoryItem, 1);
+    item->view_word = clean_view;
+    item->search_query = clean_query;
+    g_ptr_array_add(nav_history, item);
+    nav_history_index = nav_history->len - 1;
+    update_nav_buttons_state();
+}
+
+static void navigate_to_history_item(NavHistoryItem *item) {
+    if (g_ascii_strcasecmp(item->view_word, item->search_query) == 0) {
+        g_signal_handlers_block_by_func(search_entry, on_search_changed, NULL);
+        gtk_editable_set_text(GTK_EDITABLE(search_entry), item->search_query);
+        g_signal_handlers_unblock_by_func(search_entry, on_search_changed, NULL);
+        populate_search_sidebar(item->search_query);
+        execute_search_now();
+    } else {
+        g_signal_handlers_block_by_func(search_entry, on_search_changed, NULL);
+        gtk_editable_set_text(GTK_EDITABLE(search_entry), item->view_word);
+        execute_search_now();
+        gtk_editable_set_text(GTK_EDITABLE(search_entry), item->search_query);
+        g_signal_handlers_unblock_by_func(search_entry, on_search_changed, NULL);
+        populate_search_sidebar(item->search_query);
+    }
+}
+
+static void on_nav_back_clicked(GtkButton *btn, gpointer user_data) {
+    (void)btn; (void)user_data;
+    if (nav_history && nav_history_index > 0) {
+        nav_history_index--;
+        NavHistoryItem *item = g_ptr_array_index(nav_history, nav_history_index);
+        navigate_to_history_item(item);
+        update_nav_buttons_state();
+    }
+}
+
+static void on_nav_forward_clicked(GtkButton *btn, gpointer user_data) {
+    (void)btn; (void)user_data;
+    if (nav_history && nav_history_index < (int)nav_history->len - 1) {
+        nav_history_index++;
+        NavHistoryItem *item = g_ptr_array_index(nav_history, nav_history_index);
+        navigate_to_history_item(item);
+        update_nav_buttons_state();
+    }
+}
+
 static void execute_search_now(void) {
     if (search_execute_source_id != 0) {
         g_source_remove(search_execute_source_id);
@@ -2354,6 +2462,7 @@ static void execute_search_now(void) {
         g_string_append(html_res, "</div></body></html>");
         webkit_web_view_load_html(web_view, html_res->str, "file:///");
         update_history_word(query);
+        push_to_nav_history(query, query);
     } else {
         guint enabled_dicts = 0;
         guint loaded_dicts = 0;
@@ -2435,6 +2544,8 @@ static void append_rendered_word_html(const char *raw_word) {
 
     if (found_count > 0) {
         update_history_word(query);
+        const char *current_search_query = gtk_editable_get_text(GTK_EDITABLE(search_entry));
+        push_to_nav_history(query, current_search_query);
 
         char *b64_html = g_base64_encode((const guchar *)html_res->str, html_res->len);
         char *b64_word = g_base64_encode((const guchar *)query, strlen(query));
@@ -3677,10 +3788,28 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     g_object_bind_property(split_view, "show-sidebar", sidebar_toggle, "active", G_BINDING_BIDIRECTIONAL | G_BINDING_SYNC_CREATE);
     adw_header_bar_pack_start(ADW_HEADER_BAR(content_header), sidebar_toggle);
 
+    GtkWidget *search_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_widget_set_halign(search_box, GTK_ALIGN_CENTER);
+
+    nav_back_btn = gtk_button_new_from_icon_name("go-previous-symbolic");
+    gtk_widget_add_css_class(nav_back_btn, "flat");
+    g_signal_connect(nav_back_btn, "clicked", G_CALLBACK(on_nav_back_clicked), NULL);
+    gtk_widget_set_sensitive(nav_back_btn, FALSE);
+
+    nav_forward_btn = gtk_button_new_from_icon_name("go-next-symbolic");
+    gtk_widget_add_css_class(nav_forward_btn, "flat");
+    g_signal_connect(nav_forward_btn, "clicked", G_CALLBACK(on_nav_forward_clicked), NULL);
+    gtk_widget_set_sensitive(nav_forward_btn, FALSE);
+
     search_entry = GTK_SEARCH_ENTRY(gtk_search_entry_new());
     gtk_widget_set_size_request(GTK_WIDGET(search_entry), 350, -1);
-    adw_header_bar_set_title_widget(ADW_HEADER_BAR(content_header), GTK_WIDGET(search_entry));
     g_signal_connect(search_entry, "search-changed", G_CALLBACK(on_search_changed), NULL);
+
+    gtk_box_append(GTK_BOX(search_box), nav_back_btn);
+    gtk_box_append(GTK_BOX(search_box), nav_forward_btn);
+    gtk_box_append(GTK_BOX(search_box), GTK_WIDGET(search_entry));
+
+    adw_header_bar_set_title_widget(ADW_HEADER_BAR(content_header), search_box);
 
     favorite_toggle_btn = gtk_button_new_from_icon_name("non-starred-symbolic");
     gtk_widget_add_css_class(favorite_toggle_btn, "flat");

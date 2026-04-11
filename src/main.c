@@ -3112,9 +3112,9 @@ static void apply_font_to_webview(void *user_data) {
                     "body { font-size: %dpx !important; }"
                     "::selection { background-color: #ff9f40 !important; color: #000000 !important; }"
                     "::-webkit-selection { background-color: #ff9f40 !important; color: #000000 !important; }"
-                    "::-webkit-find-highlight { background-color: rgba(255, 200, 0, 0.4) !important; }"
-                    "::highlight(find) { background-color: rgba(255, 200, 0, 0.4) !important; }"
-                    "::selection:inactive { background-color: rgba(255, 200, 0, 0.4) !important; }",
+                    "::-webkit-find-highlight { background-color: rgba(204, 170, 0, 0.5) !important; }"
+                    "::highlight(find) { background-color: rgba(204, 170, 0, 0.5) !important; }"
+                    "::selection:inactive { background-color: rgba(204, 170, 0, 0.5) !important; }",
                     ff, app_settings->font_size);
             else
                 g_snprintf(css, sizeof(css),
@@ -3122,9 +3122,9 @@ static void apply_font_to_webview(void *user_data) {
                     "body { font-size: %dpx !important; }"
                     "::selection { background-color: #ff9f40 !important; color: #000000 !important; }"
                     "::-webkit-selection { background-color: #ff9f40 !important; color: #000000 !important; }"
-                    "::-webkit-find-highlight { background-color: rgba(255, 200, 0, 0.4) !important; }"
-                    "::highlight(find) { background-color: rgba(255, 200, 0, 0.4) !important; }"
-                    "::selection:inactive { background-color: rgba(255, 200, 0, 0.4) !important; }",
+                    "::-webkit-find-highlight { background-color: rgba(204, 170, 0, 0.5) !important; }"
+                    "::highlight(find) { background-color: rgba(204, 170, 0, 0.5) !important; }"
+                    "::selection:inactive { background-color: rgba(204, 170, 0, 0.5) !important; }",
                     ff, app_settings->font_size);
         } else {
             if (strchr(ff, ' ') && ff[0] != '\"' && ff[0] != '\'')
@@ -3132,17 +3132,17 @@ static void apply_font_to_webview(void *user_data) {
                     "* { font-family: \"%s\", sans-serif !important; }"
                     "::selection { background-color: #ff9f40 !important; color: #000000 !important; }"
                     "::-webkit-selection { background-color: #ff9f40 !important; color: #000000 !important; }"
-                    "::-webkit-find-highlight { background-color: rgba(255, 200, 0, 0.4) !important; }"
-                    "::highlight(find) { background-color: rgba(255, 200, 0, 0.4) !important; }"
-                    "::selection:inactive { background-color: rgba(255, 200, 0, 0.4) !important; }", ff);
+                    "::-webkit-find-highlight { background-color: rgba(204, 170, 0, 0.5) !important; }"
+                    "::highlight(find) { background-color: rgba(204, 170, 0, 0.5) !important; }"
+                    "::selection:inactive { background-color: rgba(204, 170, 0, 0.5) !important; }", ff);
             else
                 g_snprintf(css, sizeof(css),
                     "* { font-family: %s, sans-serif !important; }"
                     "::selection { background-color: #ff9f40 !important; color: #000000 !important; }"
                     "::-webkit-selection { background-color: #ff9f40 !important; color: #000000 !important; }"
-                    "::-webkit-find-highlight { background-color: rgba(255, 200, 0, 0.4) !important; }"
-                    "::highlight(find) { background-color: rgba(255, 200, 0, 0.4) !important; }"
-                    "::selection:inactive { background-color: rgba(255, 200, 0, 0.4) !important; }", ff);
+                    "::-webkit-find-highlight { background-color: rgba(204, 170, 0, 0.5) !important; }"
+                    "::highlight(find) { background-color: rgba(204, 170, 0, 0.5) !important; }"
+                    "::selection:inactive { background-color: rgba(204, 170, 0, 0.5) !important; }", ff);
         }
 
         font_user_stylesheet = webkit_user_style_sheet_new(

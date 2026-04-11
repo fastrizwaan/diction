@@ -22,6 +22,9 @@ static char *active_scope_id = NULL;
 static GPtrArray *history_words = NULL;
 static GPtrArray *favorite_words = NULL;
 static GPtrArray *nav_history = NULL;
+static GtkRevealer *find_revealer = NULL;
+static GtkSearchEntry *find_bar_entry = NULL;
+static GtkLabel *find_status_label = NULL;
 
 typedef struct {
     char *view_word;
@@ -2100,6 +2103,122 @@ static void on_history_item_activated(GtkListView *view, guint position, gpointe
     }
 }
 
+static void on_find_next(GtkButton *btn, gpointer user_data) {
+    (void)btn; (void)user_data;
+    if (web_view)
+        webkit_find_controller_search_next(webkit_web_view_get_find_controller(web_view));
+}
+
+static void on_find_prev(GtkButton *btn, gpointer user_data) {
+    (void)btn; (void)user_data;
+    if (web_view)
+        webkit_find_controller_search_previous(webkit_web_view_get_find_controller(web_view));
+}
+
+static void on_find_close(GtkButton *btn, gpointer user_data) {
+    (void)btn; (void)user_data;
+    if (find_revealer) {
+        gtk_revealer_set_reveal_child(find_revealer, FALSE);
+        if (web_view) {
+            webkit_find_controller_search_finish(webkit_web_view_get_find_controller(web_view));
+        }
+        gtk_widget_grab_focus(GTK_WIDGET(web_view));
+    }
+}
+
+static void on_find_search_changed(GtkSearchEntry *entry, gpointer user_data) {
+    (void)user_data;
+    if (!web_view) return;
+    const char *text = gtk_editable_get_text(GTK_EDITABLE(entry));
+    WebKitFindController *fc = webkit_web_view_get_find_controller(web_view);
+    if (!text || strlen(text) == 0) {
+        webkit_find_controller_search_finish(fc);
+        if (find_status_label) gtk_label_set_text(find_status_label, "");
+        return;
+    }
+    webkit_find_controller_search(fc, text, 
+        WEBKIT_FIND_OPTIONS_CASE_INSENSITIVE | WEBKIT_FIND_OPTIONS_WRAP_AROUND, 
+        G_MAXUINT);
+}
+
+static void on_find_counted_matches(WebKitFindController *fc, guint count, gpointer user_data) {
+    (void)fc; (void)user_data;
+    if (find_status_label) {
+        if (count == 0) {
+            gtk_label_set_text(find_status_label, "No matches");
+        } else {
+            char buf[32];
+            g_snprintf(buf, sizeof(buf), "%u matches", count);
+            gtk_label_set_text(find_status_label, buf);
+        }
+    }
+}
+
+static gboolean on_find_shortcut_close(GtkWidget *widget, GVariant *args, gpointer user_data) {
+    (void)widget; (void)args; (void)user_data;
+    on_find_close(NULL, NULL);
+    return TRUE;
+}
+
+static void on_find_action(GSimpleAction *action, GVariant *parameter, gpointer user_data) {
+    (void)action; (void)parameter; (void)user_data;
+    if (find_revealer) {
+        gboolean active = gtk_revealer_get_reveal_child(find_revealer);
+        gtk_revealer_set_reveal_child(find_revealer, !active);
+        if (!active && find_bar_entry) {
+            gtk_widget_grab_focus(GTK_WIDGET(find_bar_entry));
+            const char *text = gtk_editable_get_text(GTK_EDITABLE(find_bar_entry));
+            if (text && strlen(text) > 0) {
+                on_find_search_changed(find_bar_entry, NULL);
+            }
+        } else {
+            gtk_widget_grab_focus(GTK_WIDGET(web_view));
+        }
+    }
+}
+
+static GtkWidget* create_find_bar() {
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_widget_set_margin_start(box, 12);
+    gtk_widget_set_margin_end(box, 12);
+    gtk_widget_set_margin_top(box, 6);
+    gtk_widget_set_margin_bottom(box, 6);
+
+    find_bar_entry = GTK_SEARCH_ENTRY(gtk_search_entry_new());
+    gtk_widget_set_hexpand(GTK_WIDGET(find_bar_entry), TRUE);
+    g_object_set(find_bar_entry, "placeholder-text", "Find in page...", NULL);
+    g_signal_connect(find_bar_entry, "search-changed", G_CALLBACK(on_find_search_changed), NULL);
+    g_signal_connect(find_bar_entry, "activate", G_CALLBACK(on_find_next), NULL);
+
+    find_status_label = GTK_LABEL(gtk_label_new(""));
+    gtk_widget_add_css_class(GTK_WIDGET(find_status_label), "dim-label");
+    gtk_widget_set_margin_end(GTK_WIDGET(find_status_label), 6);
+
+    GtkWidget *prev_btn = gtk_button_new_from_icon_name("go-up-symbolic");
+    gtk_widget_add_css_class(prev_btn, "flat");
+    g_signal_connect(prev_btn, "clicked", G_CALLBACK(on_find_prev), NULL);
+
+    GtkWidget *next_btn = gtk_button_new_from_icon_name("go-down-symbolic");
+    gtk_widget_add_css_class(next_btn, "flat");
+    g_signal_connect(next_btn, "clicked", G_CALLBACK(on_find_next), NULL);
+
+    GtkWidget *close_btn = gtk_button_new_from_icon_name("window-close-symbolic");
+    gtk_widget_add_css_class(close_btn, "flat");
+    g_signal_connect(close_btn, "clicked", G_CALLBACK(on_find_close), NULL);
+
+    gtk_box_append(GTK_BOX(box), GTK_WIDGET(find_bar_entry));
+    gtk_box_append(GTK_BOX(box), GTK_WIDGET(find_status_label));
+    gtk_box_append(GTK_BOX(box), prev_btn);
+    gtk_box_append(GTK_BOX(box), next_btn);
+    gtk_box_append(GTK_BOX(box), close_btn);
+
+    find_revealer = GTK_REVEALER(gtk_revealer_new());
+    gtk_revealer_set_transition_type(find_revealer, GTK_REVEALER_TRANSITION_TYPE_SLIDE_DOWN);
+    gtk_revealer_set_child(find_revealer, box);
+
+    return GTK_WIDGET(find_revealer);
+}
+
 static void related_list_item_setup(GtkSignalListItemFactory *factory, GtkListItem *item, gpointer user_data) {
     (void)factory;
     (void)user_data;
@@ -4006,14 +4125,36 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
 
     /* Handle internal dict:// links */
     g_signal_connect(web_view, "decide-policy", G_CALLBACK(on_decide_policy), search_entry);
+    WebKitFindController *fc = webkit_web_view_get_find_controller(web_view);
+    g_signal_connect(fc, "counted-matches", G_CALLBACK(on_find_counted_matches), NULL);
 
     GtkWidget *web_scroll = gtk_scrolled_window_new();
     gtk_widget_set_vexpand(web_scroll, TRUE);
     gtk_widget_set_hexpand(web_scroll, TRUE);
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(web_scroll), GTK_WIDGET(web_view));
     
-    adw_toolbar_view_set_content(toolbar_view, web_scroll);
+    GtkWidget *content_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_box_append(GTK_BOX(content_vbox), create_find_bar());
+    gtk_box_append(GTK_BOX(content_vbox), web_scroll);
+
+    adw_toolbar_view_set_content(toolbar_view, content_vbox);
     adw_overlay_split_view_set_content(ADW_OVERLAY_SPLIT_VIEW(split_view), GTK_WIDGET(toolbar_view));
+
+    GSimpleAction *find_action = g_simple_action_new("find", NULL);
+    g_signal_connect(find_action, "activate", G_CALLBACK(on_find_action), NULL);
+    g_action_map_add_action(G_ACTION_MAP(app), G_ACTION(find_action));
+
+    GtkShortcutController *shortcut_ctrl = GTK_SHORTCUT_CONTROLLER(gtk_shortcut_controller_new());
+    gtk_shortcut_controller_set_scope(shortcut_ctrl, GTK_SHORTCUT_SCOPE_GLOBAL);
+    gtk_widget_add_controller(GTK_WIDGET(window), GTK_EVENT_CONTROLLER(shortcut_ctrl));
+
+    gtk_shortcut_controller_add_shortcut(shortcut_ctrl, gtk_shortcut_new(
+        gtk_keyval_trigger_new(GDK_KEY_f, GDK_CONTROL_MASK),
+        gtk_named_action_new("app.find")));
+    
+    gtk_shortcut_controller_add_shortcut(shortcut_ctrl, gtk_shortcut_new(
+        gtk_keyval_trigger_new(GDK_KEY_Escape, 0),
+        gtk_callback_action_new((GtkShortcutFunc)on_find_shortcut_close, NULL, NULL)));
 
     gboolean had_cached_entries = FALSE;
     gboolean discover_from_dirs = FALSE;

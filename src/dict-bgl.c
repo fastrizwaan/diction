@@ -167,7 +167,7 @@ static size_t transcode_bgl_blocks(const char *data, size_t data_size, FILE *out
     TreeEntry *entries = calloc(entry_cap, sizeof(TreeEntry));
     char *dict_name = NULL;
     
-    const char *default_charset = "WINDOWS-1252"; // Most BGLs default to Latin1 (1252) if not specified
+    const char *default_charset = "UTF-8"; // Usually missing metadata means the file was natively compiled as UTF-8
     const char *source_charset_override = NULL;
     const char *target_charset_override = NULL;
     gboolean is_utf8 = FALSE;
@@ -311,6 +311,24 @@ static size_t transcode_bgl_blocks(const char *data, size_t data_size, FILE *out
                 size_t decoded_hw_len = 0;
                 char *hw_utf8 = bgl_decode_string((const char*)hw_data, hw_len, source_charset, &decoded_hw_len);
                 if (decoded_hw_len == 0) { g_free(hw_utf8); continue; }
+
+                /* Strip BGL $123$ numeric postfixes if present */
+                if (decoded_hw_len > 0 && hw_utf8[decoded_hw_len - 1] == '$') {
+                    if (decoded_hw_len >= 2) {
+                        size_t x = decoded_hw_len - 2;
+                        while (1) {
+                            if (hw_utf8[x] == '$') {
+                                hw_utf8[x] = '\0';
+                                decoded_hw_len = x;
+                                break;
+                            } else if (hw_utf8[x] < '0' || hw_utf8[x] > '9') {
+                                break;
+                            }
+                            if (x == 0) break;
+                            x--;
+                        }
+                    }
+                }
                 
                 size_t decoded_def_len = 0;
                 char *def_utf8 = format_bgl_definition(def_data, def_len, target_charset, &decoded_def_len);

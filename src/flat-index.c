@@ -2,29 +2,60 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <glib.h>
+
 
 /* ── helpers ──────────────────────────────────────────── */
 
+static int compare_dsl_agnostic(const char *raw, size_t raw_len, const char *clean, size_t clean_len) {
+    size_t r = 0, c = 0;
+    while (r < raw_len && c < clean_len) {
+        char rc = raw[r];
+        if (rc == '{' || rc == '}' || rc == '\\' || rc == '~') {
+            r++;
+            continue;
+        }
+        char cc = clean[c];
+        int diff = g_ascii_tolower(rc) - g_ascii_tolower(cc);
+        if (diff != 0) return diff;
+        r++;
+        c++;
+    }
+    // If we exhausted raw but it still has formatting chars left, skip them
+    while (r < raw_len) {
+        char rc = raw[r];
+        if (rc == '{' || rc == '}' || rc == '\\' || rc == '~') r++;
+        else break;
+    }
+    if (r == raw_len && c == clean_len) return 0;
+    if (r == raw_len) return -1;
+    return 1;
+}
+
 static int compare_headword(const char *data, const FlatTreeEntry *entry,
                             const char *query, size_t qlen) {
-    size_t klen = (size_t)entry->h_len;
-    size_t min_len = klen < qlen ? klen : qlen;
-    int res = strncasecmp(data + entry->h_off, query, min_len);
-    if (res != 0) return res;
-    if (klen < qlen) return -1;
-    if (klen > qlen) return 1;
-    return 0;
+    return compare_dsl_agnostic(data + entry->h_off, entry->h_len, query, qlen);
 }
 
 static int compare_prefix(const char *data, const FlatTreeEntry *entry,
                           const char *prefix, size_t plen) {
-    size_t klen = (size_t)entry->h_len;
-    size_t cmp_len = klen < plen ? klen : plen;
-    int res = strncasecmp(data + entry->h_off, prefix, cmp_len);
-    if (res != 0) return res;
-    /* If headword is shorter than prefix, it comes before */
-    if (klen < plen) return -1;
-    return 0; /* headword starts with prefix */
+    size_t r = 0, c = 0;
+    const char *raw = data + entry->h_off;
+    size_t raw_len = entry->h_len;
+    while (r < raw_len && c < plen) {
+        char rc = raw[r];
+        if (rc == '{' || rc == '}' || rc == '\\' || rc == '~') {
+            r++;
+            continue;
+        }
+        char cc = prefix[c];
+        int diff = g_ascii_tolower(rc) - g_ascii_tolower(cc);
+        if (diff != 0) return diff;
+        r++;
+        c++;
+    }
+    if (c == plen) return 0; // prefix fully matched!
+    return -1; // raw word is shorter than prefix
 }
 
 /* Comparator for qsort during cache building */
@@ -37,15 +68,36 @@ static __thread const char *sort_data_ptr = NULL;
 static int sort_compare(const void *a, const void *b) {
     const FlatTreeEntry *ea = (const FlatTreeEntry *)a;
     const FlatTreeEntry *eb = (const FlatTreeEntry *)b;
+    const char *ra = sort_data_ptr + ea->h_off;
+    const char *rb = sort_data_ptr + eb->h_off;
     size_t la = (size_t)ea->h_len;
     size_t lb = (size_t)eb->h_len;
-    size_t min_len = la < lb ? la : lb;
-    int res = strncasecmp(sort_data_ptr + ea->h_off,
-                          sort_data_ptr + eb->h_off, min_len);
-    if (res != 0) return res;
-    if (la < lb) return -1;
-    if (la > lb) return 1;
-    return 0;
+
+    size_t i = 0, j = 0;
+    while (i < la && j < lb) {
+        char ca = ra[i];
+        if (ca == '{' || ca == '}' || ca == '\\' || ca == '~') { i++; continue; }
+        char cb = rb[j];
+        if (cb == '{' || cb == '}' || cb == '\\' || cb == '~') { j++; continue; }
+        
+        int diff = g_ascii_tolower(ca) - g_ascii_tolower(cb);
+        if (diff != 0) return diff;
+        i++;
+        j++;
+    }
+    while (i < la) {
+        char ca = ra[i];
+        if (ca == '{' || ca == '}' || ca == '\\' || ca == '~') i++;
+        else break;
+    }
+    while (j < lb) {
+        char cb = rb[j];
+        if (cb == '{' || cb == '}' || cb == '\\' || cb == '~') j++;
+        else break;
+    }
+    if (i == la && j == lb) return 0;
+    if (i == la) return -1;
+    return 1;
 }
 
 /* ── public API ──────────────────────────────────────── */

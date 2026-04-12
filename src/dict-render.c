@@ -1977,6 +1977,20 @@ char* dsl_render_to_html(const char *dsl_text,
     buf_append_str(&b, com_color);
     buf_append_str(&b, ";}"
         ".paper-entry .rendered-entry-body{line-height:1.58;}"
+        "k{display:block;font-size:1.18em;font-weight:700;color:");
+    buf_append_str(&b, heading_color);
+    buf_append_str(&b, ";margin-bottom:0.2em;}"
+        "dtrn{display:block;margin-top:0.3em;line-height:1.45;}"
+        "co{color:");
+    buf_append_str(&b, com_color);
+    buf_append_str(&b, ";}"
+        "nu{display:none;}"
+        "c{color:");
+    buf_append_str(&b, trn_color);
+    buf_append_str(&b, ";}"
+        "kref{cursor:pointer;color:");
+    buf_append_str(&b, link_color);
+    buf_append_str(&b, ";text-decoration:underline;}"
         "</style>");
     if (dark_mode) {
         buf_append_str(&b,

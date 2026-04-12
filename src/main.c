@@ -696,6 +696,19 @@ static char *normalize_headword_for_search(const char *value) {
             p += strlen("{·}");
             continue;
         }
+        
+        if (*p == '{' || *p == '}') {
+            p++;
+            continue;
+        }
+
+        if (*p == '\\' && (p[1] == '{' || p[1] == '}' || p[1] == '~')) {
+            p++; /* skip the backslash */
+            const char *next = g_utf8_next_char(p);
+            g_string_append_len(out, p, next - p);
+            p = next;
+            continue;
+        }
 
         if (*p == '\\' && p[1] != '\0') {
             const char *next = p + 1;
@@ -1288,10 +1301,28 @@ static gboolean fast_strncasestr(const char *haystack, size_t haystack_len, cons
     if (!haystack || !needle) return FALSE;
     size_t needle_len = strlen(needle);
     if (needle_len == 0) return TRUE;
-    if (needle_len > haystack_len) return FALSE;
 
-    for (size_t i = 0; i <= haystack_len - needle_len; i++) {
-        if (g_ascii_strncasecmp(haystack + i, needle, needle_len) == 0) {
+    for (size_t i = 0; i < haystack_len; i++) {
+        size_t h_idx = i;
+        size_t n_idx = 0;
+        
+        while (h_idx < haystack_len && n_idx < needle_len) {
+            char hc = haystack[h_idx];
+            
+            /* Fast-skip common DSL formatting characters during the match */
+            if (hc == '{' || hc == '}' || hc == '\\' || hc == '~') {
+                h_idx++;
+                continue;
+            }
+            
+            char nc = needle[n_idx];
+            if (g_ascii_tolower(hc) != g_ascii_tolower(nc)) {
+                break;
+            }
+            h_idx++;
+            n_idx++;
+        }
+        if (n_idx == needle_len) {
             return TRUE;
         }
     }
@@ -2215,7 +2246,7 @@ static GtkWidget* create_find_bar() {
     gtk_box_append(GTK_BOX(box), close_btn);
 
     find_revealer = GTK_REVEALER(gtk_revealer_new());
-    gtk_revealer_set_transition_type(find_revealer, GTK_REVEALER_TRANSITION_TYPE_SLIDE_DOWN);
+    gtk_revealer_set_transition_type(find_revealer, GTK_REVEALER_TRANSITION_TYPE_SLIDE_UP);
     gtk_revealer_set_child(find_revealer, box);
 
     return GTK_WIDGET(find_revealer);
@@ -2436,7 +2467,11 @@ static void append_rendered_entry_html(GString *html_res,
     }
 
     char *escaped_name = safe_markup_escape_n(entry->name ? entry->name : "", -1);
-    char *escaped_headword = safe_markup_escape_n(entry->dict->data + res->h_off, (gssize)res->h_len);
+    char *tmp_hw = g_strndup(entry->dict->data + res->h_off, res->h_len);
+    char *clean_hw = normalize_headword_for_search(tmp_hw);
+    char *escaped_headword = safe_markup_escape_n(clean_hw ? clean_hw : tmp_hw, -1);
+    g_free(tmp_hw);
+    if (clean_hw) g_free(clean_hw);
     gboolean first_match_for_dict = FALSE;
 
     if (!*dict_header_shown) {
@@ -2713,14 +2748,19 @@ static void append_rendered_word_html(const char *raw_word) {
         if (!e->dict || !dict_entry_in_active_scope(e)) continue;
 
         size_t pos = flat_index_search(e->dict->index, query);
-        size_t q_len = strlen(query);
         int dict_header_shown = 0;
 
         while (pos != (size_t)-1) {
             const FlatTreeEntry *res = flat_index_get(e->dict->index, pos);
             if (!res) break;
-            if (res->h_len != q_len || 
-                strncasecmp(e->dict->data + res->h_off, query, q_len) != 0) {
+
+            char *tmp_hw = g_strndup(e->dict->data + res->h_off, res->h_len);
+            char *clean_hw = normalize_headword_for_search(tmp_hw);
+            gboolean matches = (clean_hw && g_ascii_strcasecmp(clean_hw, query) == 0);
+            g_free(tmp_hw);
+            if (clean_hw) g_free(clean_hw);
+
+            if (!matches) {
                 break;
             }
             append_rendered_entry_html(html_res, e, res, dict_idx, &dict_header_shown, &found_count);
@@ -2821,9 +2861,11 @@ static void on_random_clicked(GtkButton *btn, gpointer user_data) {
         if (node) {
             const char *word = e->dict->data + node->h_off;
             size_t len = node->h_len;
-            char *word_str = g_strndup(word, len);
-            gtk_editable_set_text(GTK_EDITABLE(search_entry), word_str);
-            g_free(word_str);
+            char *tmp_hw = g_strndup(word, len);
+            char *clean_hw = normalize_headword_for_search(tmp_hw);
+            gtk_editable_set_text(GTK_EDITABLE(search_entry), clean_hw ? clean_hw : tmp_hw);
+            g_free(tmp_hw);
+            if (clean_hw) g_free(clean_hw);
             // Search will be triggered by "search-changed" signal, but we want it instantly
             execute_search_now();
         }
@@ -3105,39 +3147,44 @@ static void apply_font_to_webview(void *user_data) {
         const char *ff = (app_settings->font_family && *app_settings->font_family)
                          ? app_settings->font_family : "sans-serif";
         char css[512];
+        const char *scheme = (style_manager && adw_style_manager_get_dark(style_manager)) ? "dark !important" : "light !important";
         if (app_settings->font_size > 0) {
             /* Use em-based size override so relative sizes within the page
              * still scale correctly (1em = our chosen px at root level). */
             if (strchr(ff, ' ') && ff[0] != '\"' && ff[0] != '\'')
                 g_snprintf(css, sizeof(css),
+                    ":root { color-scheme: %s; }"
                     "* { font-family: \"%s\", sans-serif !important; }"
                     "body { font-size: %dpx !important; }"
                     "::selection { background-color: #ff9f40 !important; color: #000000 !important; }"
                     "::-webkit-selection { background-color: #ff9f40 !important; color: #000000 !important; }"
                     "/* Try to catch inactive highlights if supported */"
                     "::selection:inactive { background-color: #ff9f40 !important; color: #000000 !important; }",
-                    ff, app_settings->font_size);
+                    scheme, ff, app_settings->font_size);
             else
                 g_snprintf(css, sizeof(css),
+                    ":root { color-scheme: %s; }"
                     "* { font-family: %s, sans-serif !important; }"
                     "body { font-size: %dpx !important; }"
                     "::selection { background-color: #ff9f40 !important; color: #000000 !important; }"
                     "::-webkit-selection { background-color: #ff9f40 !important; color: #000000 !important; }"
                     "::selection:inactive { background-color: #ff9f40 !important; color: #000000 !important; }",
-                    ff, app_settings->font_size);
+                    scheme, ff, app_settings->font_size);
         } else {
             if (strchr(ff, ' ') && ff[0] != '\"' && ff[0] != '\'')
                 g_snprintf(css, sizeof(css),
+                    ":root { color-scheme: %s; }"
                     "* { font-family: \"%s\", sans-serif !important; }"
                     "::selection { background-color: #ff9f40 !important; color: #000000 !important; }"
                     "::-webkit-selection { background-color: #ff9f40 !important; color: #000000 !important; }"
-                    "::selection:inactive { background-color: #ff9f40 !important; color: #000000 !important; }", ff);
+                    "::selection:inactive { background-color: #ff9f40 !important; color: #000000 !important; }", scheme, ff);
             else
                 g_snprintf(css, sizeof(css),
+                    ":root { color-scheme: %s; }"
                     "* { font-family: %s, sans-serif !important; }"
                     "::selection { background-color: #ff9f40 !important; color: #000000 !important; }"
                     "::-webkit-selection { background-color: #ff9f40 !important; color: #000000 !important; }"
-                    "::selection:inactive { background-color: #ff9f40 !important; color: #000000 !important; }", ff);
+                    "::selection:inactive { background-color: #ff9f40 !important; color: #000000 !important; }", scheme, ff);
         }
 
         font_user_stylesheet = webkit_user_style_sheet_new(
@@ -4071,6 +4118,8 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     gtk_widget_set_opacity(search_icon, 0.7); // make icon slightly dim
     search_button_label = GTK_LABEL(gtk_label_new("Search"));
     gtk_widget_set_opacity(GTK_WIDGET(search_button_label), 0.7); // make label text dim
+    gtk_label_set_ellipsize(search_button_label, PANGO_ELLIPSIZE_END);
+    gtk_label_set_single_line_mode(search_button_label, TRUE);
     gtk_widget_set_hexpand(GTK_WIDGET(search_button_label), TRUE);
     // Move label to the left
     gtk_widget_set_halign(GTK_WIDGET(search_button_label), GTK_ALIGN_START);
@@ -4149,8 +4198,8 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(web_scroll), GTK_WIDGET(web_view));
     
     GtkWidget *content_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_box_append(GTK_BOX(content_vbox), create_find_bar());
     gtk_box_append(GTK_BOX(content_vbox), web_scroll);
+    gtk_box_append(GTK_BOX(content_vbox), create_find_bar());
 
     adw_toolbar_view_set_content(toolbar_view, content_vbox);
     adw_overlay_split_view_set_content(ADW_OVERLAY_SPLIT_VIEW(split_view), GTK_WIDGET(toolbar_view));

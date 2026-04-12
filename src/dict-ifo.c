@@ -186,20 +186,14 @@ static void append_stardict_resource_html(GString *article, char type, const cha
 
     switch (type) {
         case 'h':
+        case 'g':
+        case 'x':
             g_string_append_len(article, data, size);
             break;
         case 'm':
         case 'l':
-        case 'g':
         case 't':
         case 'y':
-            append_html_escaped_text(article, data, size);
-            break;
-        case 'x':
-            g_string_append(article, "<pre class=\"sdct_x\">");
-            append_html_escaped_text(article, data, size);
-            g_string_append(article, "</pre>");
-            break;
         case 'w':
             append_html_escaped_text(article, data, size);
             break;

@@ -31,6 +31,11 @@ typedef struct {
     int   font_size;              // e.g. 16 (CSS px)
     char *color_theme;            // e.g. "default", "solarized", "dracula"
     char *render_style;           // e.g. "diction", "python", "goldendict-ng"
+    gboolean scan_popup_enabled;  // Enable clipboard scanning
+    gboolean tray_icon_enabled;   // Enable system tray icon
+    gboolean close_to_tray;       // Close to tray instead of quitting
+    int      scan_popup_delay_ms; // Debounce delay (default 500)
+    char    *global_shortcut;     // Shortcut key string (e.g. "<Ctrl>F12")
 } AppSettings;
 
 // Settings management

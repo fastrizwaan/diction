@@ -690,6 +690,11 @@ AppSettings* settings_load(void) {
     settings->font_size = 16;
     settings->color_theme = g_strdup("default");
     settings->render_style = g_strdup("diction");
+    settings->scan_popup_enabled = FALSE;
+    settings->tray_icon_enabled = FALSE;
+    settings->close_to_tray = FALSE;
+    settings->scan_popup_delay_ms = 500;
+    settings->global_shortcut = g_strdup("");
 
     char *path = get_settings_file_path();
     if (!g_file_test(path, G_FILE_TEST_EXISTS)) {
@@ -763,6 +768,24 @@ AppSettings* settings_load(void) {
     if (render_style && *render_style) {
         g_free(settings->render_style);
         settings->render_style = g_strdup(render_style);
+    }
+
+    // Scan popup / tray icon settings
+    if (json_object_has_member(obj, "scan_popup_enabled"))
+        settings->scan_popup_enabled = json_object_get_boolean_member(obj, "scan_popup_enabled");
+    if (json_object_has_member(obj, "tray_icon_enabled"))
+        settings->tray_icon_enabled = json_object_get_boolean_member(obj, "tray_icon_enabled");
+    if (json_object_has_member(obj, "close_to_tray"))
+        settings->close_to_tray = json_object_get_boolean_member(obj, "close_to_tray");
+    if (json_object_has_member(obj, "scan_popup_delay_ms")) {
+        settings->scan_popup_delay_ms = (int)json_object_get_int_member(obj, "scan_popup_delay_ms");
+        if (settings->scan_popup_delay_ms < 100) settings->scan_popup_delay_ms = 100;
+        if (settings->scan_popup_delay_ms > 5000) settings->scan_popup_delay_ms = 5000;
+    }
+    const char *global_shortcut = json_object_get_string_member(obj, "global_shortcut");
+    if (global_shortcut) {
+        g_free(settings->global_shortcut);
+        settings->global_shortcut = g_strdup(global_shortcut);
     }
 
     // Dictionary directories
@@ -856,6 +879,15 @@ void settings_save(AppSettings *settings) {
     json_object_set_string_member(root, "render_style",
         settings->render_style ? settings->render_style : "diction");
 
+    // Scan popup / tray icon settings
+    json_object_set_boolean_member(root, "scan_popup_enabled", settings->scan_popup_enabled);
+    json_object_set_boolean_member(root, "tray_icon_enabled", settings->tray_icon_enabled);
+    json_object_set_boolean_member(root, "close_to_tray", settings->close_to_tray);
+    json_object_set_int_member(root, "scan_popup_delay_ms",
+        settings->scan_popup_delay_ms > 0 ? settings->scan_popup_delay_ms : 500);
+    json_object_set_string_member(root, "global_shortcut",
+        settings->global_shortcut ? settings->global_shortcut : "");
+
     // Dictionary directories
     JsonArray *dirs = json_array_new();
     for (guint i = 0; i < settings->dictionary_dirs->len; i++) {
@@ -922,6 +954,7 @@ void settings_free(AppSettings *settings) {
         g_free(settings->font_family);
         g_free(settings->color_theme);
         g_free(settings->render_style);
+        g_free(settings->global_shortcut);
         g_free(settings);
     }
 }

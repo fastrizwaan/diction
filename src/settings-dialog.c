@@ -1514,6 +1514,27 @@ static void on_font_size_changed(AdwSpinRow *spin, SettingsDialogData *data) {
         data->font_changed_callback(data->font_changed_user_data);
 }
 
+static void on_system_switch_action(GtkSwitch *sw, GParamSpec *pspec, SettingsDialogData *data) {
+    (void)pspec;
+    gboolean active = gtk_switch_get_active(sw);
+    const char *key = g_object_get_data(G_OBJECT(sw), "setting-key");
+    if (!key) return;
+
+    if (strcmp(key, "tray_icon_enabled") == 0) {
+        data->settings->tray_icon_enabled = active;
+    } else if (strcmp(key, "close_to_tray") == 0) {
+        data->settings->close_to_tray = active;
+    } else if (strcmp(key, "scan_popup_enabled") == 0) {
+        data->settings->scan_popup_enabled = active;
+    }
+    
+    settings_save(data->settings);
+
+    if (data->soft_reload_callback) {
+        data->soft_reload_callback(data->user_data);
+    }
+}
+
 static void on_render_style_row_changed(AdwComboRow *row, GParamSpec *pspec, SettingsDialogData *data) {
     (void)pspec;
     const char *styles[] = {"diction", "python", "goldendict-ng", "slate-card", "paper"};
@@ -1700,6 +1721,65 @@ GtkWidget* settings_dialog_new(GtkWindow *parent, AppSettings *settings,
     adw_action_row_set_subtitle(ADW_ACTION_ROW(font_size_row), "Size in pixels (8 – 48)");
     g_signal_connect(font_size_row, "changed", G_CALLBACK(on_font_size_changed), data);
     adw_preferences_group_add(font_group, GTK_WIDGET(font_size_row));
+
+    /* ============================================================
+       TAB 2 — System Integration
+       ============================================================ */
+    AdwPreferencesPage *system_page = ADW_PREFERENCES_PAGE(adw_preferences_page_new());
+    adw_preferences_page_set_title(system_page, "System");
+    adw_preferences_page_set_icon_name(system_page, "preferences-system-symbolic");
+    adw_preferences_dialog_add(ADW_PREFERENCES_DIALOG(dialog), system_page);
+
+    AdwPreferencesGroup *tray_group = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
+    adw_preferences_group_set_title(tray_group, "System Tray");
+    adw_preferences_group_set_description(tray_group, "Background operation options");
+    adw_preferences_page_add(system_page, tray_group);
+
+    AdwSwitchRow *tray_row = ADW_SWITCH_ROW(adw_switch_row_new());
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(tray_row), "Enable System Tray Icon");
+    adw_switch_row_set_active(tray_row, settings->tray_icon_enabled);
+    g_object_set_data(G_OBJECT(tray_row), "setting-key", "tray_icon_enabled");
+    g_signal_connect(adw_action_row_get_activatable_widget(ADW_ACTION_ROW(tray_row)), 
+                     "notify::active", G_CALLBACK(on_system_switch_action), data);
+    adw_preferences_group_add(tray_group, GTK_WIDGET(tray_row));
+
+    AdwSwitchRow *close_to_tray_row = ADW_SWITCH_ROW(adw_switch_row_new());
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(close_to_tray_row), "Close Window to Tray");
+    adw_action_row_set_subtitle(ADW_ACTION_ROW(close_to_tray_row), "Closing main window hides it instead of quitting");
+    adw_switch_row_set_active(close_to_tray_row, settings->close_to_tray);
+    g_object_set_data(G_OBJECT(close_to_tray_row), "setting-key", "close_to_tray");
+    g_signal_connect(adw_action_row_get_activatable_widget(ADW_ACTION_ROW(close_to_tray_row)), 
+                     "notify::active", G_CALLBACK(on_system_switch_action), data);
+    adw_preferences_group_add(tray_group, GTK_WIDGET(close_to_tray_row));
+
+    g_object_bind_property(tray_row, "active", close_to_tray_row, "sensitive", G_BINDING_SYNC_CREATE);
+
+    AdwPreferencesGroup *popup_group = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
+    adw_preferences_group_set_title(popup_group, "Clipboard Scan Popup");
+    adw_preferences_group_set_description(popup_group, "Look up definitions when selecting text in other applications");
+    adw_preferences_page_add(system_page, popup_group);
+
+    AdwSwitchRow *scan_row = ADW_SWITCH_ROW(adw_switch_row_new());
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(scan_row), "Enable Scan Popup");
+    adw_action_row_set_subtitle(ADW_ACTION_ROW(scan_row), "Look up when selecting text (PRIMARY clipboard)");
+    adw_switch_row_set_active(scan_row, settings->scan_popup_enabled);
+    g_object_set_data(G_OBJECT(scan_row), "setting-key", "scan_popup_enabled");
+    g_signal_connect(adw_action_row_get_activatable_widget(ADW_ACTION_ROW(scan_row)), 
+                     "notify::active", G_CALLBACK(on_system_switch_action), data);
+    adw_preferences_group_add(popup_group, GTK_WIDGET(scan_row));
+
+    AdwPreferencesGroup *shortcut_group = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
+    adw_preferences_group_set_title(shortcut_group, "Global Shortcut");
+    adw_preferences_page_add(system_page, shortcut_group);
+
+    GtkWidget *shortcut_row = adw_action_row_new();
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(shortcut_row), "Toggle Main Window");
+    adw_action_row_set_subtitle(ADW_ACTION_ROW(shortcut_row), "Requires XDG Desktop Portal");
+    
+    AdwButtonRow *shortcut_btn_row = ADW_BUTTON_ROW(adw_button_row_new());
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(shortcut_btn_row), "Configure Global Shortcut");
+    // Handled in main.c during portal initialization as there's no native bind UI here
+    adw_preferences_group_add(shortcut_group, GTK_WIDGET(shortcut_row));
 
     /* ============================================================
        TAB 2 — Dictionaries

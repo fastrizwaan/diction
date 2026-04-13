@@ -34,7 +34,9 @@ srcs = [
   'src/dict-render.c',
   'src/ripemd128.c',
   'src/settings.c',
-  'src/settings-dialog.c'
+  'src/settings-dialog.c',
+  'src/scan-popup.c',
+  'src/tray-icon.c'
 ]
 
 executable('diction', srcs,

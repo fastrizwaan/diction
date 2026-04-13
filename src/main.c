@@ -2,11 +2,13 @@
 #include <adwaita.h>
 #include <webkit/webkit.h>
 #include <sys/stat.h>
-#include <time.h>
+#include <fcntl.h>
 #include "dict-mmap.h"
 #include "dict-loader.h"
 #include "dict-render.h"
 #include "settings.h"
+#include "scan-popup.h"
+#include "tray-icon.h"
 
 static DictEntry *all_dicts = NULL;
 static DictEntry *active_entry = NULL;
@@ -3349,14 +3351,48 @@ static void finalize_dictionary_loading(gboolean allow_random_word, gboolean syn
     }
 }
 
+static void toggle_scan_from_tray(void) {
+    if (app_settings) {
+        app_settings->scan_popup_enabled = !app_settings->scan_popup_enabled;
+        scan_popup_set_enabled(app_settings->scan_popup_enabled);
+        tray_icon_set_scan_active(app_settings->scan_popup_enabled);
+        settings_save(app_settings);
+    }
+}
+
+static void quit_from_tray(void) {
+    GApplication *app = g_application_get_default();
+    if (app) {
+        g_application_quit(app);
+    }
+}
+
 static void refresh_dictionaries_ui(void *user_data) {
     (void)user_data;
     populate_dict_sidebar();
     populate_history_sidebar();
     populate_favorites_sidebar();
     populate_groups_sidebar();
-    populate_search_sidebar(gtk_editable_get_text(GTK_EDITABLE(search_entry)));
+    if (search_entry) {
+        populate_search_sidebar(gtk_editable_get_text(GTK_EDITABLE(search_entry)));
+    }
     refresh_search_results();
+
+    if (app_settings) {
+        if (app_settings->tray_icon_enabled) {
+            tray_icon_init(GTK_APPLICATION(g_application_get_default()), 
+                           main_window, toggle_scan_from_tray, quit_from_tray);
+            tray_icon_set_scan_active(app_settings->scan_popup_enabled);
+        } else {
+            tray_icon_destroy();
+        }
+        scan_popup_set_enabled(app_settings->scan_popup_enabled);
+    }
+}
+
+static void on_scan_clipboard_action(GSimpleAction *action, GVariant *parameter, gpointer user_data) {
+    (void)action; (void)parameter; (void)user_data;
+    scan_popup_trigger_manual();
 }
 
 static void show_settings_dialog(GSimpleAction *action, GVariant *parameter, gpointer user_data) {
@@ -3975,12 +4011,118 @@ static gboolean on_search_btn_drop(GtkDropTarget *target, const GValue *value, g
 }
 
 
+
+static void toggle_window_visibility(void) {
+    if (main_window) {
+        if (gtk_widget_get_visible(GTK_WIDGET(main_window))) {
+            gtk_widget_set_visible(GTK_WIDGET(main_window), FALSE);
+        } else {
+            gtk_window_present(main_window);
+        }
+    }
+}
+
+
+
+static char* scan_lookup_callback(const char *word) {
+    if (!word || !*word) return NULL;
+    
+    char *lower_word = g_utf8_strdown(word, -1);
+    char *clean = g_strstrip(lower_word);
+    if (!clean || !*clean) {
+        g_free(lower_word);
+        return NULL;
+    }
+
+    DictEntry *found_entry = NULL;
+    const FlatTreeEntry *found_res = NULL;
+    int found_dict_idx = 0;
+
+    int idx = 0;
+    for (DictEntry *e = all_dicts; e; e = e->next, idx++) {
+        if (!dict_entry_in_active_scope(e)) continue;
+        if (!e->dict || !e->dict->index) continue;
+        
+        size_t pos = flat_index_search(e->dict->index, clean);
+        if (pos != (size_t)-1) {
+            found_entry = e;
+            found_res = flat_index_get(e->dict->index, pos);
+            found_dict_idx = idx;
+            break;
+        }
+    }
+
+    g_free(lower_word);
+
+    if (found_entry && found_res) {
+        GString *html = g_string_new("");
+        int dict_header_shown = 0;
+        int found_count = 0;
+        append_rendered_entry_html(html, found_entry, found_res, found_dict_idx, &dict_header_shown, &found_count);
+        char *final_html = g_string_free(html, FALSE);
+        
+        GString *doc = g_string_new("");
+        g_string_append_printf(doc, "<html><head><meta charset='utf-8'><style>body { font-size: %dpx; background: transparent; color: inherit; }</style></head><body>", 
+            (app_settings && app_settings->font_size > 0) ? app_settings->font_size : 16);
+        g_string_append(doc, final_html);
+        g_string_append(doc, "</body></html>");
+        g_free(final_html);
+        return g_string_free(doc, FALSE);
+    }
+
+    return NULL;
+}
+
+static gboolean on_window_close_request(GtkWindow *window, gpointer user_data) {
+    (void)user_data;
+    if (app_settings && app_settings->close_to_tray && app_settings->tray_icon_enabled) {
+        gtk_widget_set_visible(GTK_WIDGET(window), FALSE);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static void dbus_global_shortcut_activated(GDBusConnection *connection,
+                                           const gchar *sender_name,
+                                           const gchar *object_path,
+                                           const gchar *interface_name,
+                                           const gchar *signal_name,
+                                           GVariant *parameters,
+                                           gpointer user_data) {
+    (void)connection; (void)sender_name; (void)object_path; (void)interface_name; (void)signal_name; (void)parameters; (void)user_data;
+    toggle_window_visibility();
+}
+
+static void setup_global_shortcut(void) {
+    GDBusConnection *conn = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, NULL);
+    if (!conn) return;
+
+    g_dbus_connection_signal_subscribe(conn,
+                                       "org.freedesktop.portal.Desktop",
+                                       "org.freedesktop.portal.GlobalShortcuts",
+                                       "Activated",
+                                       "/org/freedesktop/portal/desktop",
+                                       NULL,
+                                       G_DBUS_SIGNAL_FLAGS_NONE,
+                                       dbus_global_shortcut_activated,
+                                       NULL,
+                                       NULL);
+    g_object_unref(conn);
+}
+
 static void on_activate(GtkApplication *app, gpointer user_data) {
     (void)user_data;
     AdwApplicationWindow *window = ADW_APPLICATION_WINDOW(adw_application_window_new(app));
     main_window = GTK_WINDOW(window);
     gtk_window_set_title(GTK_WINDOW(window), "Diction");
     gtk_window_set_default_size(GTK_WINDOW(window), 1000, 650);
+    g_signal_connect(window, "close-request", G_CALLBACK(on_window_close_request), NULL);
+
+    if (app_settings && app_settings->tray_icon_enabled) {
+        tray_icon_init(app, main_window, toggle_scan_from_tray, quit_from_tray);
+        tray_icon_set_scan_active(app_settings->scan_popup_enabled);
+    }
+    scan_popup_init(app, app_settings, scan_lookup_callback);
 
     GtkWidget *main_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     adw_application_window_set_content(ADW_APPLICATION_WINDOW(window), main_box);
@@ -4274,6 +4416,10 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     gtk_shortcut_controller_add_shortcut(shortcut_ctrl, gtk_shortcut_new(
         gtk_keyval_trigger_new(GDK_KEY_f, GDK_CONTROL_MASK),
         gtk_named_action_new("app.find")));
+
+    gtk_shortcut_controller_add_shortcut(shortcut_ctrl, gtk_shortcut_new(
+        gtk_keyval_trigger_new(GDK_KEY_d, GDK_CONTROL_MASK | GDK_ALT_MASK),
+        gtk_named_action_new("app.scan-clipboard")));
     
     gtk_shortcut_controller_add_shortcut(shortcut_ctrl, gtk_shortcut_new(
         gtk_keyval_trigger_new(GDK_KEY_Escape, 0),
@@ -4377,6 +4523,8 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     }
 }
 
+
+
 int main(int argc, char *argv[]) {
     // Disable compositing to fix rendering issues
     setenv("WEBKIT_DISABLE_COMPOSITING_MODE", "1", 1);
@@ -4447,7 +4595,15 @@ int main(int argc, char *argv[]) {
     g_action_map_add_action(G_ACTION_MAP(app), G_ACTION(about_action));
     g_object_unref(about_action);
 
+    GSimpleAction *scan_action = g_simple_action_new("scan-clipboard", NULL);
+    g_signal_connect(scan_action, "activate", G_CALLBACK(on_scan_clipboard_action), NULL);
+    g_action_map_add_action(G_ACTION_MAP(app), G_ACTION(scan_action));
+    g_object_unref(scan_action);
+
     g_signal_connect(app, "activate", G_CALLBACK(on_activate), NULL);
+
+    setup_global_shortcut();
+
 
     char *empty[] = { argv[0], NULL };
     int status = g_application_run(G_APPLICATION(app), 1, empty);
@@ -4457,6 +4613,8 @@ int main(int argc, char *argv[]) {
         settings_save(app_settings);
         settings_free(app_settings);
     }
+    scan_popup_destroy();
+    tray_icon_destroy();
     if (search_execute_source_id != 0) {
         g_source_remove(search_execute_source_id);
     }

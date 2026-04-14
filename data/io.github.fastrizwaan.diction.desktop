@@ -5,6 +5,9 @@ Exec=diction
 Icon=io.github.fastrizwaan.diction
 Terminal=false
 StartupNotify=true
+DBusActivatable=true
+X-GNOME-SingleWindow=true
+X-Flatpak-RenameFrom=io.github.fastrizwaan.diction.desktop;
 Categories=Utility;Education;Dictionary;
 
 # Generic Name (The "What is this?" field)

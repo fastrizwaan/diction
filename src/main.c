@@ -4478,8 +4478,13 @@ static void destroy_global_shortcut(void) {
 
 static void on_activate(GtkApplication *app, gpointer user_data) {
     (void)user_data;
+    if (main_window) {
+        gtk_window_present(main_window);
+        return;
+    }
     AdwApplicationWindow *window = ADW_APPLICATION_WINDOW(adw_application_window_new(app));
     main_window = GTK_WINDOW(window);
+    g_object_add_weak_pointer(G_OBJECT(window), (gpointer *)&main_window);
     gtk_window_set_title(GTK_WINDOW(window), "Diction");
     gtk_window_set_default_size(GTK_WINDOW(window), 1000, 650);
     g_signal_connect(window, "close-request", G_CALLBACK(on_window_close_request), NULL);

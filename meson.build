@@ -50,6 +50,12 @@ install_data(
   install_dir: join_paths(get_option('datadir'), 'applications')
 )
 
+# Install D-Bus service file
+install_data(
+  'data/io.github.fastrizwaan.diction.service',
+  install_dir: join_paths(get_option('datadir'), 'dbus-1', 'services')
+)
+
 # Install AppData/AppStream metadata
 install_data(
   'data/io.github.fastrizwaan.diction.metainfo.xml',

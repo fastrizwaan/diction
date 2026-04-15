@@ -1,0 +1,8 @@
+rpm-ostree install \
+  gcc meson ninja-build \
+  gtk4-devel libadwaita-devel \
+  webkitgtk6.0-devel webkit2gtk4.1-devel \
+  glib2-devel json-glib-devel \
+  zlib-devel libarchive-devel \
+  libzstd-devel xz-devel bzip2-devel \
+  flatpak-builder

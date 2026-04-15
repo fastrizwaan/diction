@@ -6,10 +6,9 @@
 #include "settings.h"
 
 /* Initialize scan popup monitoring.
- * `lookup_cb` is called with the selected word when a lookup should happen.
- * It should return newly-allocated HTML to display, or NULL. */
+ * `scan_word_cb` is called with the selected word when a lookup should happen. */
 void scan_popup_init(GtkApplication *app, AppSettings *settings,
-                     char* (*lookup_cb)(const char *word));
+                     void (*scan_word_cb)(const char *word));
 
 /* Tear down scan popup resources. */
 void scan_popup_destroy(void);

@@ -53,6 +53,7 @@ static GPtrArray *related_row_payloads = NULL;
 static WebKitUserContentManager *font_ucm = NULL;       /* shared across web views */
 static WebKitUserStyleSheet *font_user_stylesheet = NULL; /* current injected font CSS */
 static GtkWindow *main_window = NULL;
+static void app_show_window(void);
 static GtkWindow *startup_splash_window = NULL;
 static GtkLabel *startup_splash_status_label = NULL;
 static GtkLabel *startup_splash_count_label = NULL;
@@ -3470,7 +3471,7 @@ static void refresh_dictionaries_ui(void *user_data) {
     if (app_settings) {
         if (app_settings->tray_icon_enabled) {
             tray_icon_init(GTK_APPLICATION(g_application_get_default()), 
-                           main_window, toggle_scan_from_tray, quit_from_tray);
+                           main_window, app_show_window, toggle_scan_from_tray, quit_from_tray);
             tray_icon_set_scan_active(app_settings->scan_popup_enabled);
         } else {
             tray_icon_destroy();
@@ -4101,61 +4102,46 @@ static gboolean on_search_btn_drop(GtkDropTarget *target, const GValue *value, g
 
 
 
-static char* scan_lookup_callback(const char *word) {
-    if (!word || !*word) return NULL;
+static gboolean is_small_scan_mode = FALSE;
+static GtkWidget *zoom_to_restore_btn = NULL;
+
+static void app_show_window(void) {
+    if (!main_window) return;
+    is_small_scan_mode = FALSE;
+    if (zoom_to_restore_btn) {
+        gtk_widget_set_visible(zoom_to_restore_btn, FALSE);
+    }
+    gtk_window_set_default_size(GTK_WINDOW(main_window), 1000, 650);
+    gtk_window_present(main_window);
+}
+
+static void on_zoom_to_restore_clicked(GtkButton *btn, gpointer user_data) {
+    (void)btn; (void)user_data;
+    app_show_window();
+}
+
+static void scan_word_callback(const char *word) {
+    if (!word || !*word || !main_window || !search_entry) return;
     
-    char *lower_word = g_utf8_strdown(word, -1);
-    char *clean = g_strstrip(lower_word);
-    if (!clean || !*clean) {
-        g_free(lower_word);
-        return NULL;
+    is_small_scan_mode = TRUE;
+    
+    if (gtk_window_is_maximized(main_window)) {
+        gtk_window_unmaximize(main_window);
     }
-
-    GString *entries_html = g_string_new("");
-    char *query_key = g_utf8_casefold(clean, -1);
-    int found_count = 0;
-    int idx = 0;
-    for (DictEntry *e = all_dicts; e; e = e->next, idx++) {
-        if (!e->dict || !e->dict->index) continue;
-        
-        size_t pos = flat_index_search(e->dict->index, clean);
-        int dict_header_shown = 0;
-
-        while (pos != (size_t)-1) {
-            const FlatTreeEntry *res = flat_index_get(e->dict->index, pos);
-            if (!res) break;
-
-            char *raw_word = g_strndup(e->dict->data + res->h_off, res->h_len);
-            gboolean matches = headword_matches_normalized_query(raw_word, query_key);
-            g_free(raw_word);
-
-            if (!matches) {
-                break;
-            }
-
-            append_rendered_entry_html(entries_html, e, res, idx, &dict_header_shown, &found_count);
-
-            pos++;
-            if (pos >= flat_index_count(e->dict->index)) break;
-        }
+    
+    gtk_window_set_default_size(GTK_WINDOW(main_window), 400, 500);
+    
+    if (zoom_to_restore_btn) {
+        gtk_widget_set_visible(zoom_to_restore_btn, TRUE);
     }
-
-    g_free(query_key);
-    g_free(lower_word);
-
-    if (found_count > 0) {
-        char *final_html = g_string_free(entries_html, FALSE);
-        GString *doc = g_string_new("");
-        g_string_append_printf(doc, "<html><head><meta charset='utf-8'><style>body { font-size: %dpx; background: transparent; color: inherit; }</style></head><body>", 
-            (app_settings && app_settings->font_size > 0) ? app_settings->font_size : 16);
-        g_string_append(doc, final_html);
-        g_string_append(doc, "</body></html>");
-        g_free(final_html);
-        return g_string_free(doc, FALSE);
+    
+    gtk_window_present(main_window);
+    
+    gtk_editable_set_text(GTK_EDITABLE(search_entry), word);
+    if (search_stack) {
+        gtk_stack_set_visible_child_name(search_stack, "entry");
     }
-
-    g_string_free(entries_html, TRUE);
-    return NULL;
+    gtk_widget_grab_focus(GTK_WIDGET(search_entry));
 }
 
 static gboolean on_window_close_request(GtkWindow *window, gpointer user_data) {
@@ -4479,7 +4465,7 @@ static void destroy_global_shortcut(void) {
 static void on_activate(GtkApplication *app, gpointer user_data) {
     (void)user_data;
     if (main_window) {
-        gtk_window_present(main_window);
+        app_show_window();
         return;
     }
     AdwApplicationWindow *window = ADW_APPLICATION_WINDOW(adw_application_window_new(app));
@@ -4490,10 +4476,10 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     g_signal_connect(window, "close-request", G_CALLBACK(on_window_close_request), NULL);
 
     if (app_settings && app_settings->tray_icon_enabled) {
-        tray_icon_init(app, main_window, toggle_scan_from_tray, quit_from_tray);
+        tray_icon_init(app, main_window, app_show_window, toggle_scan_from_tray, quit_from_tray);
         tray_icon_set_scan_active(app_settings->scan_popup_enabled);
     }
-    scan_popup_init(app, app_settings, scan_lookup_callback);
+    scan_popup_init(app, app_settings, scan_word_callback);
 
     GtkWidget *main_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     adw_application_window_set_content(ADW_APPLICATION_WINDOW(window), main_box);
@@ -4728,6 +4714,12 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
 
     adw_header_bar_set_title_widget(ADW_HEADER_BAR(content_header), search_box);
 
+    zoom_to_restore_btn = gtk_button_new_from_icon_name("window-maximize-symbolic");
+    gtk_widget_add_css_class(zoom_to_restore_btn, "flat");
+    gtk_widget_set_tooltip_text(zoom_to_restore_btn, "Restore normal size");
+    g_signal_connect(zoom_to_restore_btn, "clicked", G_CALLBACK(on_zoom_to_restore_clicked), NULL);
+    gtk_widget_set_visible(zoom_to_restore_btn, FALSE);
+    adw_header_bar_pack_end(ADW_HEADER_BAR(content_header), zoom_to_restore_btn);
 
     GtkWidget *content_settings_btn = gtk_menu_button_new();
     gtk_menu_button_set_icon_name(GTK_MENU_BUTTON(content_settings_btn), "open-menu-symbolic");

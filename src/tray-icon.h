@@ -8,6 +8,7 @@
  * `toggle_scan_cb` is called from the "Enable Scan Popup" menu item.
  * `quit_cb` is called from the "Quit" menu item. */
 void tray_icon_init(GtkApplication *app, GtkWindow *main_window,
+                    void (*show_app_cb)(void),
                     void (*toggle_scan_cb)(void),
                     void (*quit_cb)(void));
 

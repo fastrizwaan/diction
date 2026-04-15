@@ -8,6 +8,7 @@ static guint sni_legacy_id = 0;
 static guint dbusmenu_id = 0;
 static GtkApplication *app_ref = NULL;
 static GtkWindow *main_win_ref = NULL;
+static void (*show_app_callback)(void) = NULL;
 static void (*scan_toggle_cb)(void) = NULL;
 static void (*quit_app_cb)(void) = NULL;
 static gboolean current_scan_active = FALSE;
@@ -201,7 +202,8 @@ static void dbusmenu_handle_method(GDBusConnection *connection,
                     if (gtk_widget_get_visible(GTK_WIDGET(main_win_ref))) {
                         gtk_widget_set_visible(GTK_WIDGET(main_win_ref), FALSE);
                     } else {
-                        gtk_window_present(main_win_ref);
+                        if (show_app_callback) show_app_callback();
+                        else gtk_window_present(main_win_ref);
                     }
                 }
             } else if (id == 2) {
@@ -259,7 +261,8 @@ static void sni_handle_method(GDBusConnection *connection,
             if (gtk_widget_get_visible(GTK_WIDGET(main_win_ref))) {
                 gtk_widget_set_visible(GTK_WIDGET(main_win_ref), FALSE);
             } else {
-                gtk_window_present(main_win_ref);
+                if (show_app_callback) show_app_callback();
+                else gtk_window_present(main_win_ref);
             }
         }
         g_dbus_method_invocation_return_value(invocation, NULL);
@@ -403,12 +406,14 @@ static void on_bus_acquired(GDBusConnection *connection, const gchar *name, gpoi
 
 
 void tray_icon_init(GtkApplication *app, GtkWindow *main_window,
+                    void (*show_app_cb)(void),
                     void (*toggle_scan_cb)(void),
                     void (*quit_cb)(void)) {
     if (dbus_conn != NULL) return; // already init
 
     app_ref = app;
     main_win_ref = main_window;
+    show_app_callback = show_app_cb;
     scan_toggle_cb = toggle_scan_cb;
     quit_app_cb = quit_cb;
 
@@ -449,6 +454,7 @@ void tray_icon_destroy(void) {
     dbusmenu_id = 0;
     app_ref = NULL;
     main_win_ref = NULL;
+    show_app_callback = NULL;
     scan_toggle_cb = NULL;
     quit_app_cb = NULL;
     g_clear_pointer(&owned_bus_name, g_free);

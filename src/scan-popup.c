@@ -4,9 +4,8 @@
 #include <string.h>
 #include <ctype.h>
 
-static GtkApplication *app_ref = NULL;
 static AppSettings *settings_ref = NULL;
-static char* (*lookup_callback)(const char *word) = NULL;
+static void (*scan_word_callback)(const char *word) = NULL;
 
 static gboolean scan_enabled = FALSE;
 static GdkClipboard *primary_clipboard = NULL;
@@ -14,9 +13,6 @@ static GdkClipboard *regular_clipboard = NULL;
 static char *last_primary_text = NULL;
 static char *last_clipboard_text = NULL;
 static guint poll_source_id = 0;
-static GtkWindow *popup_window = NULL;
-static WebKitWebView *popup_webview = NULL;
-static guint hide_timeout_id = 0;
 
 typedef enum {
     SCAN_READ_AUTO_PRIMARY = 0,
@@ -39,48 +35,8 @@ static char *trim_whitespace(char *str) {
     return str;
 }
 
-static gboolean hide_popup_cb(gpointer user_data) {
-    (void)user_data;
-    if (popup_window) {
-        gtk_window_close(popup_window);
-        popup_window = NULL;
-    }
-    hide_timeout_id = 0;
-    return G_SOURCE_REMOVE;
-}
-
-static void ensure_popup_window(void) {
-    if (popup_window) return;
-
-    popup_window = GTK_WINDOW(gtk_window_new());
-    gtk_window_set_decorated(popup_window, FALSE);
-    gtk_window_set_deletable(popup_window, FALSE);
-    gtk_window_set_focus_visible(popup_window, FALSE);
-    gtk_window_set_default_size(popup_window, 400, 300);
-    gtk_widget_add_css_class(GTK_WIDGET(popup_window), "osd");
-    
-    // Minimal WebKit setup
-    popup_webview = WEBKIT_WEB_VIEW(webkit_web_view_new());
-    WebKitSettings *ws = webkit_web_view_get_settings(popup_webview);
-    if (settings_ref) {
-        if (settings_ref->font_family)
-            webkit_settings_set_default_font_family(ws, settings_ref->font_family);
-        if (settings_ref->font_size > 0)
-            webkit_settings_set_default_font_size(ws, settings_ref->font_size);
-    }
-    
-    GtkWidget *scroll = gtk_scrolled_window_new();
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), GTK_WIDGET(popup_webview));
-    gtk_window_set_child(popup_window, scroll);
-    
-    // Dismiss when focus lost
-    GtkEventController *focus = gtk_event_controller_focus_new();
-    g_signal_connect_swapped(focus, "leave", G_CALLBACK(hide_popup_cb), NULL);
-    gtk_widget_add_controller(GTK_WIDGET(popup_window), focus);
-}
-
 static gboolean scan_popup_try_show_for_word(const char *word) {
-    if (!word || !*word || !lookup_callback) return FALSE;
+    if (!word || !*word || !scan_word_callback) return FALSE;
 
     char *word_copy = g_strdup(word);
     char *clean_word = trim_whitespace(word_copy);
@@ -89,36 +45,9 @@ static gboolean scan_popup_try_show_for_word(const char *word) {
         return FALSE;
     }
 
-    char *html = lookup_callback(clean_word);
+    scan_word_callback(clean_word);
     g_free(word_copy);
 
-    if (!html) return FALSE;
-
-    ensure_popup_window();
-
-    webkit_web_view_load_html(popup_webview, html, "file:///");
-    g_free(html);
-
-    // Position window near cursor via GdkDisplay
-    GdkDisplay *display = gdk_display_get_default();
-    GdkSeat *seat = gdk_display_get_default_seat(display);
-    if (seat) {
-        GdkDevice *pointer = gdk_seat_get_pointer(seat);
-        if (pointer) {
-            double x, y;
-            gdk_device_get_surface_at_position(pointer, &x, &y);
-            // On Wayland, absolute positioning is restricted, but this works on X11 
-            // or when using popovers. For a top-level window, it might appear in center on Wayland.
-            // A more complex Wayland-specific layer-shell or xdg-popup would be needed for true absolute.
-            // For now, this is best effort without wayland-specific protocols.
-            // We just present it.
-        }
-    }
-
-    gtk_window_present(popup_window);
-
-    if (hide_timeout_id != 0) g_source_remove(hide_timeout_id);
-    hide_timeout_id = g_timeout_add(10000, hide_popup_cb, NULL); // Auto dismiss after 10s
     return TRUE;
 }
 
@@ -184,7 +113,7 @@ static gboolean scan_source_enabled(ScanReadMode mode) {
 }
 
 static void read_clipboard_auto(GdkClipboard *clipboard, ScanReadMode mode) {
-    if (clipboard && lookup_callback && scan_source_enabled(mode) && scan_modifier_satisfied()) {
+    if (clipboard && scan_word_callback && scan_source_enabled(mode) && scan_modifier_satisfied()) {
         gdk_clipboard_read_text_async(clipboard, NULL,
                                       on_clipboard_read,
                                       GINT_TO_POINTER(mode));
@@ -192,7 +121,7 @@ static void read_clipboard_auto(GdkClipboard *clipboard, ScanReadMode mode) {
 }
 
 static void read_regular_clipboard_manual(void) {
-    if (regular_clipboard && lookup_callback) {
+    if (regular_clipboard && scan_word_callback) {
         gdk_clipboard_read_text_async(regular_clipboard, NULL,
                                       on_clipboard_read, GINT_TO_POINTER(SCAN_READ_MANUAL_CLIPBOARD));
     }
@@ -257,10 +186,10 @@ static void on_regular_clipboard_changed(GdkClipboard *clipboard, gpointer user_
 }
 
 void scan_popup_init(GtkApplication *app, AppSettings *settings,
-                     char* (*lookup_cb)(const char *word)) {
-    app_ref = app;
+                     void (*scan_word_cb)(const char *word)) {
+    (void)app;
     settings_ref = settings;
-    lookup_callback = lookup_cb;
+    scan_word_callback = scan_word_cb;
     scan_enabled = settings ? settings->scan_popup_enabled : FALSE;
 
     GdkDisplay *display = gdk_display_get_default();
@@ -288,14 +217,6 @@ void scan_popup_destroy(void) {
         g_source_remove(poll_source_id);
         poll_source_id = 0;
     }
-    if (hide_timeout_id != 0) {
-        g_source_remove(hide_timeout_id);
-        hide_timeout_id = 0;
-    }
-    if (popup_window) {
-        gtk_window_destroy(popup_window);
-        popup_window = NULL;
-    }
     if (primary_clipboard) {
         g_signal_handlers_disconnect_by_func(primary_clipboard, on_primary_clipboard_changed, NULL);
     }
@@ -308,8 +229,7 @@ void scan_popup_destroy(void) {
     last_clipboard_text = NULL;
     primary_clipboard = NULL;
     regular_clipboard = NULL;
-    lookup_callback = NULL;
-    app_ref = NULL;
+    scan_word_callback = NULL;
     settings_ref = NULL;
 }
 
@@ -322,7 +242,7 @@ gboolean scan_popup_is_enabled(void) {
 }
 
 void scan_popup_trigger_manual(void) {
-    if (primary_clipboard && lookup_callback) {
+    if (primary_clipboard && scan_word_callback) {
         gdk_clipboard_read_text_async(primary_clipboard, NULL,
                                       on_clipboard_read,
                                       GINT_TO_POINTER(SCAN_READ_MANUAL_PRIMARY));

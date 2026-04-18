@@ -181,14 +181,14 @@ static size_t parse_dsl_into_entries(DictMmap *dict, TreeEntry **out_entries, si
                     dict->name = strndup(val_start, (size_t)(val_end - val_start));
                     printf("[DSL] Found dictionary name: %s\n", dict->name);
                 }
-            } else if (len > 17 && strncasecmp(line_start, "#SOURCE_LANGUAGE", 16) == 0) {
-                const char *val_start = line_start + 16;
+            } else if (len > 16 && strncasecmp(line_start, "#INDEX_LANGUAGE", 15) == 0) {
+                const char *val_start = line_start + 15;
                 while (val_start < line_start + len && (*val_start == ' ' || *val_start == '\t' || *val_start == '\"')) val_start++;
                 const char *val_end = line_start + len;
                 while (val_end > val_start && (*(val_end - 1) == '\r' || *(val_end - 1) == '\"' || *(val_end - 1) == ' ' || *(val_end - 1) == '\t')) val_end--;
                 if (val_end > val_start && !dict->source_lang) dict->source_lang = strndup(val_start, (size_t)(val_end - val_start));
-            } else if (len > 17 && strncasecmp(line_start, "#TARGET_LANGUAGE", 16) == 0) {
-                const char *val_start = line_start + 16;
+            } else if (len > 19 && strncasecmp(line_start, "#CONTENTS_LANGUAGE", 18) == 0) {
+                const char *val_start = line_start + 18;
                 while (val_start < line_start + len && (*val_start == ' ' || *val_start == '\t' || *val_start == '\"')) val_start++;
                 const char *val_end = line_start + len;
                 while (val_end > val_start && (*(val_end - 1) == '\r' || *(val_end - 1) == '\"' || *(val_end - 1) == ' ' || *(val_end - 1) == '\t')) val_end--;

@@ -12,13 +12,13 @@ const char* dict_cache_base_dir(void) {
 
 char* dict_cache_dir_path(void) {
     const char *base = dict_cache_base_dir();
-    return g_build_filename(base, "diction", "dicts", NULL);
+    return g_build_filename(base, "diction", "dicts-v4", NULL);
 }
 
 char* dict_cache_path_for(const char *original_path) {
     char *hash = g_compute_checksum_for_string(G_CHECKSUM_SHA1, original_path, -1);
     const char *base = dict_cache_base_dir();
-    char *path = g_build_filename(base, "diction", "dicts", hash, NULL);
+    char *path = g_build_filename(base, "diction", "dicts-v4", hash, NULL);
     g_free(hash);
     return path;
 }

@@ -734,6 +734,15 @@ static char *normalize_headword_for_search(const char *value, gboolean unescape_
             p += 3;
             continue;
         }
+
+        /* Strip stress accent tags for search */
+        if (g_str_has_prefix(p, "{[']}")) { p += 5; continue; }
+        if (g_str_has_prefix(p, "{[/']}")) { p += 6; continue; }
+        if (g_str_has_prefix(p, "[']")) { p += 3; continue; }
+        if (g_str_has_prefix(p, "[/']")) { p += 4; continue; }
+
+        /* Strip actual Unicode combining acute accent (U+0301) for search */
+        if (g_str_has_prefix(p, "\xCC\x81")) { p += 2; continue; }
         
         /* Preserve bare braces unless they are part of a backslash escape */
         if (*p == '{' || *p == '}') {
@@ -1517,15 +1526,20 @@ static gboolean continue_sidebar_search(gpointer user_data) {
                 if (!g_hash_table_contains(state->seen_words, word_key)) {
                     RelatedRowPayload *payload = g_new0(RelatedRowPayload, 1);
                     payload->type = RELATED_ROW_CANDIDATE;
-                    payload->word = clean_word; // Steal pointer
+                    
+                    /* Use rendering normalization for display in sidebar */
+                    char *display_word = normalize_headword_for_render(word, node->h_len, TRUE);
+                    payload->word = display_word; 
+                    
                     payload->fuzzy_score = fuzzy_score;
                     g_hash_table_add(state->seen_words, g_strdup(word_key));
                 
                 int b = (int)bucket;
                 if (b >= 0 && b < BUCKET_COUNT) {
-                    g_ptr_array_add(state->global_bucket_labels[b], clean_word); // Uses the same stolen string pointer
+                    g_ptr_array_add(state->global_bucket_labels[b], display_word); 
                     g_ptr_array_add(state->global_bucket_payloads[b], payload);
                     clean_word = NULL;
+                    display_word = NULL;
 
                     // 🔥 PROGRESSIVE FLUSH (per bucket)
                     if ((state->global_bucket_labels[b]->len & 31) == 0) {
@@ -2937,6 +2951,8 @@ static void append_rendered_word_html_impl(const char *raw_word, gboolean push_h
         return;
     }
 
+    char *display_title = normalize_headword_for_render(raw_word, raw_word ? strlen(raw_word) : 0, TRUE);
+
     GString *html_res = g_string_new("");
     int found_count = 0;
     char *query_key = g_utf8_casefold(query, -1);
@@ -2974,7 +2990,7 @@ static void append_rendered_word_html_impl(const char *raw_word, gboolean push_h
         if (tab_view) {
             AdwTabPage *page = adw_tab_view_get_selected_page(tab_view);
             if (page) {
-                adw_tab_page_set_title(page, query);
+                adw_tab_page_set_title(page, display_title);
                 g_object_set_data_full(G_OBJECT(page), "search-query", g_strdup(query), g_free);
                 g_object_set_data(G_OBJECT(page), "is-firm", GINT_TO_POINTER(1));
             }
@@ -3023,6 +3039,7 @@ static void append_rendered_word_html_impl(const char *raw_word, gboolean push_h
         g_free(b64_html);
     }
     
+    g_free(display_title);
     g_free(query_key);
     g_free(query);
     g_string_free(html_res, TRUE);
@@ -3051,17 +3068,21 @@ static void on_search_changed(GtkSearchEntry *entry, gpointer user_data) {
     
     // Automatically update the title of the present tab to match what we progressively type
     const char *query = gtk_editable_get_text(GTK_EDITABLE(entry));
+    char *display_query = normalize_headword_for_render(query, query ? strlen(query) : 0, TRUE);
+
     if (tab_view) {
         AdwTabPage *page = adw_tab_view_get_selected_page(tab_view);
         if (page) {
-            adw_tab_page_set_title(page, (query && *query) ? query : "Home");
+            adw_tab_page_set_title(page, (display_query && *display_query) ? display_query : "Home");
             g_object_set_data_full(G_OBJECT(page), "search-query", g_strdup(query), g_free);
         }
     }
 
     if (search_button_label) {
-        gtk_label_set_text(GTK_LABEL(search_button_label), (query && *query) ? query : "Search");
+        gtk_label_set_text(GTK_LABEL(search_button_label), (display_query && *display_query) ? display_query : "Search");
     }
+    
+    g_free(display_query);
 
     if (last_search_query && strcmp(query, last_search_query) == 0) return;
 
@@ -3130,10 +3151,12 @@ static void on_random_clicked(GtkButton *btn, gpointer user_data) {
             fprintf(stderr, "[Random word]: '%s'\n", clean_hw ? clean_hw : tmp_hw);
             
             g_signal_handlers_block_by_func(search_entry, on_search_changed, NULL);
-            gtk_editable_set_text(GTK_EDITABLE(search_entry), clean_hw ? clean_hw : tmp_hw);
+            char *rendered_hw = normalize_headword_for_render(tmp_hw, tmp_hw ? strlen(tmp_hw) : 0, TRUE);
+            gtk_editable_set_text(GTK_EDITABLE(search_entry), rendered_hw);
             if (search_button_label) {
-                gtk_label_set_text(GTK_LABEL(search_button_label), (clean_hw && *clean_hw) ? clean_hw : tmp_hw);
+                gtk_label_set_text(GTK_LABEL(search_button_label), rendered_hw);
             }
+            g_free(rendered_hw);
             g_signal_handlers_unblock_by_func(search_entry, on_search_changed, NULL);
 
             g_free(tmp_hw);
@@ -4753,8 +4776,10 @@ static void on_tab_selected(AdwTabView *view, GParamSpec *pspec, gpointer user_d
         
         g_signal_handlers_block_by_func(search_entry, on_search_changed, NULL);
         if (query) {
-            gtk_editable_set_text(GTK_EDITABLE(search_entry), query);
-            if (search_button_label) gtk_label_set_text(GTK_LABEL(search_button_label), query);
+            char *display_query = normalize_headword_for_render(query, strlen(query), TRUE);
+            gtk_editable_set_text(GTK_EDITABLE(search_entry), display_query);
+            if (search_button_label) gtk_label_set_text(GTK_LABEL(search_button_label), display_query);
+            g_free(display_query);
         } else {
             gtk_editable_set_text(GTK_EDITABLE(search_entry), "");
             if (search_button_label) gtk_label_set_text(GTK_LABEL(search_button_label), "Search");

@@ -537,7 +537,7 @@ static void buf_append_escaped_html(StrBuf *b, const char *s, size_t n) {
     }
 }
 
-static char *normalize_headword_for_render(const char *text, size_t length, gboolean keep_middle_dot) {
+char *normalize_headword_for_render(const char *text, size_t length, gboolean keep_middle_dot) {
     if (!text) {
         return g_strdup("");
     }
@@ -569,6 +569,20 @@ static char *normalize_headword_for_render(const char *text, size_t length, gboo
                 g_string_append(out, "·");
             }
             p += strlen("·");
+            continue;
+        }
+
+        /* Stress accent tags */
+        if (g_str_has_prefix(p, "{[']}") || g_str_has_prefix(p, "[']")) {
+            /* start accent - skip */
+            p += (p[0] == '{') ? 5 : 3;
+            continue;
+        }
+
+        if (g_str_has_prefix(p, "{[/']}") || g_str_has_prefix(p, "[/']")) {
+            /* end accent - replace with combining acute accent U+0301 */
+            g_string_append(out, "\xCC\x81");
+            p += (p[0] == '{') ? 6 : 4;
             continue;
         }
 
@@ -623,7 +637,11 @@ static gboolean looks_like_tagged_plain_markup(const char *text, size_t length) 
         "[trn]",
         "[/trn]",
         "[ref]",
-        "[/ref]"
+        "[/ref]",
+        "[']",
+        "[/']",
+        "{[']}",
+        "{[/']}"
     };
 
     for (guint i = 0; i < G_N_ELEMENTS(patterns); i++) {
@@ -655,6 +673,18 @@ static char *normalize_tagged_plain_markup(const char *text, size_t length, size
             continue;
         }
 
+        if (text[i] == '{') {
+            if (g_str_has_prefix(text + i, "{[']}")) {
+                i += 5;
+                continue;
+            }
+            if (g_str_has_prefix(text + i, "{[/']}")) {
+                g_string_append(out, "\xCC\x81");
+                i += 6;
+                continue;
+            }
+        }
+        
         if (text[i] == '[') {
             size_t end = i + 1;
             while (end < length && text[end] != ']') {
@@ -664,6 +694,18 @@ static char *normalize_tagged_plain_markup(const char *text, size_t length, size
             if (end < length) {
                 size_t tag_len = end - i - 1;
                 const char *tag = text + i + 1;
+
+                if (tag_len == 1 && tag[0] == '\'') {
+                    /* Stress start tag ['] - skip */
+                    i = end + 1;
+                    continue;
+                }
+                if (tag_len == 2 && tag[0] == '/' && tag[1] == '\'') {
+                    /* Stress end tag [/'] - append accent */
+                    g_string_append(out, "\xCC\x81");
+                    i = end + 1;
+                    continue;
+                }
 
                 if ((tag_len == 1 && tag[0] == 'c') ||
                     (tag_len == 2 && tag[0] == '/' && tag[1] == 'c') ||
@@ -2241,6 +2283,19 @@ char* dsl_render_to_html(const char *dsl_text,
             }
         }
         
+        /* Stress accent tags in curly braces */
+        if (dsl_text[i] == '{') {
+            if (g_str_has_prefix(dsl_text + i, "{[']}")) {
+                i += 5;
+                continue;
+            }
+            if (g_str_has_prefix(dsl_text + i, "{[/']}")) {
+                buf_append_str(&b, "\xCC\x81");
+                i += 6;
+                continue;
+            }
+        }
+        
         if (in_media) {
             if (dsl_text[i] == '[' && i + 3 < length &&
                 dsl_text[i + 1] == '/' && dsl_text[i + 2] == 's' && dsl_text[i + 3] == ']') {
@@ -2304,7 +2359,19 @@ char* dsl_render_to_html(const char *dsl_text,
              }
 
              if (tag_found) {
-                 
+                  /* Stress accent tags */
+                  if (tag_len == 1 && tag[0] == '\'') {
+                      /* start accent - skip */
+                      i = end + 1;
+                      continue;
+                  }
+                  if (tag_len == 2 && tag[0] == '/' && tag[1] == '\'') {
+                      /* end accent - replace with combining acute accent U+0301 */
+                      buf_append_str(&b, "\xCC\x81");
+                      i = end + 1;
+                      continue;
+                  }
+
                  // Handle color tags like [c darkblue]
                  if (tag_len > 2 && tag[0] == 'c' && tag[1] == ' ') {
                      if (!in_media) {

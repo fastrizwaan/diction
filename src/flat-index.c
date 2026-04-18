@@ -10,7 +10,8 @@
 
 static bool is_dsl_ignored(char c) {
     return g_ascii_isspace(c) || 
-           c == '{' || c == '}' || c == '\\' || c == '~';
+           c == '{' || c == '}' || c == '\\' || c == '~' ||
+           c == '[' || c == ']' || c == '\'' || c == '/';
 }
 
 static int compare_dsl_agnostic(const char *raw, size_t raw_len, const char *clean, size_t clean_len) {

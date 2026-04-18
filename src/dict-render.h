@@ -24,6 +24,8 @@ char* dsl_render_to_html(const char *dsl_text,
                          const char *font_family,
                          int font_size);
 
+char *normalize_headword_for_render(const char *text, size_t length, gboolean keep_middle_dot);
+
 typedef struct {
     const char *bg;
     const char *fg;

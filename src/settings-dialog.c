@@ -1826,7 +1826,7 @@ GtkWidget* settings_dialog_new(GtkWindow *parent, AppSettings *settings,
 
     GtkWidget *shortcut_row = adw_action_row_new();
     adw_preferences_row_set_title(ADW_PREFERENCES_ROW(shortcut_row), "Scan Selected Text");
-    adw_action_row_set_subtitle(ADW_ACTION_ROW(shortcut_row), "Ctrl+Alt+D, requires XDG Desktop Portal");
+    adw_action_row_set_subtitle(ADW_ACTION_ROW(shortcut_row), "Super+Alt+L, requires XDG Desktop Portal");
     
     AdwButtonRow *shortcut_btn_row = ADW_BUTTON_ROW(adw_button_row_new());
     adw_preferences_row_set_title(ADW_PREFERENCES_ROW(shortcut_btn_row), "Configure Global Shortcut");

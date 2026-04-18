@@ -10,7 +10,7 @@ X-GNOME-SingleWindow=true
 X-Flatpak-RenameFrom=io.github.fastrizwaan.diction.desktop;
 Categories=Utility;Education;Dictionary;
 
-# Generic Name (The "What is this?" field)
+# Generic Name
 GenericName=Dictionary
 GenericName[ru]=Словарь
 GenericName[zh_CN]=词典
@@ -24,30 +24,30 @@ GenericName[pt]=Dicionário
 GenericName[bn]=অভিধান
 GenericName[ja]=辞書
 
-# Comments (The description/tooltip)
-Comment=Lookup words and explore definitions across multiple dictionary formats
-Comment[ru]=Поиск слов и определений в словарях различных форматов
-Comment[zh_CN]=在多种格式的词库中查询单词与释义
-Comment[es]=Busca palabras y explora definiciones en múltiples formatos de diccionario
-Comment[nl]=Woorden opzoeken en definities ontdekken in verschillende woordenboekformaten
-Comment[fr]=Rechercher des mots et explorer des définitions dans plusieurs formats de dictionnaires
-Comment[de]=Wörter nachschlagen und Definitionen in verschiedenen Wörterbuchformaten durchsuchen
-Comment[hi]=विभिन्न शब्दकोश प्रारूपों में शब्दों को खोजें और परिभाषाओं का पता लगाएं
-Comment[ar]=ابحث عن الكلمات واستكشف التعريفات عبر تنسيقات قواميس متعددة
-Comment[pt]=Pesquisar palavras e explorar definições em vários formatos de dicionário
-Comment[bn]=বিভিন্ন অভিধান ফরম্যাটে শব্দ অনুসন্ধান এবং সংজ্ঞা অন্বেষণ করুন
-Comment[ja]=複数の辞書形式で単語を検索し、定義を探索します
+# Comment
+Comment=A high-performance, multi-format offline dictionary
+Comment[ru]=Высокопроизводительный офлайн-словарь с поддержкой множества форматов
+Comment[zh_CN]=一款高性能的离线词典，支持多种词典格式
+Comment[es]=Un diccionario sin conexión de alto rendimiento con soporte para múltiples formatos
+Comment[nl]=Een krachtige offline woordenboekapp met ondersteuning voor meerdere formaten
+Comment[fr]=Un dictionnaire hors ligne performant prenant en charge plusieurs formats
+Comment[de]=Ein leistungsstarkes Offline-Wörterbuch mit Unterstützung für mehrere Formate
+Comment[hi]=एक उच्च-प्रदर्शन ऑफलाइन शब्दकोश जो कई प्रारूपों का समर्थन करता है
+Comment[ar]=قاموس غير متصل عالي الأداء يدعم تنسيقات متعددة
+Comment[pt]=Um dicionário offline de alto desempenho com suporte a vários formatos
+Comment[bn]=একটি উচ্চ-দক্ষ অফলাইন অভিধান যা একাধিক ফরম্যাট সমর্থন করে
+Comment[ja]=複数の辞書形式に対応した高性能なオフライン辞書
 
-# Keywords (Search terms for the app menu)
-Keywords=dictionary;thesaurus;lexicon;wordbook;meaning;synonym;goldendict;mdict;lingoes;freemdict;stardict;bluedict;wordnet;dict;
-Keywords[ru]=dict;dictionary;словарь;тезаурус;лексикон;значение;синоним;
-Keywords[zh_CN]=dict;dictionary;字典;词典;同义词;词库;查询;
-Keywords[es]=dict;dictionary;diccionario;tesauro;léxico;significado;sinónimo;
-Keywords[nl]=dict;dictionary;woordenboek;thesaurus;lexicon;betekenis;synoniem;
-Keywords[fr]=dict;dictionary;dictionnaire;thésaurus;lexique;sens;synonyme;
-Keywords[de]=dict;dictionary;wörterbuch;thesaurus;lexikon;bedeutung;synonym;
-Keywords[hi]=dict;dictionary;शब्दकोश;थिसॉरस;शब्दावली;अर्थ;पर्यायवाची;
-Keywords[ar]=dict;dictionary;قاموس;مفردات;معجم;معنى;مرادف;
-Keywords[pt]=dict;dictionary;dicionário;tesauro;léxico;significado;sinônimo;
-Keywords[bn]=dict;dictionary;অভিধান;থিসরাস;শব্দকোষ;অর্থ;প্রতিশব্দ;
-Keywords[ja]=dict;dictionary;辞書;辞典;類語辞典;語彙;意味;類義語;
+# Keywords
+Keywords=dictionary;thesaurus;synonym;definition;lookup;wordnet;stardict;mdict;
+Keywords[ru]=словарь;тезаурус;синоним;определение;поиск;stardict;mdict;
+Keywords[zh_CN]=词典;字典;同义词;定义;查询;stardict;mdict;
+Keywords[es]=diccionario;tesauro;sinónimo;definición;buscar;stardict;mdict;
+Keywords[nl]=woordenboek;thesaurus;synoniem;definitie;zoeken;stardict;mdict;
+Keywords[fr]=dictionnaire;thésaurus;synonyme;définition;recherche;stardict;mdict;
+Keywords[de]=wörterbuch;thesaurus;synonym;definition;suche;stardict;mdict;
+Keywords[hi]=शब्दकोश;अर्थ;परिभाषा;समानार्थी;खोज;stardict;mdict;
+Keywords[ar]=قاموس;مرادف;تعريف;بحث;stardict;mdict;
+Keywords[pt]=dicionário;sinônimo;definição;pesquisa;tesauro;stardict;mdict;
+Keywords[bn]=অভিধান;অর্থ;সংজ্ঞা;সমার্থক;অনুসন্ধান;stardict;mdict;
+Keywords[ja]=辞書;類語;定義;検索;stardict;mdict;

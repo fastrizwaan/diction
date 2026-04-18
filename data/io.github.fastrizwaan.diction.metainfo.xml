@@ -4,9 +4,16 @@
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-or-later</project_license>
   <name>Diction</name>
-  <summary>A fast and lightweight dictionary application</summary>
+  <summary>A high-performance, multi-format offline dictionary</summary>
   <description>
-    <p>Diction is a fast dictionary reader with a clean UI written in C and GTK4.</p>
+    <p>Look up words across all your installed dictionaries simultaneously and compare results in a clean interface.</p>
+    <p>It lets you search across multiple dictionary sources at once, with a tabbed layout that makes comparing definitions simple and efficient.</p>
+    <ul>
+      <li>Simultaneous search across multiple dictionaries</li>
+      <li>Support for StarDict, MDict, and other formats</li>
+      <li>Clean, responsive GTK4 interface</li>
+      <li>Works fully offline</li>
+    </ul>
   </description>
   <launchable type="desktop-id">io.github.fastrizwaan.diction.desktop</launchable>
 </component>

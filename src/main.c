@@ -3620,6 +3620,7 @@ static void show_about_dialog(GSimpleAction *action, GVariant *parameter, gpoint
         const char *developers[] = { "Diction Contributors", NULL };
         AdwDialog *dialog = adw_about_dialog_new();
         adw_about_dialog_set_application_name(ADW_ABOUT_DIALOG(dialog), "Diction");
+        adw_about_dialog_set_comments(ADW_ABOUT_DIALOG(dialog), "A high-performance, multi-format offline dictionary.");
         adw_about_dialog_set_version(ADW_ABOUT_DIALOG(dialog), "0.1.0");
         adw_about_dialog_set_developer_name(ADW_ABOUT_DIALOG(dialog), "Diction Contributors");
         adw_about_dialog_set_developers(ADW_ABOUT_DIALOG(dialog), developers);

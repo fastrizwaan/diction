@@ -1196,15 +1196,52 @@ static char *replace_attribute_value(const char *tag,
                                      const char *attr_name,
                                      const char *new_value,
                                      char quote_char) {
-    char *attr_pattern = g_strdup_printf("%s=%c", attr_name, quote_char);
-    char *attr_pos = strstr(tag, attr_pattern);
+    char *attr_pattern;
+    if (quote_char) {
+        attr_pattern = g_strdup_printf("%s=%c", attr_name, quote_char);
+    } else {
+        attr_pattern = g_strdup_printf("%s=", attr_name);
+    }
+
+    const char *p = tag;
+    const char *attr_pos = NULL;
+    size_t alen = strlen(attr_name);
+
+    /* Find attribute with boundary check to avoid color matching bgcolor */
+    while ((p = strstr(p, attr_name)) != NULL) {
+        if ((p == tag || g_ascii_isspace(p[-1])) && p[alen] == '=') {
+            if (quote_char) {
+                if (p[alen + 1] == quote_char) {
+                    attr_pos = p;
+                    break;
+                }
+            } else {
+                char next = p[alen + 1];
+                if (next != '"' && next != '\'') {
+                    attr_pos = p;
+                    break;
+                }
+            }
+        }
+        p++;
+    }
     g_free(attr_pattern);
+
     if (!attr_pos) {
         return g_strdup(tag);
     }
 
-    char *value_start = attr_pos + strlen(attr_name) + 2;
-    char *value_end = strchr(value_start, quote_char);
+    char *value_start = (char*)attr_pos + alen + (quote_char ? 2 : 1);
+    char *value_end;
+    if (quote_char) {
+        value_end = strchr(value_start, quote_char);
+    } else {
+        value_end = value_start;
+        while (*value_end && !g_ascii_isspace(*value_end) && *value_end != '>' && *value_end != '/') {
+            value_end++;
+        }
+    }
+
     if (!value_end) {
         return g_strdup(tag);
     }
@@ -1292,22 +1329,46 @@ static char *inline_local_stylesheet_if_possible(const char *tag, const char *re
 
 static char* process_html_tag_attribute(const char *tag, const char *attr_name, const char *resource_dir, const char *source_dir, gboolean dark_mode) {
     const char quotes[] = { '"', '\'', '\0' };
+    size_t alen = strlen(attr_name);
 
-    for (int i = 0; quotes[i]; i++) {
+    for (int i = 0; i < 3; i++) {
         char quote = quotes[i];
-        char *attr_pattern = g_strdup_printf("%s=%c", attr_name, quote);
-        char *attr_pos = strstr(tag, attr_pattern);
-        g_free(attr_pattern);
+        const char *p = tag;
+        const char *attr_pos = NULL;
 
-        if (!attr_pos) {
-            continue;
+        /* Find attribute with boundary check and correct quoting */
+        while ((p = strstr(p, attr_name)) != NULL) {
+            if ((p == tag || g_ascii_isspace(p[-1])) && p[alen] == '=') {
+                char next = p[alen + 1];
+                if (quote) {
+                    if (next == quote) {
+                        attr_pos = p;
+                        break;
+                    }
+                } else {
+                    if (next != '"' && next != '\'') {
+                        attr_pos = p;
+                        break;
+                    }
+                }
+            }
+            p++;
         }
 
-        char *value_start = attr_pos + strlen(attr_name) + 2;
-        char *value_end = strchr(value_start, quote);
-        if (!value_end) {
-            break;
+        if (!attr_pos) continue;
+
+        char *value_start = (char*)attr_pos + alen + (quote ? 2 : 1);
+        char *value_end;
+        if (quote) {
+            value_end = strchr(value_start, quote);
+        } else {
+            value_end = value_start;
+            while (*value_end && !g_ascii_isspace(*value_end) && *value_end != '>' && *value_end != '/') {
+                value_end++;
+            }
         }
+
+        if (!value_end || value_end == value_start) continue;
 
         char *value = g_strndup(value_start, value_end - value_start);
         char *new_value = NULL;

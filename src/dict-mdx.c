@@ -1170,14 +1170,43 @@ rebuild_cache:
 
     for (size_t i = 0; i < valid_count; i++) {
         uint64_t start = (uint64_t)tree_entries[i].d_off;
-        uint64_t end = (i + 1 < valid_count) ? (uint64_t)tree_entries[i+1].d_off : total_decomp;
+        uint64_t end = (i + 1 < valid_count) ? (uint64_t)tree_entries[i + 1].d_off : total_decomp;
 
         if (end > start && end <= total_decomp) {
             long def_off = ftell(cache);
-            fwrite(dict_rec_data + start, 1, (size_t)(end - start), cache);
+            size_t rec_len = (size_t)(end - start);
+            const unsigned char *rec_ptr = dict_rec_data + start;
+
+            if (encoding_is_utf16) {
+                /* Strip UTF-16 null terminator if present */
+                if (rec_len >= 2 && rec_ptr[rec_len - 1] == 0 && rec_ptr[rec_len - 2] == 0) {
+                    rec_len -= 2;
+                }
+                
+                GError *err = NULL;
+                char *utf8 = g_convert((const char *)rec_ptr, rec_len, "UTF-8", "UTF-16LE", NULL, NULL, &err);
+                if (utf8) {
+                    size_t ulen = strlen(utf8);
+                    fwrite(utf8, 1, ulen, cache);
+                    tree_entries[i].d_len = (uint64_t)ulen;
+                    g_free(utf8);
+                } else {
+                    if (err) g_error_free(err);
+                    /* fallback to raw write (best effort) */
+                    fwrite(rec_ptr, 1, rec_len, cache);
+                    tree_entries[i].d_len = (uint64_t)rec_len;
+                }
+            } else {
+                /* Strip UTF-8 null terminator if present */
+                if (rec_len > 0 && rec_ptr[rec_len - 1] == 0) {
+                    rec_len--;
+                }
+                fwrite(rec_ptr, 1, rec_len, cache);
+                tree_entries[i].d_len = (uint64_t)rec_len;
+            }
+
             fwrite("\n", 1, 1, cache);
             tree_entries[i].d_off = (int64_t)def_off;
-            tree_entries[i].d_len = (uint64_t)(end - start);
         } else {
             tree_entries[i].d_len = 0;
         }

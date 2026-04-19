@@ -2903,24 +2903,9 @@ static void schedule_execute_search(void) {
     search_execute_source_id = g_timeout_add(200, run_debounced_search, NULL);
 }
 
-static gboolean headword_matches_normalized_query(const char *raw_word, const char *query_key) {
-    gboolean matches = FALSE;
-    char *normalized = normalize_headword_for_search(raw_word, TRUE);
-    if (normalized) {
-        char *normalized_key = g_utf8_casefold(normalized, -1);
-        matches = g_strcmp0(normalized_key, query_key) == 0;
-        g_free(normalized_key);
-        g_free(normalized);
-    }
-    return matches;
-}
 
-static void append_rendered_entry_html(GString *html_res,
-                                       DictEntry *entry,
-                                       const FlatTreeEntry *res,
-                                       int dict_idx,
-                                       int *dict_header_shown,
-                                       int *found_count) {
+
+static char* render_entry_def_to_html(DictEntry *entry, const FlatTreeEntry *res) {
     const char *def_ptr = entry->dict->data + res->d_off;
     size_t def_len = res->d_len;
 
@@ -2949,10 +2934,9 @@ static void append_rendered_entry_html(GString *html_res,
         ? app_settings->render_style
         : "diction";
 
-    /* Phase 2: Set lazy resource reader for on-demand extraction */
     dict_render_set_resource_reader(entry->dict->resource_reader);
 
-    char *rendered = dsl_render_to_html(
+    return dsl_render_to_html(
         def_ptr, def_len,
         entry->dict->data + res->h_off, res->h_len,
         entry->format, entry->dict->resource_dir, entry->dict->source_dir, entry->dict->mdx_stylesheet, dark_mode,
@@ -2960,68 +2944,78 @@ static void append_rendered_entry_html(GString *html_res,
         render_style,
         app_settings ? app_settings->font_family : NULL,
         app_settings ? app_settings->font_size : 0);
-    if (!rendered) {
-        return;
-    }
+}
 
-    char *escaped_name = safe_markup_escape_n(entry->name ? entry->name : "", -1);
-    char *tmp_hw = g_strndup(entry->dict->data + res->h_off, res->h_len);
-    char *clean_hw = normalize_headword_for_search(tmp_hw, TRUE);
-    char *escaped_headword = safe_markup_escape_n(clean_hw ? clean_hw : tmp_hw, -1);
-    g_free(tmp_hw);
-    if (clean_hw) g_free(clean_hw);
-    gboolean first_match_for_dict = FALSE;
-
-    if (!*dict_header_shown) {
-        *dict_header_shown = 1;
-        entry->has_matches = TRUE;
-        (*found_count)++;
-        first_match_for_dict = TRUE;
-    }
-
-    if (first_match_for_dict) {
-        g_string_append_printf(
-            html_res,
-            "<div id='dict-%d' class='dict-anchor' style='scroll-margin-top: 8px;'></div>",
-            dict_idx);
-    }
+static void wrap_entry_in_style(GString *html_res, 
+                               const char *headword, 
+                               const char *dict_name, 
+                               const char *rendered_body, 
+                               const char *render_style) {
+    char *escaped_name = safe_markup_escape_n(dict_name ? dict_name : "", -1);
+    char *escaped_headword = safe_markup_escape_n(headword, -1);
 
     if (g_strcmp0(render_style, "python") == 0) {
         g_string_append_printf(
             html_res,
             "<div class='entry'><div class='header'><div><span class='lemma'>%s</span></div>"
             "<span class='dict'>📖 %s</span></div><div class='defs'>%s</div><hr></div>",
-            escaped_headword, escaped_name, rendered);
+            escaped_headword, escaped_name, rendered_body);
     } else if (g_strcmp0(render_style, "goldendict-ng") == 0) {
         g_string_append_printf(
             html_res,
             "<article class='gdarticle'><div class='gold-header'><span class='gold-entry-headword'>%s</span>"
             "<span class='gold-dict'>📖 %s</span></div><div class='gdarticlebody'>%s</div></article>",
-            escaped_headword, escaped_name, rendered);
+            escaped_headword, escaped_name, rendered_body);
     } else if (g_strcmp0(render_style, "slate-card") == 0) {
         g_string_append_printf(
             html_res,
             "<section class='slate-entry'><div class='slate-header'><span class='slate-lemma'>%s</span>"
             "<span class='slate-dict'>📖 %s</span></div><div class='slate-entry-body'>%s</div></section>",
-            escaped_headword, escaped_name, rendered);
+            escaped_headword, escaped_name, rendered_body);
     } else if (g_strcmp0(render_style, "paper") == 0) {
         g_string_append_printf(
             html_res,
             "<section class='paper-entry'><div class='paper-header'><span class='paper-lemma'>%s</span>"
             "<span class='paper-dict'>📖 %s</span></div><div class='paper-entry-body'>%s</div></section>",
-            escaped_headword, escaped_name, rendered);
+            escaped_headword, escaped_name, rendered_body);
     } else {
         g_string_append_printf(
             html_res,
             "<section class='diction-entry'><div class='diction-header'><span class='diction-lemma'>%s</span>"
             "<span class='diction-dict'>📖 %s</span></div><div class='diction-entry-body'>%s</div></section>",
-            escaped_headword, escaped_name, rendered);
+            escaped_headword, escaped_name, rendered_body);
     }
 
     g_free(escaped_headword);
     g_free(escaped_name);
-    free(rendered);
 }
+
+static void render_merged_group(GString *html_res,
+                                DictEntry *e,
+                                const char *headword,
+                                GString *body_html,
+                                int dict_idx,
+                                int *dict_header_shown,
+                                int *found_count) {
+    if (body_html->len == 0) return;
+
+    if (!*dict_header_shown) {
+        *dict_header_shown = 1;
+        e->has_matches = TRUE;
+        (*found_count)++;
+        g_string_append_printf(
+            html_res,
+            "<div id='dict-%d' class='dict-anchor' style='scroll-margin-top: 8px;'></div>",
+            dict_idx);
+    }
+
+    const char *render_style = (app_settings && app_settings->render_style && *app_settings->render_style)
+        ? app_settings->render_style : "diction";
+
+    wrap_entry_in_style(html_res, headword, e->name, body_html->str, render_style);
+}
+
+
 
 static void update_nav_buttons_state(void);
 
@@ -3192,22 +3186,46 @@ static void render_query_to_webview(const char *query_raw, WebKitWebView *target
 
         size_t pos = flat_index_search(e->dict->index, query);
         int dict_header_shown = 0;
+        char *last_hw = NULL;
+        GString *merged_body = g_string_new("");
 
         while (pos != (size_t)-1) {
             const FlatTreeEntry *res = flat_index_get(e->dict->index, pos);
             if (!res) break;
             if (compare_headword(e->dict->data, res, query, strlen(query)) != 0) break;
 
-            char *raw_word = g_strndup(e->dict->data + res->h_off, res->h_len);
-            gboolean matches = headword_matches_normalized_query(raw_word, query_key);
-            g_free(raw_word);
+            char *raw_hw = g_strndup(e->dict->data + res->h_off, res->h_len);
+            char *clean_hw = normalize_headword_for_search(raw_hw, TRUE);
+            const char *hw_to_use = clean_hw ? clean_hw : raw_hw;
 
-            if (matches) {
-                append_rendered_entry_html(html_res, e, res, dict_idx, &dict_header_shown, &found_count);
+            if (last_hw && strcmp(hw_to_use, last_hw) != 0) {
+                render_merged_group(html_res, e, last_hw, merged_body, dict_idx, &dict_header_shown, &found_count);
+                g_string_truncate(merged_body, 0);
             }
+
+            char *rendered = render_entry_def_to_html(e, res);
+            if (rendered) {
+                if (merged_body->len > 0) {
+                    g_string_append(merged_body, "<hr style='border:none;border-top:1px dashed #ccc;margin:10px 0;opacity:0.5;'>");
+                }
+                g_string_append(merged_body, rendered);
+                free(rendered);
+            }
+
+            g_free(last_hw);
+            last_hw = g_strdup(hw_to_use);
+            g_free(raw_hw);
+            if (clean_hw) g_free(clean_hw);
+            
             pos++;
             if (pos >= flat_index_count(e->dict->index)) break;
         }
+
+        if (merged_body->len > 0) {
+            render_merged_group(html_res, e, last_hw, merged_body, dict_idx, &dict_header_shown, &found_count);
+        }
+        g_string_free(merged_body, TRUE);
+        g_free(last_hw);
         dict_idx++;
     }
 
@@ -3276,26 +3294,50 @@ static void append_rendered_word_html_impl(const char *raw_word, gboolean push_h
 
         size_t pos = flat_index_search(e->dict->index, query);
         int dict_header_shown = 0;
+        char *last_hw = NULL;
+        GString *merged_body = g_string_new("");
 
         while (pos != (size_t)-1) {
             const FlatTreeEntry *res = flat_index_get(e->dict->index, pos);
             if (!res) break;
 
-            /* Verify we are still within the agnostic-match group */
             if (compare_headword(e->dict->data, res, query, strlen(query)) != 0) break;
 
             char *tmp_hw = g_strndup(e->dict->data + res->h_off, res->h_len);
             char *clean_hw = normalize_headword_for_search(tmp_hw, TRUE);
             gboolean matches = (clean_hw && g_ascii_strcasecmp(clean_hw, query) == 0);
+            const char *hw_to_use = clean_hw ? clean_hw : tmp_hw;
+
+            if (matches) {
+                if (last_hw && strcmp(hw_to_use, last_hw) != 0) {
+                    render_merged_group(html_res, e, last_hw, merged_body, dict_idx, &dict_header_shown, &found_count);
+                    g_string_truncate(merged_body, 0);
+                }
+
+                char *rendered = render_entry_def_to_html(e, res);
+                if (rendered) {
+                    if (merged_body->len > 0) {
+                        g_string_append(merged_body, "<hr style='border:none;border-top:1px dashed #ccc;margin:10px 0;opacity:0.5;'>");
+                    }
+                    g_string_append(merged_body, rendered);
+                    free(rendered);
+                }
+
+                g_free(last_hw);
+                last_hw = g_strdup(hw_to_use);
+            }
             g_free(tmp_hw);
             if (clean_hw) g_free(clean_hw);
 
-            if (matches) {
-                append_rendered_entry_html(html_res, e, res, dict_idx, &dict_header_shown, &found_count);
-            }
             pos++;
             if (pos >= flat_index_count(e->dict->index)) break;
         }
+
+        if (merged_body->len > 0) {
+            render_merged_group(html_res, e, last_hw, merged_body, dict_idx, &dict_header_shown, &found_count);
+        }
+        g_string_free(merged_body, TRUE);
+        g_free(last_hw);
         dict_idx++;
     }
 

@@ -4,6 +4,7 @@
  */
 
 #include "dict-mmap.h"
+#include "langpair.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,6 +16,7 @@
 #include <stdint.h>
 #include <glib.h>
 #include <glib/gstdio.h>
+#include <lzo/lzo1x.h>
 #include <fcntl.h>
 #include <utime.h>
 #include <errno.h>
@@ -217,6 +219,45 @@ static unsigned char *zlib_inflate(const unsigned char *src, size_t src_len,
     return dst;
 }
 
+static unsigned char *lzo_inflate(const unsigned char *src, size_t src_len,
+                                  size_t hint, size_t *out_len) {
+    static gsize lzo_ready = 0;
+    if (g_once_init_enter(&lzo_ready)) {
+        gsize ok = (lzo_init() == LZO_E_OK) ? 1 : 0;
+        g_once_init_leave(&lzo_ready, ok);
+    }
+    if (lzo_ready != 1) {
+        return NULL;
+    }
+
+    size_t cap = hint ? hint : (src_len * 8 + 4096);
+    if (cap == 0) {
+        cap = 4096;
+    }
+
+    for (int attempt = 0; attempt < 8; attempt++) {
+        unsigned char *dst = malloc(cap);
+        if (!dst) {
+            return NULL;
+        }
+
+        lzo_uint actual = (lzo_uint)cap;
+        int ret = lzo1x_decompress_safe(src, (lzo_uint)src_len, dst, &actual, NULL);
+        if (ret == LZO_E_OK) {
+            *out_len = (size_t)actual;
+            return dst;
+        }
+
+        free(dst);
+        if (ret != LZO_E_OUTPUT_OVERRUN) {
+            return NULL;
+        }
+        cap *= 2;
+    }
+
+    return NULL;
+}
+
 static unsigned char *mdx_block_decompress(const unsigned char *block,
                                             size_t comp_size,
                                             size_t decomp_hint,
@@ -232,6 +273,9 @@ static unsigned char *mdx_block_decompress(const unsigned char *block,
         memcpy(c, payload, payload_len);
         *out_len = payload_len;
         return c;
+    }
+    if (type == 0x01000000) {
+        return lzo_inflate(payload, payload_len, decomp_hint, out_len);
     }
     if (type == 0x02000000) {
         return zlib_inflate(payload, payload_len, decomp_hint, out_len);
@@ -670,8 +714,10 @@ static ResourceReader* mdx_open_mdd_reader(GPtrArray *mdd_paths, const char *ext
                 while (ip < ie && kbc < num_key_blocks) {
                     if (ip + mdd_num_size > ie) break;
                     ip += mdd_num_size;
-                    uint32_t head_size = read_u8or16(&ip, 1); ip += (mdd_encoding_is_utf16 ? (head_size+1)*2 : (head_size+1));
-                    uint32_t tail_size = read_u8or16(&ip, 1); ip += (mdd_encoding_is_utf16 ? (tail_size+1)*2 : (tail_size+1));
+                    uint32_t head_size = read_u8or16(&ip, 1);
+                    ip += (mdd_encoding_is_utf16 ? (head_size + 1) * 2 : (head_size + 1));
+                    uint32_t tail_size = read_u8or16(&ip, 1);
+                    ip += (mdd_encoding_is_utf16 ? (tail_size + 1) * 2 : (tail_size + 1));
                     if (ip + mdd_num_size * 2 > ie) break;
                     kbis[kbc].comp = read_num(&ip, mdd_num_size);
                     kbis[kbc].decomp = read_num(&ip, mdd_num_size);
@@ -683,8 +729,10 @@ static ResourceReader* mdx_open_mdd_reader(GPtrArray *mdd_paths, const char *ext
             const unsigned char *ip = kbi_raw, *ie = kbi_raw + kbi_comp;
             while (ip < ie && kbc < num_key_blocks) {
                 ip += mdd_num_size;
-                uint32_t head_size = read_u8or16(&ip, 0); ip += (head_size+1);
-                uint32_t tail_size = read_u8or16(&ip, 0); ip += (tail_size+1);
+                uint32_t head_size = read_u8or16(&ip, 0);
+                ip += head_size;
+                uint32_t tail_size = read_u8or16(&ip, 0);
+                ip += tail_size;
                 if (ip + mdd_num_size * 2 > ie) break;
                 kbis[kbc].comp = read_num(&ip, mdd_num_size);
                 kbis[kbc].decomp = read_num(&ip, mdd_num_size);
@@ -864,7 +912,8 @@ DictMmap *parse_mdx_file(const char *path, volatile gint *cancel_flag, gint expe
                     const char *te = strchr(ts, '"');
                     if (te && (te - ts) > 0) {
                         char *raw_title = strndup(ts, te - ts);
-                        char *validated = validate_utf8_string(raw_title);
+                        char *unescaped = unescape_xml_entities(raw_title);
+                        char *validated = validate_utf8_string(unescaped);
                         char *stripped = strip_html_tags(validated);
                         /* Skip placeholder/invalid titles */
                         if (strcmp(stripped, "Title (No HTML code allowed)") != 0 && 
@@ -876,6 +925,7 @@ DictMmap *parse_mdx_file(const char *path, volatile gint *cancel_flag, gint expe
                             fprintf(stderr, "[MDX DEBUG] Skipped placeholder title\n");
                         }
                         g_free(validated);
+                        g_free(unescaped);
                         free(raw_title);
                     }
                 }
@@ -898,8 +948,17 @@ DictMmap *parse_mdx_file(const char *path, volatile gint *cancel_flag, gint expe
 
                 stylesheet = extract_header_attribute(ascii_hdr, "StyleSheet");
                 
-                s_lang = extract_header_attribute(ascii_hdr, "SourceLanguage");
-                t_lang = extract_header_attribute(ascii_hdr, "TargetLanguage");
+                char *raw_s_lang = extract_header_attribute(ascii_hdr, "SourceLanguage");
+                char *raw_t_lang = extract_header_attribute(ascii_hdr, "TargetLanguage");
+                s_lang = langpair_normalize_language_name(raw_s_lang);
+                t_lang = langpair_normalize_language_name(raw_t_lang);
+                g_free(raw_s_lang);
+                g_free(raw_t_lang);
+                if (!s_lang && t_lang) {
+                    s_lang = g_strdup(t_lang);
+                } else if (!t_lang && s_lang) {
+                    t_lang = g_strdup(s_lang);
+                }
 
                 free(ascii_hdr);
                 free(header_raw);
@@ -910,18 +969,25 @@ DictMmap *parse_mdx_file(const char *path, volatile gint *cancel_flag, gint expe
     /* FAST PATH: use cache directly */
     /* ───────────────────────────── */
     if (cache_valid) {
-        if (fh) fclose(fh);
-
         cache_fd = open(cache_path, O_RDONLY);
+        if (cache_fd < 0) {
+            cache_valid = FALSE;
+            goto rebuild_cache;
+        }
         struct stat st;
         if (fstat(cache_fd, &st) != 0 || st.st_size < 16) {
             close(cache_fd);
-            g_free(cache_path);
-            return NULL;
+            cache_valid = FALSE;
+            goto rebuild_cache;
         }
 
         dict_size = st.st_size;
         dict_data = mmap(NULL, dict_size, PROT_READ, MAP_PRIVATE, cache_fd, 0);
+        if (dict_data == MAP_FAILED) {
+            close(cache_fd);
+            cache_valid = FALSE;
+            goto rebuild_cache;
+        }
         close(cache_fd);
 
         DictMmap *dict = calloc(1, sizeof(DictMmap));
@@ -953,12 +1019,14 @@ DictMmap *parse_mdx_file(const char *path, volatile gint *cancel_flag, gint expe
         g_free(stylesheet);
         g_free(source_dir);
         g_free(cache_path);
+        if (fh) fclose(fh);
         return dict;
     }
 
     /* ───────────────────────────── */
     /* BUILD CACHE (ZERO-COPY)       */
     /* ───────────────────────────── */
+rebuild_cache:
 
     FILE *cache = fopen(cache_path, "wb");
     if (!cache) {
@@ -992,17 +1060,29 @@ DictMmap *parse_mdx_file(const char *path, volatile gint *cancel_flag, gint expe
     TreeEntry *tree_entries = calloc(num_entries, sizeof(TreeEntry));
     size_t valid_count = 0;
 
-    if (is_v2 && (encrypted & 2)) mdx_decrypt_key_block_info(kbi_raw, kbi_comp);
     size_t kbi_dlen = 0;
-    unsigned char *kbi_data = mdx_block_decompress(kbi_raw, kbi_comp, kbi_decomp, &kbi_dlen);
-    free(kbi_raw);
+    unsigned char *kbi_data = NULL;
+    if (is_v2) {
+        if (encrypted & 2) mdx_decrypt_key_block_info(kbi_raw, kbi_comp);
+        kbi_data = mdx_block_decompress(kbi_raw, kbi_comp, kbi_decomp, &kbi_dlen);
+        free(kbi_raw);
+    } else {
+        kbi_data = kbi_raw;
+        kbi_dlen = kbi_comp;
+    }
 
     if (kbi_data) {
         const unsigned char *ip = kbi_data, *ie = kbi_data + kbi_dlen;
         while (ip < ie && valid_count < num_entries) {
             ip += num_size;
-            uint32_t head_size = read_u8or16(&ip, is_v2); ip += (encoding_is_utf16 ? (head_size+1)*2 : (head_size+1));
-            uint32_t tail_size = read_u8or16(&ip, is_v2); ip += (encoding_is_utf16 ? (tail_size+1)*2 : (tail_size+1));
+            uint32_t head_size = read_u8or16(&ip, is_v2);
+            ip += (encoding_is_utf16
+                       ? (head_size + (is_v2 ? 1 : 0)) * 2
+                       : head_size + (is_v2 ? 1 : 0));
+            uint32_t tail_size = read_u8or16(&ip, is_v2);
+            ip += (encoding_is_utf16
+                       ? (tail_size + (is_v2 ? 1 : 0)) * 2
+                       : tail_size + (is_v2 ? 1 : 0));
             uint64_t comp_size = read_num(&ip, num_size);
             uint64_t decomp_size = read_num(&ip, num_size);
 
@@ -1045,6 +1125,9 @@ DictMmap *parse_mdx_file(const char *path, volatile gint *cancel_flag, gint expe
             fseek(fh, next_kb, SEEK_SET);
         }
         free(kbi_data);
+    } else {
+        fprintf(stderr, "[MDX] Failed to decode key block info for %s (v%d, kbi_comp=%" G_GUINT64_FORMAT ", kbi_decomp=%" G_GUINT64_FORMAT ")\n",
+                path, is_v2 ? 2 : 1, kbi_comp, kbi_decomp);
     }
 
     fseek(fh, 4 + header_text_size + 4 + kbh_size + (is_v2?4:0) + kbi_comp + kb_data_size, SEEK_SET);
@@ -1076,6 +1159,10 @@ DictMmap *parse_mdx_file(const char *path, volatile gint *cancel_flag, gint expe
             size_t dlen = 0;
             unsigned char *data = mdx_block_decompress(comp, rbs[i].comp, rbs[i].decomp, &dlen);
             if (data) { memcpy(dict_rec_data + co, data, dlen); co += dlen; free(data); }
+            else {
+                fprintf(stderr, "[MDX] Failed to decode record block %" G_GUINT64_FORMAT " for %s (comp=%" G_GUINT64_FORMAT ", decomp=%" G_GUINT64_FORMAT ")\n",
+                        i, path, rbs[i].comp, rbs[i].decomp);
+            }
         }
         free(comp);
     }
@@ -1120,6 +1207,9 @@ DictMmap *parse_mdx_file(const char *path, volatile gint *cancel_flag, gint expe
     fseek(cache, 0, SEEK_SET);
     uint64_t final_cnt = (uint64_t)valid_count;
     fwrite(&final_cnt, 8, 1, cache);
+    if (valid_count == 0) {
+        fprintf(stderr, "[MDX] Parsed zero entries for %s\n", path);
+    }
     
     fclose(cache);
     fclose(fh);

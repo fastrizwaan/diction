@@ -1362,16 +1362,38 @@ void settings_create_group(AppSettings *settings, const char *name, GPtrArray *d
 gboolean settings_upsert_guessed_group(AppSettings *settings, const char *name, const char *dict_id) {
     if (!settings || !name || !dict_id) return FALSE;
 
+    gboolean changed = FALSE;
+
+    for (gint i = (gint)settings->dictionary_groups->len - 1; i >= 0; i--) {
+        DictGroup *grp = g_ptr_array_index(settings->dictionary_groups, (guint)i);
+        if (g_strcmp0(grp->source, "guessed") != 0) {
+            continue;
+        }
+
+        for (gint j = (gint)grp->members->len - 1; j >= 0; j--) {
+            const char *member = g_ptr_array_index(grp->members, (guint)j);
+            if (g_strcmp0(member, dict_id) == 0 && g_strcmp0(grp->name, name) != 0) {
+                g_ptr_array_remove_index(grp->members, (guint)j);
+                changed = TRUE;
+            }
+        }
+
+        if (grp->members->len == 0) {
+            g_ptr_array_remove_index(settings->dictionary_groups, (guint)i);
+            changed = TRUE;
+        }
+    }
+
     for (guint i = 0; i < settings->dictionary_groups->len; i++) {
         DictGroup *grp = g_ptr_array_index(settings->dictionary_groups, i);
         if (g_strcmp0(grp->name, name) == 0 && g_strcmp0(grp->source, "guessed") == 0) {
             for (guint j = 0; j < grp->members->len; j++) {
                 if (g_strcmp0(g_ptr_array_index(grp->members, j), dict_id) == 0) {
-                    return FALSE;
+                    return changed;
                 }
             }
             g_ptr_array_add(grp->members, g_strdup(dict_id));
-            return FALSE;
+            return TRUE;
         }
     }
 

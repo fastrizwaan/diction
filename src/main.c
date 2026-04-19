@@ -1,8 +1,10 @@
 #include <gtk/gtk.h>
 #include <glib.h>
 #include <glib/gstdio.h>
+#include <gio/gio.h>
 #include <adwaita.h>
 #include "langid.h"
+#include "langpair.h"
 #include <webkit/webkit.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -77,6 +79,10 @@ static GtkStringList *related_string_list = NULL;
 static GtkSingleSelection *related_selection_model = NULL;
 static GtkListView *related_list_view = NULL;
 static GPtrArray *related_row_payloads = NULL;
+static GHashTable *dictionary_dir_monitors = NULL;
+static GHashTable *dictionary_root_parent_monitors = NULL;
+static guint dictionary_watch_reload_source_id = 0;
+static gboolean force_directory_rescan_requested = FALSE;
 static WebKitUserContentManager *font_ucm = NULL;       /* shared across web views */
 static WebKitUserStyleSheet *font_user_stylesheet = NULL; /* current injected font CSS */
 static GtkWindow *main_window = NULL;
@@ -1845,6 +1851,10 @@ static gboolean dict_entry_in_active_scope(DictEntry *entry) {
     return dict_entry_in_scope(entry, active_scope_id);
 }
 
+typedef struct {
+    const char *path;
+} MonitorPathPrefix;
+
 static gboolean path_is_inside_directory(const char *path, const char *dir) {
     if (!path || !dir || !*path || !*dir) {
         return FALSE;
@@ -1871,6 +1881,277 @@ static gboolean path_is_inside_directory(const char *path, const char *dir) {
     gboolean result = expanded_dir[dir_len - 1] == G_DIR_SEPARATOR || path[dir_len] == G_DIR_SEPARATOR;
     g_free(expanded_dir);
     return result;
+}
+
+static char *canonicalize_watch_path(const char *path) {
+    if (!path || !*path) {
+        return NULL;
+    }
+
+    if (path[0] == '~') {
+        char *expanded = g_build_filename(g_get_home_dir(), path + 1, NULL);
+        char *canonical = g_canonicalize_filename(expanded, NULL);
+        g_free(expanded);
+        return canonical;
+    }
+
+    return g_canonicalize_filename(path, NULL);
+}
+
+static gboolean hash_table_remove_if_path_has_prefix(gpointer key, gpointer value, gpointer user_data) {
+    (void)value;
+    MonitorPathPrefix *prefix = user_data;
+    return path_is_inside_directory((const char *)key, prefix->path);
+}
+
+static void remove_directory_monitor_subtree(const char *path) {
+    if (!path || !*path || !dictionary_dir_monitors) {
+        return;
+    }
+
+    MonitorPathPrefix prefix = { path };
+    g_hash_table_foreach_remove(dictionary_dir_monitors,
+                                hash_table_remove_if_path_has_prefix,
+                                &prefix);
+}
+
+static gboolean dictionary_monitor_event_requires_reload(GFileMonitorEvent event_type) {
+    switch (event_type) {
+        case G_FILE_MONITOR_EVENT_CHANGED:
+        case G_FILE_MONITOR_EVENT_CHANGES_DONE_HINT:
+        case G_FILE_MONITOR_EVENT_CREATED:
+        case G_FILE_MONITOR_EVENT_DELETED:
+        case G_FILE_MONITOR_EVENT_ATTRIBUTE_CHANGED:
+        case G_FILE_MONITOR_EVENT_MOVED:
+        case G_FILE_MONITOR_EVENT_RENAMED:
+        case G_FILE_MONITOR_EVENT_MOVED_IN:
+        case G_FILE_MONITOR_EVENT_MOVED_OUT:
+        case G_FILE_MONITOR_EVENT_UNMOUNTED:
+            return TRUE;
+        default:
+            return FALSE;
+    }
+}
+
+static gboolean reload_dictionaries_from_settings_idle(gpointer user_data);
+static void request_dictionary_directory_rescan(gboolean force_directory_rescan);
+static void refresh_dictionary_directory_monitors(void);
+static void on_dictionary_dir_changed(GFileMonitor *monitor,
+                                      GFile *file,
+                                      GFile *other_file,
+                                      GFileMonitorEvent event_type,
+                                      gpointer user_data);
+static void on_dictionary_root_parent_changed(GFileMonitor *monitor,
+                                              GFile *file,
+                                              GFile *other_file,
+                                              GFileMonitorEvent event_type,
+                                              gpointer user_data);
+
+static void add_directory_monitor_recursive(const char *root_path,
+                                            const char *dir_path,
+                                            GHashTable *seen_dirs) {
+    if (!root_path || !dir_path || !*dir_path) {
+        return;
+    }
+
+    char *canonical_dir = canonicalize_watch_path(dir_path);
+    if (!canonical_dir || !g_file_test(canonical_dir, G_FILE_TEST_IS_DIR)) {
+        g_free(canonical_dir);
+        return;
+    }
+
+    if (seen_dirs && g_hash_table_contains(seen_dirs, canonical_dir)) {
+        g_free(canonical_dir);
+        return;
+    }
+
+    if (seen_dirs) {
+        g_hash_table_add(seen_dirs, g_strdup(canonical_dir));
+    }
+
+    if (!dictionary_dir_monitors) {
+        dictionary_dir_monitors = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_object_unref);
+    }
+
+    if (!g_hash_table_contains(dictionary_dir_monitors, canonical_dir)) {
+        GFile *dir_file = g_file_new_for_path(canonical_dir);
+        GError *error = NULL;
+        GFileMonitor *monitor = g_file_monitor_directory(dir_file,
+                                                         G_FILE_MONITOR_WATCH_MOVES,
+                                                         NULL,
+                                                         &error);
+        if (monitor) {
+            g_object_set_data_full(G_OBJECT(monitor), "watch-path", g_strdup(canonical_dir), g_free);
+            g_object_set_data_full(G_OBJECT(monitor), "watch-root", g_strdup(root_path), g_free);
+            g_signal_connect(monitor, "changed", G_CALLBACK(on_dictionary_dir_changed), NULL);
+            g_hash_table_insert(dictionary_dir_monitors, g_strdup(canonical_dir), monitor);
+        } else if (error) {
+            g_error_free(error);
+        }
+        g_object_unref(dir_file);
+    }
+
+    GDir *dir = g_dir_open(canonical_dir, 0, NULL);
+    if (dir) {
+        const char *name = NULL;
+        while ((name = g_dir_read_name(dir)) != NULL) {
+            char *child = g_build_filename(canonical_dir, name, NULL);
+            if (g_file_test(child, G_FILE_TEST_IS_DIR)) {
+                add_directory_monitor_recursive(root_path, child, seen_dirs);
+            }
+            g_free(child);
+        }
+        g_dir_close(dir);
+    }
+
+    g_free(canonical_dir);
+}
+
+static void ensure_dictionary_root_parent_monitor(const char *root_path) {
+    if (!root_path || !*root_path) {
+        return;
+    }
+
+    if (!dictionary_root_parent_monitors) {
+        dictionary_root_parent_monitors = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_object_unref);
+    }
+
+    if (g_hash_table_contains(dictionary_root_parent_monitors, root_path)) {
+        return;
+    }
+
+    char *parent_dir = g_path_get_dirname(root_path);
+    GFile *dir_file = g_file_new_for_path(parent_dir);
+    GError *error = NULL;
+    GFileMonitor *monitor = g_file_monitor_directory(dir_file,
+                                                     G_FILE_MONITOR_WATCH_MOVES,
+                                                     NULL,
+                                                     &error);
+    if (monitor) {
+        g_object_set_data_full(G_OBJECT(monitor), "watch-root", g_strdup(root_path), g_free);
+        g_signal_connect(monitor, "changed", G_CALLBACK(on_dictionary_root_parent_changed), NULL);
+        g_hash_table_insert(dictionary_root_parent_monitors, g_strdup(root_path), monitor);
+    } else if (error) {
+        g_error_free(error);
+    }
+
+    g_object_unref(dir_file);
+    g_free(parent_dir);
+}
+
+static void refresh_dictionary_directory_monitors(void) {
+    if (!dictionary_dir_monitors) {
+        dictionary_dir_monitors = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_object_unref);
+    } else {
+        g_hash_table_remove_all(dictionary_dir_monitors);
+    }
+
+    if (!dictionary_root_parent_monitors) {
+        dictionary_root_parent_monitors = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_object_unref);
+    } else {
+        g_hash_table_remove_all(dictionary_root_parent_monitors);
+    }
+
+    if (!app_settings || !app_settings->dictionary_dirs) {
+        return;
+    }
+
+    GHashTable *seen_dirs = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    for (guint i = 0; i < app_settings->dictionary_dirs->len; i++) {
+        char *root_path = canonicalize_watch_path(g_ptr_array_index(app_settings->dictionary_dirs, i));
+        if (!root_path || !*root_path) {
+            g_free(root_path);
+            continue;
+        }
+
+        ensure_dictionary_root_parent_monitor(root_path);
+        add_directory_monitor_recursive(root_path, root_path, seen_dirs);
+        g_free(root_path);
+    }
+    g_hash_table_unref(seen_dirs);
+}
+
+static gboolean dictionary_root_event_matches_path(const char *root_path, GFile *file) {
+    if (!root_path || !file) {
+        return FALSE;
+    }
+
+    char *file_path = g_file_get_path(file);
+    gboolean matches = file_path && g_strcmp0(file_path, root_path) == 0;
+    g_free(file_path);
+    return matches;
+}
+
+static void on_dictionary_dir_changed(GFileMonitor *monitor,
+                                      GFile *file,
+                                      GFile *other_file,
+                                      GFileMonitorEvent event_type,
+                                      gpointer user_data) {
+    (void)user_data;
+
+    const char *root_path = g_object_get_data(G_OBJECT(monitor), "watch-root");
+    if (!root_path || !dictionary_monitor_event_requires_reload(event_type)) {
+        return;
+    }
+
+    char *file_path = file ? g_file_get_path(file) : NULL;
+    if (file_path && (event_type == G_FILE_MONITOR_EVENT_CREATED ||
+                      event_type == G_FILE_MONITOR_EVENT_MOVED_IN)) {
+        if (g_file_test(file_path, G_FILE_TEST_IS_DIR)) {
+            GHashTable *seen_dirs = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+            add_directory_monitor_recursive(root_path, file_path, seen_dirs);
+            g_hash_table_unref(seen_dirs);
+        }
+    }
+
+    if (file_path && (event_type == G_FILE_MONITOR_EVENT_DELETED ||
+                      event_type == G_FILE_MONITOR_EVENT_MOVED_OUT ||
+                      event_type == G_FILE_MONITOR_EVENT_UNMOUNTED)) {
+        remove_directory_monitor_subtree(file_path);
+    }
+
+    if (other_file && (event_type == G_FILE_MONITOR_EVENT_RENAMED ||
+                       event_type == G_FILE_MONITOR_EVENT_MOVED)) {
+        char *other_path = g_file_get_path(other_file);
+        if (other_path && g_file_test(other_path, G_FILE_TEST_IS_DIR)) {
+            GHashTable *seen_dirs = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+            add_directory_monitor_recursive(root_path, other_path, seen_dirs);
+            g_hash_table_unref(seen_dirs);
+        }
+        g_free(other_path);
+    }
+
+    g_free(file_path);
+    request_dictionary_directory_rescan(TRUE);
+}
+
+static void on_dictionary_root_parent_changed(GFileMonitor *monitor,
+                                              GFile *file,
+                                              GFile *other_file,
+                                              GFileMonitorEvent event_type,
+                                              gpointer user_data) {
+    (void)user_data;
+
+    const char *root_path = g_object_get_data(G_OBJECT(monitor), "watch-root");
+    if (!root_path || !dictionary_monitor_event_requires_reload(event_type)) {
+        return;
+    }
+
+    gboolean matches_root = dictionary_root_event_matches_path(root_path, file) ||
+                            dictionary_root_event_matches_path(root_path, other_file);
+    if (!matches_root) {
+        return;
+    }
+
+    if (g_file_test(root_path, G_FILE_TEST_IS_DIR)) {
+        GHashTable *seen_dirs = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+        add_directory_monitor_recursive(root_path, root_path, seen_dirs);
+        g_hash_table_unref(seen_dirs);
+    } else {
+        remove_directory_monitor_subtree(root_path);
+    }
+
+    request_dictionary_directory_rescan(TRUE);
 }
 
 static DictEntry *dict_entry_new_shell(const char *name, const char *path) {
@@ -1983,7 +2264,14 @@ static gboolean should_rescan_dictionary_dirs(void) {
 
     for (guint i = 0; i < app_settings->dictionary_dirs->len; i++) {
         const char *dir = g_ptr_array_index(app_settings->dictionary_dirs, i);
+        char *canonical_dir = canonicalize_watch_path(dir);
         gboolean indexed = FALSE;
+
+        if (!canonical_dir || !g_file_test(canonical_dir, G_FILE_TEST_IS_DIR)) {
+            g_free(canonical_dir);
+            return TRUE;
+        }
+        g_free(canonical_dir);
 
         for (guint j = 0; j < app_settings->dictionaries->len; j++) {
             DictConfig *cfg = g_ptr_array_index(app_settings->dictionaries, j);
@@ -1993,6 +2281,9 @@ static gboolean should_rescan_dictionary_dirs(void) {
             if (g_strcmp0(cfg->source, "directory") == 0 &&
                 path_is_inside_directory(cfg->path, dir)) {
                 indexed = TRUE;
+                if (!g_file_test(cfg->path, G_FILE_TEST_EXISTS)) {
+                    return TRUE;
+                }
                 break;
             }
         }
@@ -2002,6 +2293,9 @@ static gboolean should_rescan_dictionary_dirs(void) {
                 const char *ignored = g_ptr_array_index(app_settings->ignored_dictionary_paths, j);
                 if (path_is_inside_directory(ignored, dir)) {
                     indexed = TRUE;
+                    if (!g_file_test(ignored, G_FILE_TEST_EXISTS)) {
+                        return TRUE;
+                    }
                     break;
                 }
             }
@@ -3357,7 +3651,7 @@ static void update_theme_colors(void) {
 
     const char *w_bg = (is_default_theme) ? (dark_mode ? "#1e1e21" : "#ffffff") : palette.bg;
     const char *h_bg = (is_default_theme) ? (dark_mode ? "#1e1e21" : "#ffffff") : palette.bg;
-    const char *ch_bg = (is_default_theme) ? (dark_mode ? "#1e1e21" : "#f6f6f6") : palette.bg;
+    const char *ch_bg = (is_default_theme) ? (dark_mode ? "#1e1e21" : "#ffffff") : palette.bg;
     const char *w_fg = (is_default_theme) ? (dark_mode ? "#ffffff" : "#222222") : palette.fg;
     const char *sidebar_bg = (is_default_theme) ? (dark_mode ? "#2e2e32" : "#f6f6f6") : c_chrome;
     const char *accent = (is_default_theme) ? (dark_mode ? "#3584e4" : "#e45649") : palette.accent;
@@ -3624,12 +3918,35 @@ static void apply_font_to_webview(void *user_data) {
 
 static GMutex dict_loader_mutex;
 static volatile gint loader_generation = 0;
+static void reload_dictionaries_from_settings(void *user_data);
+
+static gboolean reload_dictionaries_from_settings_idle(gpointer user_data) {
+    (void)user_data;
+    dictionary_watch_reload_source_id = 0;
+    reload_dictionaries_from_settings(NULL);
+    return G_SOURCE_REMOVE;
+}
+
+static void request_dictionary_directory_rescan(gboolean force_directory_rescan) {
+    if (force_directory_rescan) {
+        force_directory_rescan_requested = TRUE;
+    }
+
+    if (dictionary_watch_reload_source_id != 0) {
+        return;
+    }
+
+    dictionary_watch_reload_source_id = g_timeout_add(600, reload_dictionaries_from_settings_idle, NULL);
+}
 
 static void reload_dictionaries_from_settings(void *user_data) {
     (void)user_data;
-    gboolean discover_from_dirs = should_rescan_dictionary_dirs();
+    gboolean discover_from_dirs =
+        force_directory_rescan_requested || should_rescan_dictionary_dirs();
+    force_directory_rescan_requested = FALSE;
     startup_random_word_pending = FALSE;
     g_atomic_int_inc(&loader_generation);
+    refresh_dictionary_directory_monitors();
     if (search_execute_source_id != 0) {
         g_source_remove(search_execute_source_id);
         search_execute_source_id = 0;
@@ -3942,12 +4259,15 @@ static void collect_dictionary_candidate_paths_recursive(const char *dirpath,
                                                          GHashTable *seen_paths,
                                                          GHashTable *seen_dsl_families,
                                                          GHashTable *ignored_paths,
+                                                         gint generation,
                                                          int depth) {
     if (!dirpath || !out_paths || depth > 5) {
         return;
     }
 
-    if (g_atomic_int_get(&loader_generation) == 0) return; // Quick check
+    if (generation != g_atomic_int_get(&loader_generation)) {
+        return;
+    }
 
     char *expanded = NULL;
     if (dirpath[0] == '~') {
@@ -3980,7 +4300,7 @@ static void collect_dictionary_candidate_paths_recursive(const char *dirpath,
                 g_ascii_strcasecmp(name, "__pycache__") != 0) {
                 collect_dictionary_candidate_paths_recursive(full, out_paths,
                                                             seen_paths, seen_dsl_families,
-                                                            ignored_paths, depth + 1);
+                                                            ignored_paths, generation, depth + 1);
             }
             g_free(full);
             continue;
@@ -4076,7 +4396,54 @@ static char* sample_dict_and_detect_lang(DictEntry *entry) {
     if (g_strcmp0(def_lang, "Unknown") == 0) def_lang = hw_lang;
     if (g_strcmp0(hw_lang, "Unknown") == 0) hw_lang = def_lang;
 
+    char *group = langpair_build_group_name(hw_lang, def_lang);
+    if (group) {
+        return group;
+    }
+
     return g_strdup_printf("%s->%s", hw_lang, def_lang);
+}
+
+static gboolean lang_group_is_monolingual(const char *group_name) {
+    if (!group_name) {
+        return FALSE;
+    }
+
+    const char *sep = strstr(group_name, "->");
+    if (!sep) {
+        return FALSE;
+    }
+
+    char *left = g_strndup(group_name, (gsize)(sep - group_name));
+    char *right = g_strdup(sep + 2);
+    gboolean same = g_strcmp0(left, right) == 0;
+    g_free(left);
+    g_free(right);
+    return same;
+}
+
+static char *build_dict_metadata_text(DictEntry *entry) {
+    if (!entry) {
+        return NULL;
+    }
+
+    GString *metadata = g_string_new("");
+    if (entry->dict && entry->dict->name && *entry->dict->name) {
+        g_string_append(metadata, entry->dict->name);
+    }
+    if (entry->name && *entry->name && (!entry->dict || g_strcmp0(entry->name, entry->dict->name) != 0)) {
+        if (metadata->len > 0) {
+            g_string_append_c(metadata, ' ');
+        }
+        g_string_append(metadata, entry->name);
+    }
+
+    if (metadata->len == 0) {
+        g_string_free(metadata, TRUE);
+        return NULL;
+    }
+
+    return g_string_free(metadata, FALSE);
 }
 
 static gboolean on_dict_loaded_idle(gpointer user_data) {
@@ -4120,11 +4487,25 @@ static gboolean on_dict_loaded_idle(gpointer user_data) {
 
         if (e->dict) {
             char *guessed = NULL;
-            if (e->dict->source_lang && e->dict->target_lang) {
-                guessed = g_strdup_printf("%s->%s", e->dict->source_lang, e->dict->target_lang);
-            } else if (e->dict->source_lang) {
-                guessed = g_strdup_printf("%s->%s", e->dict->source_lang, e->dict->source_lang);
-            } else {
+            char *metadata_text = build_dict_metadata_text(e);
+            char *source_lang = e->dict->source_lang ? g_strdup(e->dict->source_lang) : NULL;
+            char *target_lang = e->dict->target_lang ? g_strdup(e->dict->target_lang) : NULL;
+            gboolean parser_had_langs =
+                (e->dict->source_lang && *e->dict->source_lang) ||
+                (e->dict->target_lang && *e->dict->target_lang);
+
+            langpair_fill_missing(&source_lang, &target_lang, metadata_text, e->path);
+            guessed = langpair_build_group_name(source_lang, target_lang);
+
+            if (!parser_had_langs && (!guessed || lang_group_is_monolingual(guessed))) {
+                char *sampled = sample_dict_and_detect_lang(e);
+                if (sampled && *sampled && g_strcmp0(sampled, "Mixed") != 0) {
+                    g_free(guessed);
+                    guessed = sampled;
+                    sampled = NULL;
+                }
+                g_free(sampled);
+            } else if (!guessed) {
                 guessed = sample_dict_and_detect_lang(e);
             }
 
@@ -4143,6 +4524,9 @@ static gboolean on_dict_loaded_idle(gpointer user_data) {
                 }
             }
             g_free(guessed);
+            g_free(source_lang);
+            g_free(target_lang);
+            g_free(metadata_text);
             
             // Re-populate dict sidebar as well to show new group info if we decide to add it to subtitles
             populate_dict_sidebar();
@@ -4221,6 +4605,11 @@ static void load_one_dict_worker(gpointer data, gpointer user_data) {
                           la->discover_from_dirs);
         g_free(status);
         g_free(basename);
+    } else {
+        extern void settings_scan_notify(const char *name, const char *path, int event_type);
+        char *basename = g_path_get_basename(la->path);
+        settings_scan_notify(basename ? basename : "(Unknown)", la->path, DICT_LOADER_EVENT_FAILED);
+        g_free(basename);
     }
 
     g_free(la);
@@ -4248,7 +4637,7 @@ static gpointer dict_load_thread(gpointer user_data) {
         if (args->generation != g_atomic_int_get(&loader_generation)) break;
         collect_dictionary_candidate_paths_recursive(args->dirs[i], candidate_paths,
                                                     seen_paths, seen_dsl_families,
-                                                    args->ignored_paths, 0);
+                                                    args->ignored_paths, args->generation, 0);
     }
 
     /* Inform settings scan dialog of discovered candidates */
@@ -4313,6 +4702,11 @@ static gpointer dict_load_thread(gpointer user_data) {
                     queue_loader_idle(LOAD_IDLE_ENTRY, args->generation, i + 1, total_candidates, status, entry,
                                       args->discover_from_dirs);
                     g_free(status);
+                    g_free(basename);
+                } else {
+                    extern void settings_scan_notify(const char *name, const char *path, int event_type);
+                    char *basename = g_path_get_basename(path);
+                    settings_scan_notify(basename ? basename : "(Unknown)", path, DICT_LOADER_EVENT_FAILED);
                     g_free(basename);
                 }
             }
@@ -5226,8 +5620,10 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     gboolean discover_from_dirs = FALSE;
     if (!all_dicts && app_settings) {
         had_cached_entries = rebuild_dict_entries_from_settings() > 0;
-        discover_from_dirs = should_rescan_dictionary_dirs();
+        discover_from_dirs = app_settings->dictionary_dirs &&
+                             app_settings->dictionary_dirs->len > 0;
     }
+    refresh_dictionary_directory_monitors();
 
     /* Populate sidebar */
     populate_dict_sidebar();
@@ -5332,6 +5728,18 @@ static void on_app_shutdown(GApplication *app, gpointer user_data) {
     if (search_execute_source_id != 0) {
         g_source_remove(search_execute_source_id);
         search_execute_source_id = 0;
+    }
+    if (dictionary_watch_reload_source_id != 0) {
+        g_source_remove(dictionary_watch_reload_source_id);
+        dictionary_watch_reload_source_id = 0;
+    }
+    if (dictionary_dir_monitors) {
+        g_hash_table_destroy(dictionary_dir_monitors);
+        dictionary_dir_monitors = NULL;
+    }
+    if (dictionary_root_parent_monitors) {
+        g_hash_table_destroy(dictionary_root_parent_monitors);
+        dictionary_root_parent_monitors = NULL;
     }
     /* Null out global widget pointers so any stray callback that somehow
      * still runs will see NULL and bail out early. */

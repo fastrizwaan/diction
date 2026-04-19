@@ -41,12 +41,12 @@ static char *normalize_color_name_key(const char *color_name) {
 static const char* get_dark_mode_color(const char *color_name) {
     struct { const char *dark; const char *light; } map[] = {
         {"black", "#d8d8d8"},
-        {"blue", "#82b7ff"},
-        {"darkblue", "#82b7ff"},
-        {"mediumblue", "#8ab8ff"},
-        {"navy", "#8ab8ff"},
-        {"midnightblue", "#a7b8ff"},
-        {"royalblue", "#8eb8ff"},
+        {"blue", "#a9d1ff"},
+        {"darkblue", "#a9d1ff"},
+        {"mediumblue", "#afd4ff"},
+        {"navy", "#afd4ff"},
+        {"midnightblue", "#becfff"},
+        {"royalblue", "#b1d3ff"},
         {"slateblue", "#a993ff"},
         {"darkslateblue", "#ab9cff"},
         {"cyan", "#7ee7e7"},
@@ -155,6 +155,46 @@ static void lighten_hex_color(char *output, const char *hex, size_t output_size)
     g_snprintf(output, output_size, "#%02lx%02lx%02lx", r, g, b);
 }
 
+static void lift_hex_color_for_dark_theme(char *output, const char *hex, size_t output_size) {
+    char *endptr;
+    unsigned long r = 0, g = 0, b = 0;
+
+    if (!hex || hex[0] != '#') {
+        g_strlcpy(output, hex ? hex : "", output_size);
+        return;
+    }
+
+    const char *c = hex + 1;
+    size_t len = strlen(c);
+
+    if (len == 3) {
+        char tmp[4] = {c[0], c[0], '\0'};
+        r = strtoul(tmp, &endptr, 16);
+        tmp[0] = c[1]; tmp[1] = c[1];
+        g = strtoul(tmp, &endptr, 16);
+        tmp[0] = c[2]; tmp[1] = c[2];
+        b = strtoul(tmp, &endptr, 16);
+    } else if (len >= 6) {
+        char tmp[3] = {c[0], c[1], '\0'};
+        r = strtoul(tmp, &endptr, 16);
+        tmp[0] = c[2]; tmp[1] = c[3];
+        g = strtoul(tmp, &endptr, 16);
+        tmp[0] = c[4]; tmp[1] = c[5];
+        b = strtoul(tmp, &endptr, 16);
+    } else {
+        g_strlcpy(output, hex, output_size);
+        return;
+    }
+
+    double luminance = 0.2126 * (double)r + 0.7152 * (double)g + 0.0722 * (double)b;
+    double factor = luminance < 70.0 ? 0.82 : (luminance < 135.0 ? 0.66 : 0.46);
+    r = (size_t)(r + (245 - r) * factor);
+    g = (size_t)(g + (245 - g) * factor);
+    b = (size_t)(b + (245 - b) * factor);
+
+    g_snprintf(output, output_size, "#%02lx%02lx%02lx", r, g, b);
+}
+
 static void darken_hex_color(char *output, const char *hex, size_t output_size, double factor) {
     char *endptr;
     unsigned long r = 0, g = 0, b = 0;
@@ -253,10 +293,14 @@ static char *adjust_color_value_for_theme(const char *value, gboolean dark_mode,
                         if (r > 96 || g > 96 || b > 96) {
                             r *= 0.24; g *= 0.24; b *= 0.24;
                         }
-                    } else if (r < 160 || g < 160 || b < 160) {
-                        r += (230 - r) * 0.45;
-                        g += (230 - g) * 0.45;
-                        b += (230 - b) * 0.45;
+                    } else {
+                        double luminance = 0.2126 * (double)r + 0.7152 * (double)g + 0.0722 * (double)b;
+                        if (luminance < 170.0) {
+                            double factor = luminance < 70.0 ? 0.82 : (luminance < 135.0 ? 0.66 : 0.46);
+                            r += (245 - r) * factor;
+                            g += (245 - g) * factor;
+                            b += (245 - b) * factor;
+                        }
                     }
                 }
 
@@ -287,7 +331,7 @@ static char *adjust_color_value_for_theme(const char *value, gboolean dark_mode,
             if (is_background) {
                 darken_hex_color(adjusted, trimmed, sizeof(adjusted), 0.28);
             } else {
-                lighten_hex_color(adjusted, trimmed, sizeof(adjusted));
+                lift_hex_color_for_dark_theme(adjusted, trimmed, sizeof(adjusted));
             }
             g_free(trimmed);
             return g_strdup(adjusted);
@@ -1877,6 +1921,9 @@ char* dsl_render_to_html(const char *dsl_text,
         ".dict-link{color:");
     buf_append_str(&b, link_color);
     buf_append_str(&b, ";text-decoration:none;cursor:pointer;}"
+        "a,a:visited{color:");
+    buf_append_str(&b, link_color);
+    buf_append_str(&b, " !important;}"
         ".dict-link:hover{text-decoration:underline;}"
         ".dsl-media-image{display:block;max-width:100%;height:auto;margin:0.35em 0;}"
         ".trn{color:");
@@ -2044,7 +2091,6 @@ char* dsl_render_to_html(const char *dsl_text,
             "<style>"
             "pre,code{background:#242424; color:#ececec;}"
             "table,td,th{border-color:#555555;}"
-            "a{color:#8fc7ff;}"
             "</style>");
     } else {
         buf_append_str(&b,

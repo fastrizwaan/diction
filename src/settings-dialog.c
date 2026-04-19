@@ -391,9 +391,12 @@ typedef struct {
     volatile gint generation; /* used for cancellation */
     int found_count;
     int processed_count;
+    int failed_count;
     int total_dirs;
     gboolean call_reload;
     gboolean cancelled;
+    gboolean scan_done_received;
+    gboolean completion_handled;
     /* When integrating with main loader, only show entries from these dirs */
     char **scan_dirs;
     int n_scan_dirs;
@@ -418,6 +421,58 @@ typedef struct {
 
 /* Active scan contexts registered when integrating with the main loader */
 static GList *active_scan_contexts = NULL;
+
+static void scan_context_update_processing_status(ScanContext *ctx) {
+    if (!ctx || !ctx->status_label) {
+        return;
+    }
+
+    char buf[256];
+    g_snprintf(buf, sizeof(buf), "Processed %d of %d dictionaries",
+               ctx->processed_count, ctx->found_count);
+    gtk_label_set_text(GTK_LABEL(ctx->status_label), buf);
+}
+
+static void scan_context_finish_ui_if_ready(ScanContext *ctx) {
+    if (!ctx || ctx->completion_handled ||
+        !ctx->scan_done_received || ctx->processed_count < ctx->found_count) {
+        return;
+    }
+
+    ctx->completion_handled = TRUE;
+
+    gtk_spinner_stop(GTK_SPINNER(ctx->spinner));
+
+    char buf[256];
+    if (ctx->failed_count > 0) {
+        g_snprintf(buf, sizeof(buf), "%s — %d loaded, %d failed",
+                   ctx->cancelled ? "Scan canceled" : "Scan complete",
+                   ctx->found_count - ctx->failed_count,
+                   ctx->failed_count);
+    } else {
+        g_snprintf(buf, sizeof(buf), "%s — %d dictionaries found",
+                   ctx->cancelled ? "Scan canceled" : "Scan complete",
+                   ctx->found_count);
+    }
+    gtk_label_set_text(GTK_LABEL(ctx->status_label), buf);
+
+    if (ctx->close_btn) {
+        gtk_widget_set_sensitive(ctx->close_btn, TRUE);
+        gtk_widget_add_css_class(ctx->close_btn, "suggested-action");
+    }
+    if (ctx->cancel_btn) {
+        gtk_widget_set_sensitive(ctx->cancel_btn, FALSE);
+    }
+
+    if (!ctx->cancelled && ctx->call_reload &&
+        ctx->data && settings_dialog_is_active(ctx->data)) {
+        refresh_dictionary_lists(ctx->data);
+    }
+    if (!ctx->cancelled && !ctx->call_reload &&
+        ctx->data && settings_dialog_is_active(ctx->data) && ctx->data->reload_callback) {
+        ctx->data->reload_callback(ctx->data->user_data);
+    }
+}
 
 static gboolean scan_idle_add_entry(gpointer user_data) {
     ScanIdleData *sid = user_data;
@@ -458,11 +513,7 @@ static gboolean scan_idle_add_entry(gpointer user_data) {
             g_hash_table_replace(ctx->row_map, g_strdup(sid->path), row);
         }
         ctx->found_count++;
-        
-        char buf[256];
-        g_snprintf(buf, sizeof(buf), "Found %d, processing %d of %d", 
-                  ctx->found_count, ctx->processed_count, ctx->found_count);
-        gtk_label_set_text(GTK_LABEL(ctx->status_label), buf);
+        scan_context_update_processing_status(ctx);
 
     } else if (sid->event_type == DICT_LOADER_EVENT_FINISHED) {
         /* Update row with final name and tick mark when finished. */
@@ -474,37 +525,44 @@ static gboolean scan_idle_add_entry(gpointer user_data) {
                     adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row), sid->name);
                 }
                 adw_action_row_set_subtitle(ADW_ACTION_ROW(row), sid->path);
-                
-                GtkWidget *check = gtk_image_new_from_icon_name("object-select-symbolic");
-                gtk_widget_add_css_class(check, "success"); // Green color in many themes
-                adw_action_row_add_suffix(ADW_ACTION_ROW(row), check);
+
+                if (!g_object_get_data(G_OBJECT(row), "scan-status-icon")) {
+                    GtkWidget *check = gtk_image_new_from_icon_name("object-select-symbolic");
+                    gtk_widget_add_css_class(check, "success");
+                    adw_action_row_add_suffix(ADW_ACTION_ROW(row), check);
+                    g_object_set_data(G_OBJECT(row), "scan-status-icon", check);
+                }
             }
         }
         ctx->processed_count++;
+        scan_context_update_processing_status(ctx);
+        scan_context_finish_ui_if_ready(ctx);
 
-        char buf[256];
-        g_snprintf(buf, sizeof(buf), "Found %d, processing %d of %d", 
-                  ctx->found_count, ctx->processed_count, ctx->found_count);
-        gtk_label_set_text(GTK_LABEL(ctx->status_label), buf);
+    } else if (sid->event_type == DICT_LOADER_EVENT_FAILED) {
+        if (sid->path && ctx->row_map) {
+            gpointer val = g_hash_table_lookup(ctx->row_map, sid->path);
+            if (val) {
+                GtkWidget *row = val;
+                if (sid->name && *sid->name) {
+                    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row), sid->name);
+                }
+                adw_action_row_set_subtitle(ADW_ACTION_ROW(row), "Failed to load");
+
+                if (!g_object_get_data(G_OBJECT(row), "scan-status-icon")) {
+                    GtkWidget *icon = gtk_image_new_from_icon_name("dialog-warning-symbolic");
+                    adw_action_row_add_suffix(ADW_ACTION_ROW(row), icon);
+                    g_object_set_data(G_OBJECT(row), "scan-status-icon", icon);
+                }
+            }
+        }
+        ctx->processed_count++;
+        ctx->failed_count++;
+        scan_context_update_processing_status(ctx);
+        scan_context_finish_ui_if_ready(ctx);
 
     } else if (sid->event_type == -1) {
-        /* Scan finished */
-        gtk_spinner_stop(GTK_SPINNER(ctx->spinner));
-        char buf[256];
-        g_snprintf(buf, sizeof(buf), "%s — %d dictionaries found",
-                   ctx->cancelled ? "Scan canceled" : "Scan complete",
-                   ctx->found_count);
-        gtk_label_set_text(GTK_LABEL(ctx->status_label), buf);
-        if (ctx->close_btn) gtk_widget_set_sensitive(ctx->close_btn, TRUE);
-        if (ctx->cancel_btn) gtk_widget_set_sensitive(ctx->cancel_btn, FALSE);
-        if (!ctx->cancelled && ctx->call_reload &&
-            ctx->data && settings_dialog_is_active(ctx->data)) {
-            refresh_dictionary_lists(ctx->data);
-        }
-        if (!ctx->cancelled && !ctx->call_reload &&
-            ctx->data && settings_dialog_is_active(ctx->data) && ctx->data->reload_callback) {
-            ctx->data->reload_callback(ctx->data->user_data);
-        }
+        ctx->scan_done_received = TRUE;
+        scan_context_finish_ui_if_ready(ctx);
     }
 
     g_free(sid->name);
@@ -744,6 +802,7 @@ void show_scan_dialog_for_dirs(SettingsDialogData *data, char **dirs, int n_dirs
     GtkWidget *cancel_btn = gtk_button_new_with_label("Cancel");
     GtkWidget *close_btn = gtk_button_new_with_label("Close");
     gtk_widget_set_sensitive(close_btn, FALSE);
+    gtk_widget_remove_css_class(close_btn, "suggested-action");
     gtk_box_append(GTK_BOX(footer), cancel_btn);
     gtk_box_append(GTK_BOX(footer), close_btn);
     adw_toolbar_view_add_bottom_bar(ADW_TOOLBAR_VIEW(toolbar_view), footer);

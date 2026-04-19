@@ -1783,102 +1783,202 @@ static void close_tag(StrBuf *b, const char *name, ActiveTag *active_tags, int *
 }
 
 void dict_render_get_theme_palette(const char *theme_name, int dark_mode, dsl_theme_palette *out) {
-    /* Set defaults */
+    /* Defaults */
     out->fg = dark_mode ? "#e0e0e0" : "#222222";
     out->bg = dark_mode ? "#1e1e21" : "#ffffff";
     out->link = dark_mode ? "#7fb0e0" : "#005bbb";
-    out->accent = dark_mode ? "#e0b07f" : "#e45649";
+    out->accent = dark_mode ? "#e0b07f" : "#e45649"; /* keyword */
     out->border = dark_mode ? "#444444" : "#cccccc";
-    out->heading = dark_mode ? "#e0e0e0" : "#222222";
+    out->heading = out->fg;
     out->trn = out->fg;
     out->translit = dark_mode ? "#888888" : "#808080";
-    out->ex = dark_mode ? "#9ae59a" : "#1e8e3e"; /* default green */
-    out->com = out->fg;
-    out->pos = dark_mode ? "#db8383" : "#dc3b3b"; 
     out->string = out->fg;
+    out->ex = dark_mode ? "#9ae59a" : "#1e8e3e";
+    out->com = out->fg;
+    out->pos = out->accent;
 
     if (!theme_name) return;
 
+    /* ---------------- SOLARIZED ---------------- */
     if (g_strcmp0(theme_name, "solarized") == 0) {
         if (dark_mode) {
-            out->bg = "#002b36"; out->fg = "#839496"; out->accent = "#859900"; out->heading = "#268bd2"; out->link = "#268bd2"; out->border = "#073642";
-            out->translit = "#586e75"; out->string = "#2aa198";
+            out->bg = "#002b36"; out->fg = "#839496";
+            out->accent = "#859900";             /* keywords */
+            out->heading = "#268bd2";
+            out->link = "#268bd2";
+            out->border = "#073642";
+            out->translit = "#586e75";
+            out->string = "#2aa198";             /* strings */
         } else {
-            out->bg = "#fdf6e3"; out->fg = "#657b83"; out->accent = "#859900"; out->heading = "#268bd2"; out->link = "#268bd2"; out->border = "#eee8d5";
-            out->translit = "#93a1a1"; out->string = "#2aa198";
+            out->bg = "#fdf6e3"; out->fg = "#657b83";
+            out->accent = "#859900";
+            out->heading = "#268bd2";
+            out->link = "#268bd2";
+            out->border = "#eee8d5";
+            out->translit = "#93a1a1";
+            out->string = "#2aa198";
         }
+
+    /* ---------------- DRACULA ---------------- */
     } else if (g_strcmp0(theme_name, "dracula") == 0) {
         if (dark_mode) {
-            out->bg = "#282a36"; out->fg = "#f8f8f2"; out->accent = "#ff79c6"; out->heading = "#bd93f9"; out->link = "#8be9fd"; out->border = "#44475a";
-            out->translit = "#6272a4"; out->string = "#f1fa8c";
+            out->bg = "#282a36"; out->fg = "#f8f8f2";
+            out->accent = "#ff79c6";             /* keyword */
+            out->heading = "#bd93f9";
+            out->link = "#8be9fd";
+            out->border = "#44475a";
+            out->translit = "#6272a4";
+            out->string = "#f1fa8c";             /* string */
         } else {
-            out->bg = "#ffffff"; out->fg = "#282a36"; out->accent = "#ff79c6"; out->heading = "#6272a4"; out->link = "#22a2c9"; out->border = "#f1f2f8";
-            out->translit = "#6272a4"; out->string = "#f1fa8c";
+            out->bg = "#ffffff"; out->fg = "#282a36";
+            out->accent = "#ff79c6";
+            out->heading = "#6272a4";
+            out->link = "#22a2c9";
+            out->border = "#f1f2f8";
+            out->translit = "#6272a4";
+            out->string = "#50fa7b";             /* adapted string */
         }
+
+    /* ---------------- NORD ---------------- */
     } else if (g_strcmp0(theme_name, "nord") == 0) {
         if (dark_mode) {
-            out->bg = "#2e3440"; out->fg = "#eceff4"; out->accent = "#a3be8c"; out->heading = "#88c0d0"; out->link = "#81a1c1"; out->border = "#3b4252";
-            out->translit = "#4c566a"; out->string = "#a3be8c";
+            out->bg = "#2e3440"; out->fg = "#eceff4";
+            out->accent = "#81a1c1";             /* keywords (blue) */
+            out->heading = "#88c0d0";
+            out->link = "#81a1c1";
+            out->border = "#3b4252";
+            out->translit = "#4c566a";
+            out->string = "#a3be8c";             /* strings (green) */
         } else {
-            out->bg = "#eceff4"; out->fg = "#2e3440"; out->accent = "#4c566a"; out->heading = "#5e81ac"; out->link = "#81a1c1"; out->border = "#d8dee9";
-            out->translit = "#4c566a"; out->string = "#a3be8c";
+            out->bg = "#eceff4"; out->fg = "#2e3440";
+            out->accent = "#5e81ac";
+            out->heading = "#5e81ac";
+            out->link = "#81a1c1";
+            out->border = "#d8dee9";
+            out->translit = "#4c566a";
+            out->string = "#a3be8c";
         }
+
+    /* ---------------- GRUVBOX ---------------- */
     } else if (g_strcmp0(theme_name, "gruvbox") == 0) {
         if (dark_mode) {
-            out->bg = "#282828"; out->fg = "#ebdbb2"; out->accent = "#b8bb26"; out->heading = "#83a598"; out->link = "#458588"; out->border = "#3c3836";
-            out->translit = "#7c6f64"; out->string = "#b8bb26";
+            out->bg = "#282828"; out->fg = "#ebdbb2";
+            out->accent = "#fb4934";             /* keywords (red) */
+            out->heading = "#83a598";
+            out->link = "#458588";
+            out->border = "#3c3836";
+            out->translit = "#7c6f64";
+            out->string = "#b8bb26";             /* strings (green) */
         } else {
-            out->bg = "#fbf1c7"; out->fg = "#3c3836"; out->accent = "#79740e"; out->heading = "#076678"; out->link = "#af3a03"; out->border = "#ebdbb2";
-            out->translit = "#928374"; out->string = "#79740e";
+            out->bg = "#fbf1c7"; out->fg = "#3c3836";
+            out->accent = "#cc241d";
+            out->heading = "#076678";
+            out->link = "#af3a03";
+            out->border = "#ebdbb2";
+            out->translit = "#928374";
+            out->string = "#79740e";
         }
+
+    /* ---------------- MONOKAI ---------------- */
     } else if (g_strcmp0(theme_name, "monokai") == 0) {
         if (dark_mode) {
-            out->bg = "#272822"; out->fg = "#f8f8f2"; out->accent = "#f92672"; out->heading = "#e6db74"; out->link = "#66d9ef"; out->border = "#3e3d32";
-            out->translit = "#75715e"; out->string = "#e6db74";
+            out->bg = "#272822"; out->fg = "#f8f8f2";
+            out->accent = "#f92672";             /* keyword */
+            out->heading = "#66d9ef";
+            out->link = "#66d9ef";
+            out->border = "#3e3d32";
+            out->translit = "#75715e";
+            out->string = "#e6db74";             /* string */
         } else {
-            out->bg = "#ffffff"; out->fg = "#272822"; out->accent = "#f92672"; out->heading = "#fd971f"; out->link = "#66d9ef"; out->border = "#f1f1f1";
-            out->translit = "#75715e"; out->string = "#fd971f";
+            out->bg = "#ffffff"; out->fg = "#272822";
+            out->accent = "#f92672";
+            out->heading = "#fd971f";
+            out->link = "#66d9ef";
+            out->border = "#f1f1f1";
+            out->translit = "#75715e";
+            out->string = "#e6db74";
         }
+
+    /* ---------------- MATERIAL ---------------- */
     } else if (g_strcmp0(theme_name, "material") == 0) {
         if (dark_mode) {
-            out->bg = "#263238"; out->fg = "#eeffff"; out->accent = "#c3e88d"; out->heading = "#80deea"; out->link = "#82b1ff"; out->border = "#37474f";
-            out->translit = "#546e7a"; out->string = "#c3e88d";
+            out->bg = "#263238"; out->fg = "#eeffff";
+            out->accent = "#c792ea";             /* keyword (purple) */
+            out->heading = "#82aaff";
+            out->link = "#82aaff";
+            out->border = "#37474f";
+            out->translit = "#546e7a";
+            out->string = "#c3e88d";             /* string (green) */
         } else {
-            out->bg = "#ffffff"; out->fg = "#263238"; out->accent = "#91b859"; out->heading = "#00bcd4"; out->link = "#03a9f4"; out->border = "#eceff1";
-            out->translit = "#90a4ae"; out->string = "#91b859";
+            out->bg = "#ffffff"; out->fg = "#263238";
+            out->accent = "#7c4dff";
+            out->heading = "#00bcd4";
+            out->link = "#03a9f4";
+            out->border = "#eceff1";
+            out->translit = "#90a4ae";
+            out->string = "#91b859";
         }
+
+    /* ---------------- OCEAN (Material Ocean) ---------------- */
     } else if (g_strcmp0(theme_name, "ocean") == 0) {
         if (dark_mode) {
-            out->bg = "#0f111a"; out->fg = "#eeffff"; out->accent = "#c3e88d"; out->heading = "#82aaff"; out->link = "#89ddff"; out->border = "#1a1c25";
-            out->translit = "#546e7a"; out->string = "#c3e88d";
+            out->bg = "#0f111a"; out->fg = "#eeffff";
+            out->accent = "#c792ea";             /* keyword */
+            out->heading = "#82aaff";
+            out->link = "#89ddff";
+            out->border = "#1a1c25";
+            out->translit = "#546e7a";
+            out->string = "#c3e88d";             /* string */
         } else {
-            out->bg = "#ffffff"; out->fg = "#0f111a"; out->accent = "#2ecc71"; out->heading = "#3498db"; out->link = "#3498db"; out->border = "#f1f2f6";
-            out->translit = "#95a5a6"; out->string = "#2ecc71";
+            out->bg = "#ffffff"; out->fg = "#0f111a";
+            out->accent = "#7c4dff";
+            out->heading = "#3498db";
+            out->link = "#3498db";
+            out->border = "#f1f2f6";
+            out->translit = "#95a5a6";
+            out->string = "#2ecc71";
         }
+
+    /* ---------------- FOREST (custom but fixed semantics) ---------------- */
     } else if (g_strcmp0(theme_name, "forest") == 0) {
         if (dark_mode) {
-            out->bg = "#1b2b1b"; out->fg = "#ddeecc"; out->accent = "#88cc88"; out->heading = "#77bb77"; out->link = "#66aa99"; out->border = "#263626";
-            out->translit = "#5a7a5a"; out->string = "#88cc88";
+            out->bg = "#1b2b1b"; out->fg = "#ddeecc";
+            out->accent = "#ff6b6b";             /* keyword contrast */
+            out->heading = "#77bb77";
+            out->link = "#66aa99";
+            out->border = "#263626";
+            out->translit = "#5a7a5a";
+            out->string = "#88cc88";
         } else {
-            out->bg = "#f0f5f0"; out->fg = "#1b2b1b"; out->accent = "#006400"; out->heading = "#228b22"; out->link = "#2e8b57"; out->border = "#e0e8e0";
-            out->translit = "#7a9a7a"; out->string = "#2e8b57";
+            out->bg = "#f0f5f0"; out->fg = "#1b2b1b";
+            out->accent = "#d7263d";
+            out->heading = "#228b22";
+            out->link = "#2e8b57";
+            out->border = "#e0e8e0";
+            out->translit = "#7a9a7a";
+            out->string = "#2e8b57";
         }
+
+    /* ---------------- SEPIA ---------------- */
     } else if (g_strcmp0(theme_name, "sepia") == 0) {
-        out->bg = "#f4ecd8"; out->fg = "#5d4a44"; out->accent = "#8c3b3b"; out->heading = "#5d4a44"; out->link = "#704214"; out->border = "#dad0b8";
-        out->translit = "#9c8b7a"; out->string = "#704214";
+        out->bg = "#f4ecd8"; out->fg = "#5d4a44";
+        out->accent = "#8c3b3b";                 /* keyword */
+        out->heading = "#5d4a44";
+        out->link = "#704214";
+        out->border = "#dad0b8";
+        out->translit = "#9c8b7a";
+        out->string = "#b58900";                 /* warm string */
     }
-    /* trn and com track fg; ex tracks string color for non-default themes */
+
+    /* Final consistency */
     out->trn = out->fg;
-    if (theme_name && g_strcmp0(theme_name, "default") != 0) {
-        out->ex = out->string;
-    }
     out->com = out->fg;
 
     if (theme_name && g_strcmp0(theme_name, "default") != 0) {
+        out->ex = out->string;
         out->pos = out->accent;
     }
 }
-
 char* dsl_render_to_html(const char *dsl_text,
                          size_t length,
                          const char *headword,

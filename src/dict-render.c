@@ -1794,7 +1794,7 @@ void dict_render_get_theme_palette(const char *theme_name, int dark_mode, dsl_th
     out->translit = dark_mode ? "#888888" : "#808080";
     out->ex = out->fg;
     out->com = out->fg;
-    out->pos = "#ffcc80"; /* Requested default for Part of Speech */
+    out->pos = dark_mode ? "#ffcc80" : "#c90016"; /* Orange in dark, Red in light */
 
     if (!theme_name) return;
 

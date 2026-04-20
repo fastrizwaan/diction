@@ -1084,6 +1084,9 @@ rebuild_cache:
         kbi_dlen = kbi_comp;
     }
 
+    uint64_t internal_icon_id = (uint64_t)-1;
+    char *internal_icon_ext = NULL;
+
     if (kbi_data) {
         const unsigned char *ip = kbi_data, *ie = kbi_data + kbi_dlen;
         while (ip < ie && valid_count < num_entries) {
@@ -1099,7 +1102,7 @@ rebuild_cache:
             uint64_t comp_size = read_num(&ip, num_size);
             uint64_t decomp_size = read_num(&ip, num_size);
 
-            long next_kb = ftell(fh) + comp_size;
+            long next_kb = ftell(fh) + (long)comp_size;
             unsigned char *kb_comp = malloc(comp_size);
             if (fread(kb_comp, 1, comp_size, fh) == comp_size) {
                 size_t kb_dlen = 0;
@@ -1137,6 +1140,23 @@ rebuild_cache:
                             }
                             if (kp_ent < ke_ent) kp_ent++;
                         }
+
+                        /* Detect internal icon entries */
+                        if (internal_icon_id == (uint64_t)-1) {
+                            const char *icon_names[] = {"icon.png", "_logo_", "icon.ico", "icon.jpg", "logo.png", NULL};
+                            for (int i = 0; icon_names[i]; i++) {
+                                if (g_ascii_strcasecmp(word, icon_names[i]) == 0) {
+                                    internal_icon_id = id;
+                                    if (g_str_has_suffix(word, ".ico")) internal_icon_ext = "ico";
+                                    else if (g_str_has_suffix(word, ".jpg")) internal_icon_ext = "jpg";
+                                    else if (g_str_has_suffix(word, ".bmp")) internal_icon_ext = "bmp";
+                                    else internal_icon_ext = "png";
+                                    fprintf(stderr, "[MDX] Found internal icon entry: '%s' at record offset %" G_GUINT64_FORMAT "\n", word, id);
+                                    break;
+                                }
+                            }
+                        }
+
                         size_t wlen = strlen(word);
                         long hw_off = ftell(cache);
                         fwrite(word, 1, wlen, cache);
@@ -1155,6 +1175,7 @@ rebuild_cache:
         }
         free(kbi_data);
     } else {
+
         fprintf(stderr, "[MDX] Failed to decode key block info for %s (v%d, kbi_comp=%" G_GUINT64_FORMAT ", kbi_decomp=%" G_GUINT64_FORMAT ")\n",
                 path, is_v2 ? 2 : 1, kbi_comp, kbi_decomp);
     }
@@ -1202,9 +1223,28 @@ rebuild_cache:
         uint64_t end = (i + 1 < valid_count) ? (uint64_t)tree_entries[i + 1].d_off : total_decomp;
 
         if (end > start && end <= total_decomp) {
-            long def_off = ftell(cache);
             size_t rec_len = (size_t)(end - start);
             const unsigned char *rec_ptr = dict_rec_data + start;
+
+            /* Extract internal icon if this is the matching record */
+            if (start == internal_icon_id) {
+                const char *res_dir = mdx_prepare_resource_dir(path, is_v2, num_size, encoding_is_utf16, encrypted, cancel_flag, expected, NULL);
+                if (res_dir) {
+                    char *icon_filename = g_strdup_printf("mdx_icon.%s", internal_icon_ext);
+                    char *icon_path = g_build_filename(res_dir, icon_filename, NULL);
+                    GError *err = NULL;
+                    if (g_file_set_contents(icon_path, (const char *)rec_ptr, (gssize)rec_len, &err)) {
+                        fprintf(stderr, "[MDX] Extracted internal icon to: %s\n", icon_path);
+                    } else {
+                        fprintf(stderr, "[MDX] Failed to extract internal icon to %s: %s\n", icon_path, err ? err->message : "unknown error");
+                        if (err) g_error_free(err);
+                    }
+                    g_free(icon_filename);
+                    g_free(icon_path);
+                }
+            }
+
+            long def_off = ftell(cache);
 
             if (encoding_is_utf16) {
                 /* Strip UTF-16 null terminator if present */
@@ -1308,18 +1348,38 @@ rebuild_cache:
 
     dict->resource_dir = mdx_prepare_resource_dir(path, is_v2, num_size, encoding_is_utf16, encrypted, cancel_flag, expected, &dict->resource_reader);
     
-    /* Internal MDD icon extraction: check for common icon names in resources */
-    if (dict->resource_reader) {
-        const char *icon_names[] = {"icon.png", "icon.ico", "icon.jpg", "icon.bmp", "/icon.png", "/icon.ico", "logo.png", NULL};
-        for (int i = 0; icon_names[i]; i++) {
-            if (resource_reader_has(dict->resource_reader, icon_names[i])) {
-                dict->icon_path = resource_reader_get(dict->resource_reader, icon_names[i]);
-                if (dict->icon_path) break;
+    /* Internal icon extraction from MDD/MDX resources */
+    if (dict->resource_dir) {
+        /* 1. Check for common icons in MDD resources via reader */
+        if (dict->resource_reader) {
+            const char *icon_names[] = {"icon.png", "icon.ico", "icon.jpg", "icon.bmp", "/icon.png", "/icon.ico", "logo.png", NULL};
+            for (int i = 0; icon_names[i]; i++) {
+                if (resource_reader_has(dict->resource_reader, icon_names[i])) {
+                    dict->icon_path = resource_reader_get(dict->resource_reader, icon_names[i]);
+                    if (dict->icon_path) break;
+                }
+            }
+        }
+
+        /* 2. Check for the specially extracted mdx_icon from MDX records */
+        if (!dict->icon_path) {
+            const char *mdx_icon_exts[] = {"png", "ico", "jpg", "jpeg", "bmp", NULL};
+            for (int i = 0; mdx_icon_exts[i]; i++) {
+                char *mdx_icon_filename = g_strdup_printf("mdx_icon.%s", mdx_icon_exts[i]);
+                char *mdx_icon_path = g_build_filename(dict->resource_dir, mdx_icon_filename, NULL);
+                if (g_file_test(mdx_icon_path, G_FILE_TEST_EXISTS)) {
+                    dict->icon_path = mdx_icon_path;
+                    g_free(mdx_icon_filename);
+                    break;
+                }
+                g_free(mdx_icon_filename);
+                g_free(mdx_icon_path);
             }
         }
     }
 
     return dict;
 }
+
 
 

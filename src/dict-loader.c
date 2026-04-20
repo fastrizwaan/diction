@@ -139,6 +139,7 @@ DictMmap* dict_load_any(const char *path, DictFormat fmt, volatile gint *cancel_
         char *dot = strrchr(base_no_ext, '.');
         if (dot) *dot = '\0';
         
+        /* 1. Try basename match (e.g. dictname.png) */
         for (int i = 0; img_exts[i]; i++) {
             char *icon_candidate = g_strconcat(base_no_ext, img_exts[i], NULL);
             if (g_file_test(icon_candidate, G_FILE_TEST_EXISTS)) {
@@ -147,8 +148,25 @@ DictMmap* dict_load_any(const char *path, DictFormat fmt, volatile gint *cancel_
             }
             g_free(icon_candidate);
         }
+        
+        /* 2. Try generic names (e.g. icon.png) in the same directory */
+        if (!dict->icon_path) {
+            char *dir = g_path_get_dirname(path);
+            const char *generic_names[] = {"icon.png", "icon.ico", "icon.jpg", "logo.png", NULL};
+            for (int i = 0; generic_names[i]; i++) {
+                char *icon_candidate = g_build_filename(dir, generic_names[i], NULL);
+                if (g_file_test(icon_candidate, G_FILE_TEST_EXISTS)) {
+                    dict->icon_path = icon_candidate;
+                    break;
+                }
+                g_free(icon_candidate);
+            }
+            g_free(dir);
+        }
+        
         g_free(base_no_ext);
     }
+
 
     return dict;
 }

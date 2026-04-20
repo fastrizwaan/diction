@@ -847,14 +847,14 @@ static char *mdx_prepare_resource_dir(const char *path, int is_v2, int num_size,
     const char *cache_base = dict_cache_base_dir();
     char *resource_dir = g_build_filename(cache_base, "diction", "resources", mdx_basename, NULL);
 
+    g_mkdir_with_parents(resource_dir, 0755);
+
     GPtrArray *mdd_paths = mdx_collect_mdd_paths(path);
     if (!mdd_paths || mdd_paths->len == 0) {
         g_free(mdx_dir); g_free(mdx_basename);
         if (mdd_paths) g_ptr_array_free(mdd_paths, TRUE);
         return resource_dir;
     }
-
-    g_mkdir_with_parents(resource_dir, 0755);
 
     if (out_reader) {
         *out_reader = mdx_open_mdd_reader(mdd_paths, mdx_dir, is_v2, num_size, encoding_is_utf16, encrypted, cancel_flag, expected);
@@ -863,6 +863,55 @@ static char *mdx_prepare_resource_dir(const char *path, int is_v2, int num_size,
     g_ptr_array_free(mdd_paths, TRUE);
     g_free(mdx_dir); g_free(mdx_basename);
     return resource_dir;
+}
+
+
+
+static void mdx_detect_icon(DictMmap *dict, const char *path) {
+    if (!dict->resource_dir) return;
+
+    /* 1. Check for common icons in MDD resources via reader */
+    if (dict->resource_reader) {
+        char *basename = g_path_get_basename(path);
+        char *dot = strrchr(basename, '.');
+        if (dot) *dot = '\0';
+
+        char *name1 = g_strdup_printf("%s.png", basename);
+        char *name2 = g_strdup_printf("%s.ico", basename);
+        char *name3 = g_strdup_printf("%s.jpg", basename);
+        char *name4 = g_strdup_printf("/%s.png", basename);
+
+        const char *icon_names[] = {
+            name1, name2, name3, name4,
+            "icon.png", "icon.ico", "icon.jpg", "icon.bmp", 
+            "/icon.png", "/icon.ico", "logo.png", "/logo.png", NULL
+        };
+
+        for (int i = 0; icon_names[i]; i++) {
+            if (resource_reader_has(dict->resource_reader, icon_names[i])) {
+                dict->icon_path = resource_reader_get(dict->resource_reader, icon_names[i]);
+                if (dict->icon_path) break;
+            }
+        }
+        g_free(name1); g_free(name2); g_free(name3); g_free(name4);
+        g_free(basename);
+    }
+
+    /* 2. Check for the specially extracted mdx_icon from MDX records */
+    if (!dict->icon_path) {
+        const char *mdx_icon_exts[] = {"png", "ico", "jpg", "jpeg", "bmp", NULL};
+        for (int i = 0; mdx_icon_exts[i]; i++) {
+            char *mdx_icon_filename = g_strdup_printf("mdx_icon.%s", mdx_icon_exts[i]);
+            char *mdx_icon_path = g_build_filename(dict->resource_dir, mdx_icon_filename, NULL);
+            if (g_file_test(mdx_icon_path, G_FILE_TEST_EXISTS)) {
+                dict->icon_path = mdx_icon_path;
+                g_free(mdx_icon_filename);
+                break;
+            }
+            g_free(mdx_icon_filename);
+            g_free(mdx_icon_path);
+        }
+    }
 }
 
 
@@ -1026,8 +1075,10 @@ DictMmap *parse_mdx_file(const char *path, volatile gint *cancel_flag, gint expe
             }
         }
 
-        if (!(cancel_flag && g_atomic_int_get(cancel_flag) != expected))
+        if (!(cancel_flag && g_atomic_int_get(cancel_flag) != expected)) {
             dict->resource_dir = mdx_prepare_resource_dir(path, is_v2, num_size, encoding_is_utf16, encrypted, cancel_flag, expected, &dict->resource_reader);
+            mdx_detect_icon(dict, path);
+        }
 
         g_free(stylesheet);
         g_free(source_dir);
@@ -1143,18 +1194,28 @@ rebuild_cache:
 
                         /* Detect internal icon entries */
                         if (internal_icon_id == (uint64_t)-1) {
-                            const char *icon_names[] = {"icon.png", "_logo_", "icon.ico", "icon.jpg", "logo.png", NULL};
+                            char *basename = g_path_get_basename(path);
+                            char *dot = strrchr(basename, '.');
+                            if (dot) *dot = '\0';
+                            
+                            const char *icon_names[] = {"icon.png", "_logo_", "icon.ico", "icon.jpg", "logo.png", "logo.jpg", NULL};
+                            gboolean found = FALSE;
                             for (int i = 0; icon_names[i]; i++) {
                                 if (g_ascii_strcasecmp(word, icon_names[i]) == 0) {
-                                    internal_icon_id = id;
-                                    if (g_str_has_suffix(word, ".ico")) internal_icon_ext = "ico";
-                                    else if (g_str_has_suffix(word, ".jpg")) internal_icon_ext = "jpg";
-                                    else if (g_str_has_suffix(word, ".bmp")) internal_icon_ext = "bmp";
-                                    else internal_icon_ext = "png";
-                                    fprintf(stderr, "[MDX] Found internal icon entry: '%s' at record offset %" G_GUINT64_FORMAT "\n", word, id);
-                                    break;
+                                    found = TRUE; break;
                                 }
                             }
+                            if (!found && (g_ascii_strcasecmp(basename, word) == 0)) found = TRUE;
+                            
+                            if (found) {
+                                internal_icon_id = id;
+                                if (g_str_has_suffix(word, ".ico")) internal_icon_ext = "ico";
+                                else if (g_str_has_suffix(word, ".jpg") || g_str_has_suffix(word, ".jpeg")) internal_icon_ext = "jpg";
+                                else if (g_str_has_suffix(word, ".bmp")) internal_icon_ext = "bmp";
+                                else internal_icon_ext = "png";
+                                fprintf(stderr, "[MDX] Found internal icon entry: '%s' at record offset %" G_GUINT64_FORMAT "\n", word, id);
+                            }
+                            g_free(basename);
                         }
 
                         size_t wlen = strlen(word);
@@ -1347,36 +1408,7 @@ rebuild_cache:
     g_free(cache_path);
 
     dict->resource_dir = mdx_prepare_resource_dir(path, is_v2, num_size, encoding_is_utf16, encrypted, cancel_flag, expected, &dict->resource_reader);
-    
-    /* Internal icon extraction from MDD/MDX resources */
-    if (dict->resource_dir) {
-        /* 1. Check for common icons in MDD resources via reader */
-        if (dict->resource_reader) {
-            const char *icon_names[] = {"icon.png", "icon.ico", "icon.jpg", "icon.bmp", "/icon.png", "/icon.ico", "logo.png", NULL};
-            for (int i = 0; icon_names[i]; i++) {
-                if (resource_reader_has(dict->resource_reader, icon_names[i])) {
-                    dict->icon_path = resource_reader_get(dict->resource_reader, icon_names[i]);
-                    if (dict->icon_path) break;
-                }
-            }
-        }
-
-        /* 2. Check for the specially extracted mdx_icon from MDX records */
-        if (!dict->icon_path) {
-            const char *mdx_icon_exts[] = {"png", "ico", "jpg", "jpeg", "bmp", NULL};
-            for (int i = 0; mdx_icon_exts[i]; i++) {
-                char *mdx_icon_filename = g_strdup_printf("mdx_icon.%s", mdx_icon_exts[i]);
-                char *mdx_icon_path = g_build_filename(dict->resource_dir, mdx_icon_filename, NULL);
-                if (g_file_test(mdx_icon_path, G_FILE_TEST_EXISTS)) {
-                    dict->icon_path = mdx_icon_path;
-                    g_free(mdx_icon_filename);
-                    break;
-                }
-                g_free(mdx_icon_filename);
-                g_free(mdx_icon_path);
-            }
-        }
-    }
+    mdx_detect_icon(dict, path);
 
     return dict;
 }

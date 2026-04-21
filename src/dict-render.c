@@ -2082,7 +2082,13 @@ char* dsl_render_to_html(const char *dsl_text,
 
     const char *bg_color = palette.bg;
     const char *body_color = palette.fg;
+    
+    char lifted_link[64];
     const char *link_color = palette.link;
+    if (dark_mode && link_color && link_color[0] == '#') {
+        lift_hex_color_for_dark_theme(lifted_link, link_color, sizeof(lifted_link));
+        link_color = lifted_link;
+    }
     const char *heading_color = palette.heading;
     const char *pos_color = palette.pos;
     const char *border_color = palette.border;
@@ -2138,13 +2144,10 @@ char* dsl_render_to_html(const char *dsl_text,
         "table{max-width:100%;border-collapse:collapse;}"
         "td,th{vertical-align:top;}"
         "pre,code{white-space:pre-wrap;border-radius:6px;padding:0.2em 0.35em;}"
-        ".dict-link{color:");
+        ".dict-link, a, a:link, a:visited, a:active, kref, ref, .reference{color:");
     buf_append_str(&b, link_color);
-    buf_append_str(&b, ";text-decoration:none;cursor:pointer;}");
-    buf_append_str(&b, "a[href],a[href]:visited{color:");
-    buf_append_str(&b, link_color);
-    buf_append_str(&b, " !important;}");
-    buf_append_str(&b, ".dict-link:hover{text-decoration:underline;}");
+    buf_append_str(&b, " !important;text-decoration:none;cursor:pointer;}");
+    buf_append_str(&b, "a:hover, .dict-link:hover, kref:hover, ref:hover{text-decoration:underline !important;}");
     buf_append_str(&b, ".dsl-media-image{display:block;max-width:100%;height:auto;margin:0.35em 0;}");
     buf_append_str(&b, ".trn, .sense{color:");
     buf_append_str(&b, trn_color);
@@ -2167,8 +2170,8 @@ char* dsl_render_to_html(const char *dsl_text,
     buf_append_str(&b, border_color);
     buf_append_str(&b, ";margin:10px 0;}");
     /* MDX font color overrides to follow theme */
-    buf_append_str(&b, "font[color=blue],font[color=\"blue\"],font[color=\"#0000ff\"]{color:");
-    buf_append_str(&b, trn_color);
+    buf_append_str(&b, "font[color=blue],font[color=\"blue\"],font[color=\"#0000ff\"],font[color=\"#0000ee\"]{color:");
+    buf_append_str(&b, link_color);
     buf_append_str(&b, " !important;}");
     buf_append_str(&b, "font[color=red],font[color=\"red\"],font[color=\"#ff0000\"]{color:");
     buf_append_str(&b, heading_color);

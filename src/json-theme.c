@@ -279,6 +279,9 @@ static JsonTheme *load_theme_from_json(const char *path) {
                 theme->bg = g_strdup(val);
             if ((val = json_object_get_string_safe(colors, "editor.foreground")))
                 theme->fg = g_strdup(val);
+            if ((val = json_object_get_string_safe(colors, "textLink.foreground")) ||
+                (val = json_object_get_string_safe(colors, "editor.selectionBackground")))
+                theme->link = g_strdup(val);
             if ((val = json_object_get_string_safe(colors, "editorLineNumber.foreground")) ||
                 (val = json_object_get_string_safe(colors, "tab.border")) ||
                 (val = json_object_get_string_safe(colors, "editorGroup.border")))
@@ -296,7 +299,6 @@ static JsonTheme *load_theme_from_json(const char *path) {
     if (!theme->fg) theme->fg = g_strdup("#d4d4d4");
     if (!theme->border) theme->border = g_strdup("#444444");
     if (!theme->accent) theme->accent = g_strdup(theme->fg);
-    if (!theme->link) theme->link = g_strdup(theme->fg);
     if (!theme->heading) theme->heading = g_strdup(theme->fg);
     if (!theme->trn) theme->trn = g_strdup(theme->fg);
     if (!theme->translit) theme->translit = g_strdup(theme->fg);
@@ -304,6 +306,17 @@ static JsonTheme *load_theme_from_json(const char *path) {
     if (!theme->com) theme->com = g_strdup(theme->fg);
     if (!theme->pos) theme->pos = g_strdup(theme->fg);
     if (!theme->string) theme->string = g_strdup(theme->fg);
+
+    if (!theme->link) {
+        /* Intelligent link fallback based on background luminance */
+        gboolean is_dark = TRUE;
+        int r, g, b;
+        if (theme->bg && sscanf(theme->bg + 1, "%02x%02x%02x", &r, &g, &b) == 3) {
+            double lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+            is_dark = lum < 128;
+        }
+        theme->link = g_strdup(is_dark ? "#7fb0e0" : "#005bbb");
+    }
 
     g_object_unref(parser);
     return theme;
@@ -342,10 +355,14 @@ void json_theme_manager_init(void) {
         g_free(datadir);
     }
 
-    /* Local runtime paths /data/themes if running flatpak locally or dev */
-    char *cwd_dir = g_build_filename("data", "themes", NULL);
-    scan_theme_dir(cwd_dir);
-    g_free(cwd_dir);
+    /* Local runtime paths if running flatpak locally or dev */
+    char *cwd_data_themes = g_build_filename("data", "themes", NULL);
+    scan_theme_dir(cwd_data_themes);
+    g_free(cwd_data_themes);
+
+    char *cwd_vscode_themes = g_build_filename("vscode-themes", NULL);
+    scan_theme_dir(cwd_vscode_themes);
+    g_free(cwd_vscode_themes);
 
     /* 2. User directory */
     char *userdir = g_build_filename(g_get_user_data_dir(), "diction", "themes", NULL);

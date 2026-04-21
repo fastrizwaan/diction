@@ -455,7 +455,6 @@ DictMmap* dict_mmap_open(const char *path, volatile gint *cancel_flag, gint expe
                     /* Basic sanity checks */
                     if (h_off < 8 || (uint64_t)h_off >= data_region_end) { valid_index = FALSE; break; }
                     if (d_off < 8 || (uint64_t)d_off >= data_region_end) { valid_index = FALSE; break; }
-                    if (h_len == 0 || d_len == 0) { valid_index = FALSE; break; }
                     if ((uint64_t)h_off + h_len > data_region_end) { valid_index = FALSE; break; }
                     if ((uint64_t)d_off + d_len > data_region_end) { valid_index = FALSE; break; }
                 }

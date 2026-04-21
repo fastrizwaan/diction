@@ -20,6 +20,7 @@
 #include <fcntl.h>
 #include <utime.h>
 #include <errno.h>
+#include <gdk-pixbuf/gdk-pixbuf.h>
 
 /* Cache helpers for persistent dictionary storage */
 
@@ -866,6 +867,53 @@ static char *mdx_prepare_resource_dir(const char *path, int is_v2, int num_size,
 }
 
 
+/* Convert a BMP or ICO icon file to PNG using GdkPixbuf.
+ * Returns a newly allocated path to the PNG file, or NULL on failure.
+ * The caller should free the returned string with g_free(). */
+static char *mdx_convert_icon_to_png(const char *icon_path) {
+    if (!icon_path) return NULL;
+
+    /* Only convert formats WebKit's <img> can't render */
+    gboolean is_bmp = g_str_has_suffix(icon_path, ".bmp") || g_str_has_suffix(icon_path, ".BMP");
+    gboolean is_ico = g_str_has_suffix(icon_path, ".ico") || g_str_has_suffix(icon_path, ".ICO");
+    if (!is_bmp && !is_ico) return NULL;
+
+    /* Build the target PNG path: strip extension, add .png */
+    char *base = g_strdup(icon_path);
+    char *dot = strrchr(base, '.');
+    if (dot) *dot = '\0';
+    char *png_path = g_strconcat(base, ".png", NULL);
+    g_free(base);
+
+    /* If already converted, reuse */
+    if (g_file_test(png_path, G_FILE_TEST_EXISTS)) {
+        return png_path;
+    }
+
+    GError *err = NULL;
+    GdkPixbuf *pixbuf = gdk_pixbuf_new_from_file(icon_path, &err);
+    if (!pixbuf) {
+        fprintf(stderr, "[MDX] Icon conversion failed (load): %s — %s\n",
+                icon_path, err ? err->message : "unknown");
+        g_clear_error(&err);
+        g_free(png_path);
+        return NULL;
+    }
+
+    if (!gdk_pixbuf_save(pixbuf, png_path, "png", &err, NULL)) {
+        fprintf(stderr, "[MDX] Icon conversion failed (save): %s — %s\n",
+                png_path, err ? err->message : "unknown");
+        g_clear_error(&err);
+        g_object_unref(pixbuf);
+        g_free(png_path);
+        return NULL;
+    }
+
+    g_object_unref(pixbuf);
+    fprintf(stderr, "[MDX] Converted icon to PNG: %s\n", png_path);
+    return png_path;
+}
+
 
 static void mdx_detect_icon(DictMmap *dict, const char *path) {
     if (!dict->resource_dir) return;
@@ -883,7 +931,7 @@ static void mdx_detect_icon(DictMmap *dict, const char *path) {
 
         const char *icon_names[] = {
             name1, name2, name3, name4,
-            "icon.png", "icon.ico", "icon.jpg", "icon.bmp", 
+            "icon.png", "icon.ico", "icon.jpg", "icon.bmp",
             "/icon.png", "/icon.ico", "logo.png", "/logo.png", NULL
         };
 
@@ -910,6 +958,15 @@ static void mdx_detect_icon(DictMmap *dict, const char *path) {
             }
             g_free(mdx_icon_filename);
             g_free(mdx_icon_path);
+        }
+    }
+
+    /* 3. Convert BMP/ICO icons to PNG so WebKit can render them in <img> tags */
+    if (dict->icon_path) {
+        char *png_path = mdx_convert_icon_to_png(dict->icon_path);
+        if (png_path) {
+            g_free(dict->icon_path);
+            dict->icon_path = png_path;
         }
     }
 }

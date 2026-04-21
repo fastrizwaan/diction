@@ -1,4 +1,5 @@
 #include "dict-loader.h"
+#include "dict-cache.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -6,6 +7,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <gdk-pixbuf/gdk-pixbuf.h>
 
 /* ── helpers ─────────────────────────────────────────────── */
 
@@ -136,10 +138,19 @@ DictMmap* dict_load_any(const char *path, DictFormat fmt, volatile gint *cancel_
     if (dict && !dict->icon_path) {
         const char *img_exts[] = {".png", ".ico", ".jpg", ".jpeg", ".bmp", NULL};
         char *base_no_ext = g_strdup(path);
-        char *dot = strrchr(base_no_ext, '.');
-        if (dot) *dot = '\0';
+
+        /* Strip double extension for compressed DSL (.dsl.dz) */
+        if (ends_with_ci(base_no_ext, ".dsl.dz")) {
+            base_no_ext[strlen(base_no_ext) - 7] = '\0'; /* strip ".dsl.dz" */
+        } else if (ends_with_ci(base_no_ext, ".dsl")) {
+            base_no_ext[strlen(base_no_ext) - 4] = '\0';
+        } else {
+            /* Generic: strip the last extension */
+            char *dot = strrchr(base_no_ext, '.');
+            if (dot) *dot = '\0';
+        }
         
-        /* 1. Try basename match (e.g. dictname.png) */
+        /* 1. Try basename match (e.g. dictname.png / dictname.bmp) */
         for (int i = 0; img_exts[i]; i++) {
             char *icon_candidate = g_strconcat(base_no_ext, img_exts[i], NULL);
             if (g_file_test(icon_candidate, G_FILE_TEST_EXISTS)) {
@@ -162,6 +173,47 @@ DictMmap* dict_load_any(const char *path, DictFormat fmt, volatile gint *cancel_
                 g_free(icon_candidate);
             }
             g_free(dir);
+        }
+
+        /* 3. Convert BMP/ICO to PNG so WebKit <img> tags can display them */
+        if (dict->icon_path) {
+            gboolean is_bmp = g_str_has_suffix(dict->icon_path, ".bmp") ||
+                              g_str_has_suffix(dict->icon_path, ".BMP");
+            gboolean is_ico = g_str_has_suffix(dict->icon_path, ".ico") ||
+                              g_str_has_suffix(dict->icon_path, ".ICO");
+            if (is_bmp || is_ico) {
+                char *hash = g_compute_checksum_for_string(G_CHECKSUM_SHA1, dict->icon_path, -1);
+                const char *base = dict_cache_base_dir();
+                char *icons_dir = g_build_filename(base, "diction", "icons", NULL);
+                g_mkdir_with_parents(icons_dir, 0755);
+
+                /* e.g. ~/.cache/diction/icons/ab12cd...89.png */
+                char *png_path = g_strdup_printf("%s/%s.png", icons_dir, hash);
+                g_free(icons_dir);
+                g_free(hash);
+
+                if (!g_file_test(png_path, G_FILE_TEST_EXISTS)) {
+                    GError *err = NULL;
+                    GdkPixbuf *pixbuf = gdk_pixbuf_new_from_file(dict->icon_path, &err);
+                    if (pixbuf) {
+                        if (!gdk_pixbuf_save(pixbuf, png_path, "png", &err, NULL)) {
+                            g_clear_error(&err);
+                            g_free(png_path);
+                            png_path = NULL;
+                        }
+                        g_object_unref(pixbuf);
+                    } else {
+                        g_clear_error(&err);
+                        g_free(png_path);
+                        png_path = NULL;
+                    }
+                }
+
+                if (png_path) {
+                    g_free(dict->icon_path);
+                    dict->icon_path = png_path;
+                }
+            }
         }
         
         g_free(base_no_ext);

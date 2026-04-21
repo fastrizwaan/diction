@@ -1297,13 +1297,32 @@ static gboolean transform_sidebar_star_visibility(GBinding *binding, const GValu
     return TRUE;
 }
 
+static const char *dict_format_emoji(DictFormat fmt) {
+    switch (fmt) {
+        case DICT_FORMAT_DSL:      return "📖";
+        case DICT_FORMAT_MDX:      return "📘";
+        case DICT_FORMAT_BGL:      return "📕";
+        case DICT_FORMAT_STARDICT: return "📗";
+        case DICT_FORMAT_SLOB:     return "📙";
+        default:                   return "📚";
+    }
+}
+
 static void sidebar_list_item_setup(GtkSignalListItemFactory *factory, GtkListItem *item, gpointer user_data) {
     (void)factory;
     (void)user_data;
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+
+    /* File-based icon (shown when dict has an icon image) */
     GtkWidget *icon = gtk_image_new();
     gtk_widget_set_size_request(icon, 16, 16);
+    gtk_image_set_pixel_size(GTK_IMAGE(icon), 16);
     gtk_widget_set_valign(icon, GTK_ALIGN_CENTER);
+
+    /* Emoji fallback label (shown when no icon image is available) */
+    GtkWidget *emoji_lbl = gtk_label_new("");
+    gtk_widget_set_valign(emoji_lbl, GTK_ALIGN_CENTER);
+    gtk_widget_set_visible(emoji_lbl, FALSE);
 
     GtkWidget *label = sidebar_list_item_make_label();
     gtk_widget_set_hexpand(label, TRUE);
@@ -1314,6 +1333,7 @@ static void sidebar_list_item_setup(GtkSignalListItemFactory *factory, GtkListIt
     gtk_widget_set_margin_end(star_btn, 4);
 
     gtk_box_append(GTK_BOX(box), icon);
+    gtk_box_append(GTK_BOX(box), emoji_lbl);
     gtk_box_append(GTK_BOX(box), label);
     gtk_box_append(GTK_BOX(box), star_btn);
     gtk_list_item_set_child(item, box);
@@ -1322,18 +1342,38 @@ static void sidebar_list_item_setup(GtkSignalListItemFactory *factory, GtkListIt
 static void sidebar_list_item_bind(GtkSignalListItemFactory *factory, GtkListItem *item, gpointer user_data) {
     (void)factory;
     SidebarListView *sidebar = user_data;
-    GtkWidget *box = gtk_list_item_get_child(item);
-    GtkWidget *icon = gtk_widget_get_first_child(box);
-    GtkWidget *label = gtk_widget_get_next_sibling(icon);
+    GtkWidget *box      = gtk_list_item_get_child(item);
+    GtkWidget *icon     = gtk_widget_get_first_child(box);
+    GtkWidget *emoji_lbl = gtk_widget_get_next_sibling(icon);
+    GtkWidget *label    = gtk_widget_get_next_sibling(emoji_lbl);
     GtkWidget *star_btn = gtk_widget_get_last_child(box);
 
     guint position = gtk_list_item_get_position(item);
     SidebarRowPayload *payload = sidebar_payload_at(sidebar, position);
-    const char *title = payload && payload->title ? payload->title : "";
+    const char *title    = payload && payload->title    ? payload->title    : "";
     const char *subtitle = payload && payload->subtitle ? payload->subtitle : "";
-    char *safe_title = safe_markup_escape_n(title, -1);
+    char *safe_title    = safe_markup_escape_n(title, -1);
     char *safe_subtitle = safe_markup_escape_n(subtitle, -1);
     char *markup = NULL;
+
+    /* Helper: show file icon or emoji fallback for dict rows */
+    auto void set_dict_icon(void);
+    void set_dict_icon(void) {
+        if (payload && payload->icon_path && payload->type == SIDEBAR_ROW_DICT) {
+            gtk_image_set_from_file(GTK_IMAGE(icon), payload->icon_path);
+            gtk_image_set_pixel_size(GTK_IMAGE(icon), 16);
+            gtk_widget_set_visible(icon, TRUE);
+            gtk_widget_set_visible(emoji_lbl, FALSE);
+        } else if (payload && payload->type == SIDEBAR_ROW_DICT && payload->dict_entry) {
+            gtk_widget_set_visible(icon, FALSE);
+            gtk_label_set_text(GTK_LABEL(emoji_lbl),
+                               dict_format_emoji(payload->dict_entry->format));
+            gtk_widget_set_visible(emoji_lbl, TRUE);
+        } else {
+            gtk_widget_set_visible(icon, FALSE);
+            gtk_widget_set_visible(emoji_lbl, FALSE);
+        }
+    }
 
     if (payload && payload->type == SIDEBAR_ROW_HINT) {
         if (*safe_subtitle) {
@@ -1344,31 +1384,22 @@ static void sidebar_list_item_bind(GtkSignalListItemFactory *factory, GtkListIte
         }
         gtk_widget_set_visible(star_btn, FALSE);
         gtk_widget_set_visible(icon, FALSE);
+        gtk_widget_set_visible(emoji_lbl, FALSE);
     } else if (*safe_subtitle) {
         markup = g_strdup_printf("%s\n<span alpha='65%%' size='small'>%s</span>",
                                  safe_title, safe_subtitle);
         gtk_widget_set_visible(star_btn, payload->type == SIDEBAR_ROW_WORD);
-        if (payload && payload->icon_path && payload->type == SIDEBAR_ROW_DICT) {
-            gtk_image_set_from_file(GTK_IMAGE(icon), payload->icon_path);
-            gtk_widget_set_visible(icon, TRUE);
-        } else {
-            gtk_widget_set_visible(icon, FALSE);
-        }
+        set_dict_icon();
     } else {
         markup = g_strdup(safe_title);
         gtk_widget_set_visible(star_btn, payload->type == SIDEBAR_ROW_WORD);
-        if (payload && payload->icon_path && payload->type == SIDEBAR_ROW_DICT) {
-            gtk_image_set_from_file(GTK_IMAGE(icon), payload->icon_path);
-            gtk_widget_set_visible(icon, TRUE);
-        } else {
-            gtk_widget_set_visible(icon, FALSE);
-        }
+        set_dict_icon();
     }
 
     gtk_label_set_markup(GTK_LABEL(label), markup);
 
     g_signal_handlers_disconnect_by_func(star_btn, on_sidebar_favorite_clicked, NULL);
-    g_object_set_data(G_OBJECT(star_btn), "bind-item", item); // useful for re-evaluating visibility if favorite state changes
+    g_object_set_data(G_OBJECT(star_btn), "bind-item", item);
     
     if (payload && payload->type == SIDEBAR_ROW_WORD) {
         g_signal_connect_data(star_btn, "clicked", G_CALLBACK(on_sidebar_favorite_clicked), g_strdup(title), free_signal_data, 0);
@@ -2971,6 +3002,7 @@ static void wrap_entry_in_style(GString *html_res,
                                const char *headword, 
                                const char *dict_name, 
                                const char *icon_path,
+                               const char *fallback_emoji,
                                const char *rendered_body, 
                                const char *render_style) {
     char *escaped_name = safe_markup_escape_n(dict_name ? dict_name : "", -1);
@@ -2981,7 +3013,7 @@ static void wrap_entry_in_style(GString *html_res,
         icon_html = g_strdup_printf("<img src='file://%s' style='height:1.1em;vertical-align:middle;margin-right:0.35em;border-radius:2px;'> ", safe_icon);
         g_free(safe_icon);
     } else {
-        icon_html = g_strdup("📖 ");
+        icon_html = g_strdup_printf("%s ", fallback_emoji ? fallback_emoji : "📖");
     }
 
     if (g_strcmp0(render_style, "python") == 0) {
@@ -3043,7 +3075,9 @@ static void render_merged_group(GString *html_res,
     const char *render_style = (app_settings && app_settings->render_style && *app_settings->render_style)
         ? app_settings->render_style : "diction";
 
-    wrap_entry_in_style(html_res, headword, e->name, e->icon_path, body_html->str, render_style);
+    wrap_entry_in_style(html_res, headword, e->name, e->icon_path,
+                        dict_format_emoji(e->format),
+                        body_html->str, render_style);
 }
 
 
@@ -3282,6 +3316,9 @@ static void render_query_to_webview(const char *query_raw, WebKitWebView *target
     g_string_free(html_res, TRUE);
     g_free(query_key);
     g_free(query);
+
+    /* Refresh the Dictionaries sidebar so it shows only dicts with results */
+    populate_dict_sidebar();
 }
 
 static void execute_search_now_for_query(const char *query_raw, gboolean push_history) {
@@ -4413,6 +4450,12 @@ static DictEntry *create_dict_entry_from_loaded(const char *path, DictFormat fmt
     char *valid_path = g_utf8_make_valid(path, -1);
     entry->path = strdup(valid_path);
     g_free(valid_path);
+
+    /* Propagate icon detected by the parser / dict-loader fallback */
+    if (dict->icon_path) {
+        entry->icon_path = strdup(dict->icon_path);
+    }
+
     return entry;
 }
 
@@ -4613,10 +4656,17 @@ static gboolean on_dict_loaded_idle(gpointer user_data) {
             // (The sidebar row already points to this 'existing' entry)
             if (existing->dict) dict_mmap_close(existing->dict);
             existing->dict = e->dict;
+            existing->format = e->format;
+
             if (e->name) {
                 free(existing->name);
                 existing->name = strdup(e->name);
             }
+            if (e->icon_path) {
+                if (existing->icon_path) free(existing->icon_path);
+                existing->icon_path = strdup(e->icon_path);
+            }
+
             // We can free the 'e' shell now as 'e->dict' is transferred
             e->dict = NULL;
             dict_loader_free(e);

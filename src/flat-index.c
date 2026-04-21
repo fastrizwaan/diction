@@ -252,7 +252,6 @@ bool flat_index_validate(const FlatIndex *idx) {
 
         if (h_off < 8 || (uint64_t)h_off >= data_region_end) return false;
         if (d_off < 8 || (uint64_t)d_off >= data_region_end) return false;
-        if (h_len == 0 || d_len == 0) return false;
         if ((uint64_t)h_off + h_len > data_region_end) return false;
         if ((uint64_t)d_off + d_len > data_region_end) return false;
     }

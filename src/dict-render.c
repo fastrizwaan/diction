@@ -2370,7 +2370,7 @@ char* dsl_render_to_html(const char *dsl_text,
     }
 
     if (format == DICT_FORMAT_MDX || format == DICT_FORMAT_STARDICT || format == DICT_FORMAT_BGL || format == DICT_FORMAT_SLOB) {
-        gboolean treat_as_html = (format == DICT_FORMAT_MDX || format == DICT_FORMAT_BGL || format == DICT_FORMAT_SLOB || looks_like_html(dsl_text, length));
+        gboolean treat_as_html = (format == DICT_FORMAT_MDX || format == DICT_FORMAT_STARDICT || format == DICT_FORMAT_BGL || format == DICT_FORMAT_SLOB || looks_like_html(dsl_text, length));
         gboolean treat_as_tagged_plain = (!treat_as_html && looks_like_tagged_plain_markup(dsl_text, length));
 
         if (!treat_as_html && !treat_as_tagged_plain) {

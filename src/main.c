@@ -4818,6 +4818,8 @@ static gboolean on_dict_loaded_idle(gpointer user_data) {
             guessed = langpair_build_group_name(source_lang, target_lang);
 
             if (!parser_had_langs && (!guessed || lang_group_is_monolingual(guessed))) {
+                /* No headers found, or only a weak/monolingual guess from filename.
+                 * Perform deep sampling to improve language identification. */
                 char *sampled = sample_dict_and_detect_lang(e);
                 if (sampled && *sampled && g_strcmp0(sampled, "Mixed") != 0) {
                     g_free(guessed);
@@ -4825,7 +4827,10 @@ static gboolean on_dict_loaded_idle(gpointer user_data) {
                     sampled = NULL;
                 }
                 g_free(sampled);
-            } else if (!guessed) {
+            }
+
+            /* Fallback only if we still have absolutely nothing */
+            if (!guessed && !parser_had_langs) {
                 guessed = sample_dict_and_detect_lang(e);
             }
 

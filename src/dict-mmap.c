@@ -121,6 +121,53 @@ typedef struct {
     size_t length;
 } HwSpan;
 
+static void dsl_parse_headers(DictMmap *dict, const char *data, size_t size) {
+    if (!data || size < 8) return;
+    const char *p = data;
+    const char *end = data + size;
+
+    while (p < end) {
+        const char *line_start = p;
+        while (p < end && *p != '\n') p++;
+        size_t len = (size_t)(p - line_start);
+        if (p < end && *p == '\n') p++;
+
+        if (len == 0) continue;
+        if (line_start[0] != '#') {
+            /* Stop at first non-header line (usually a headword) */
+            /* Indented lines are definitions, also stop there if encountered early */
+            if (line_start[0] != ' ' && line_start[0] != '\t' && line_start[0] != '\r') {
+                break;
+            }
+            continue;
+        }
+
+        if (len > 6 && strncasecmp(line_start, "#NAME", 5) == 0) {
+            const char *val_start = line_start + 5;
+            while (val_start < line_start + len && (*val_start == ' ' || *val_start == '\t' || *val_start == '\"')) val_start++;
+            const char *val_end = line_start + len;
+            while (val_end > val_start && (*(val_end - 1) == '\r' || *(val_end - 1) == '\"' || *(val_end - 1) == ' ' || *(val_end - 1) == '\t')) val_end--;
+            
+            if (val_end > val_start && !dict->name) {
+                dict->name = g_strndup(val_start, (size_t)(val_end - val_start));
+                printf("[DSL] Found dictionary name: %s\n", dict->name);
+            }
+        } else if (len > 16 && strncasecmp(line_start, "#INDEX_LANGUAGE", 15) == 0) {
+            const char *val_start = line_start + 15;
+            while (val_start < line_start + len && (*val_start == ' ' || *val_start == '\t' || *val_start == '\"')) val_start++;
+            const char *val_end = line_start + len;
+            while (val_end > val_start && (*(val_end - 1) == '\r' || *(val_end - 1) == '\"' || *(val_end - 1) == ' ' || *(val_end - 1) == '\t')) val_end--;
+            if (val_end > val_start && !dict->source_lang) dict->source_lang = g_strndup(val_start, (size_t)(val_end - val_start));
+        } else if (len > 19 && strncasecmp(line_start, "#CONTENTS_LANGUAGE", 18) == 0) {
+            const char *val_start = line_start + 18;
+            while (val_start < line_start + len && (*val_start == ' ' || *val_start == '\t' || *val_start == '\"')) val_start++;
+            const char *val_end = line_start + len;
+            while (val_end > val_start && (*(val_end - 1) == '\r' || *(val_end - 1) == '\"' || *(val_end - 1) == ' ' || *(val_end - 1) == '\t')) val_end--;
+            if (val_end > val_start && !dict->target_lang) dict->target_lang = g_strndup(val_start, (size_t)(val_end - val_start));
+        }
+    }
+}
+
 static size_t parse_dsl_into_entries(DictMmap *dict, TreeEntry **out_entries, size_t data_size, size_t data_start_offset) {
     const char *p   = dict->data + data_start_offset;
     const char *end = dict->data + data_size;
@@ -158,6 +205,9 @@ static size_t parse_dsl_into_entries(DictMmap *dict, TreeEntry **out_entries, si
         def_len  = 0;                                                    \
     } while (0)
 
+    /* Pre-scan headers (idempotent, sets dict->name, dict->source_lang, etc.) */
+    dsl_parse_headers(dict, p, (size_t)(end - p));
+
     while (p < end) {
         const char *line_start = p;
 
@@ -170,30 +220,6 @@ static size_t parse_dsl_into_entries(DictMmap *dict, TreeEntry **out_entries, si
         if (len == 0) continue;
         
         if (line_start[0] == '#') {
-            /* Support #NAME "Dictionary Name" header */
-            if (len > 6 && strncasecmp(line_start, "#NAME", 5) == 0) {
-                const char *val_start = line_start + 5;
-                while (val_start < line_start + len && (*val_start == ' ' || *val_start == '\t' || *val_start == '\"')) val_start++;
-                const char *val_end = line_start + len;
-                while (val_end > val_start && (*(val_end - 1) == '\r' || *(val_end - 1) == '\"' || *(val_end - 1) == ' ' || *(val_end - 1) == '\t')) val_end--;
-                
-                if (val_end > val_start && !dict->name) {
-                    dict->name = strndup(val_start, (size_t)(val_end - val_start));
-                    printf("[DSL] Found dictionary name: %s\n", dict->name);
-                }
-            } else if (len > 16 && strncasecmp(line_start, "#INDEX_LANGUAGE", 15) == 0) {
-                const char *val_start = line_start + 15;
-                while (val_start < line_start + len && (*val_start == ' ' || *val_start == '\t' || *val_start == '\"')) val_start++;
-                const char *val_end = line_start + len;
-                while (val_end > val_start && (*(val_end - 1) == '\r' || *(val_end - 1) == '\"' || *(val_end - 1) == ' ' || *(val_end - 1) == '\t')) val_end--;
-                if (val_end > val_start && !dict->source_lang) dict->source_lang = strndup(val_start, (size_t)(val_end - val_start));
-            } else if (len > 19 && strncasecmp(line_start, "#CONTENTS_LANGUAGE", 18) == 0) {
-                const char *val_start = line_start + 18;
-                while (val_start < line_start + len && (*val_start == ' ' || *val_start == '\t' || *val_start == '\"')) val_start++;
-                const char *val_end = line_start + len;
-                while (val_end > val_start && (*(val_end - 1) == '\r' || *(val_end - 1) == '\"' || *(val_end - 1) == ' ' || *(val_end - 1) == '\t')) val_end--;
-                if (val_end > val_start && !dict->target_lang) dict->target_lang = strndup(val_start, (size_t)(val_end - val_start));
-            }
             continue;
         }
 
@@ -430,6 +456,9 @@ DictMmap* dict_mmap_open(const char *path, volatile gint *cancel_flag, gint expe
         dict->data = (const char*)map;
         dict->index = flat_index_open(dict->data, dict->size);
 
+        /* Parse metadata (name/languages) from UTF-8 data portion of the cache */
+        dsl_parse_headers(dict, dict->data + 8, dict->size - 8);
+
         // Fast load: read index from end
         uint64_t count = *(uint64_t*)dict->data;
         int need_index = (count == 0);
@@ -462,6 +491,7 @@ DictMmap* dict_mmap_open(const char *path, volatile gint *cancel_flag, gint expe
                     /* Index already loaded via flat_index_open — no insert needed */
                     printf("[DSL] Fast-loaded %lu entries from cache.\n", (unsigned long)count);
                     /* Ensure a name exists for UI (some caches omit it) */
+                    /* Ensure a name exists for UI (fallback if #NAME was missing) */
                     if (!dict->name) {
                         char *base = g_path_get_basename(path);
                         dict->name = g_strdup(base);

@@ -778,28 +778,36 @@ static char *normalize_headword_for_search(const char *value, gboolean unescape_
     const char *p = valid;
 
     while (*p) {
-        if (g_str_has_prefix(p, "{*}")) {
-            p += 3;
+        /* Support block-skipping for curly braces {...} - identical to indexer logic */
+        if (*p == '{') {
+            const char *br = strchr(p, '}');
+            if (br) {
+                p = br + 1;
+                continue;
+            }
+            /* Unclosed brace, skip just the '{' */
+            p++;
             continue;
         }
 
-        if (g_str_has_prefix(p, "{·}")) {
-            p += 3;
+        /* Raw DSL markers that should be ignored even outside of braces */
+        if (*p == '*') { p++; continue; }
+
+        /* UTF-8 middle dot (C2 B7) */
+        if ((unsigned char)p[0] == 0xC2 && (unsigned char)p[1] == 0xB7) {
+            p += 2;
             continue;
         }
 
-        /* Strip stress accent tags for search */
-        if (g_str_has_prefix(p, "{[']}")) { p += 5; continue; }
-        if (g_str_has_prefix(p, "{[/']}")) { p += 6; continue; }
+        /* DSL-specific square bracket tags in headwords (rare handles formatting) */
         if (g_str_has_prefix(p, "[']")) { p += 3; continue; }
         if (g_str_has_prefix(p, "[/']")) { p += 4; continue; }
 
         /* Strip actual Unicode combining acute accent (U+0301) for search */
         if (g_str_has_prefix(p, "\xCC\x81")) { p += 2; continue; }
-        
-        /* Preserve bare braces unless they are part of a backslash escape */
-        if (*p == '{' || *p == '}') {
-            g_string_append_c(out, *p);
+
+        /* Literal close brace (shouldn't happen with our block skip, but safety first) */
+        if (*p == '}') {
             p++;
             continue;
         }
@@ -807,7 +815,7 @@ static char *normalize_headword_for_search(const char *value, gboolean unescape_
         if (*p == '\\' && p[1] != '\0') {
             if (unescape_dsl) {
                 /* DSL mandatory special characters that MUST be unescaped:
-                 * { } \ ~ @ # ( ) [ ] < >. Any other character (like / in \/) 
+                 * { } \ ~ @ # ( ) [ ] < >. Any other character (like / in \/)
                  * is NOT unescaped to preserve leet speak patterns. */
                 const char *special = " {}~\\@#()[]<>";
                 if (strchr(special, p[1])) {
@@ -1664,8 +1672,8 @@ static gboolean continue_sidebar_search(gpointer user_data) {
                     RelatedRowPayload *payload = g_new0(RelatedRowPayload, 1);
                     payload->type = RELATED_ROW_CANDIDATE;
                     
-                    /* Use rendering normalization for display in sidebar */
-                    char *display_word = normalize_headword_for_render(word, node->h_len, TRUE);
+                    /* Use rendering normalization for display in sidebar (strip dots) */
+                    char *display_word = normalize_headword_for_render(word, node->h_len, FALSE);
                     payload->word = display_word; 
                     
                     payload->fuzzy_score = fuzzy_score;
@@ -3330,7 +3338,8 @@ static void render_query_to_webview(const char *query_raw, WebKitWebView *target
 
         size_t pos = flat_index_search(e->dict->index, query);
         int dict_header_shown = 0;
-        char *last_hw = NULL;
+        char *last_hw_clean = NULL;
+        char *last_hw_render = NULL;
         GString *merged_body = g_string_new("");
 
         while (pos != (size_t)-1) {
@@ -3340,11 +3349,14 @@ static void render_query_to_webview(const char *query_raw, WebKitWebView *target
 
             char *raw_hw = g_strndup(e->dict->data + res->h_off, res->h_len);
             char *clean_hw = normalize_headword_for_search(raw_hw, TRUE);
+            char *display_hw = normalize_headword_for_render(raw_hw, strlen(raw_hw), TRUE);
             const char *hw_to_use = clean_hw ? clean_hw : raw_hw;
+            const char *hw_to_render = display_hw ? display_hw : hw_to_use;
 
-            if (last_hw && strcmp(hw_to_use, last_hw) != 0) {
-                render_merged_group(html_res, e, last_hw, merged_body, dict_idx, &dict_header_shown, &found_count);
+            if (last_hw_clean && strcmp(hw_to_use, last_hw_clean) != 0) {
+                render_merged_group(html_res, e, last_hw_render, merged_body, dict_idx, &dict_header_shown, &found_count);
                 g_string_truncate(merged_body, 0);
+                g_clear_pointer(&last_hw_render, g_free);
             }
 
             char *rendered = render_entry_def_to_html(e, res);
@@ -3356,20 +3368,28 @@ static void render_query_to_webview(const char *query_raw, WebKitWebView *target
                 g_free(rendered);
             }
 
-            g_free(last_hw);
-            last_hw = g_strdup(hw_to_use);
+            // Prefer version with dots for the title
+            if (!last_hw_render || (strstr(hw_to_render, "\xC2\xB7") && !strstr(last_hw_render, "\xC2\xB7"))) {
+                g_free(last_hw_render);
+                last_hw_render = g_strdup(hw_to_render);
+            }
+
+            g_free(last_hw_clean);
+            last_hw_clean = g_strdup(hw_to_use);
             g_free(raw_hw);
             if (clean_hw) g_free(clean_hw);
+            if (display_hw) g_free(display_hw);
             
             pos++;
             if (pos >= flat_index_count(e->dict->index)) break;
         }
 
-        if (merged_body->len > 0) {
-            render_merged_group(html_res, e, last_hw, merged_body, dict_idx, &dict_header_shown, &found_count);
+        if (last_hw_render && merged_body->len > 0) {
+            render_merged_group(html_res, e, last_hw_render, merged_body, dict_idx, &dict_header_shown, &found_count);
         }
         g_string_free(merged_body, TRUE);
-        g_free(last_hw);
+        g_free(last_hw_clean);
+        g_free(last_hw_render);
         dict_idx++;
     }
 
@@ -3656,7 +3676,7 @@ static void on_random_clicked(GtkButton *btn, gpointer user_data) {
             fprintf(stderr, "[Random word]: '%s'\n", clean_hw ? clean_hw : tmp_hw);
             
             g_signal_handlers_block_by_func(search_entry, on_search_changed, NULL);
-            char *rendered_hw = normalize_headword_for_render(tmp_hw, tmp_hw ? strlen(tmp_hw) : 0, TRUE);
+            char *rendered_hw = normalize_headword_for_render(tmp_hw, tmp_hw ? strlen(tmp_hw) : 0, FALSE);
             gtk_editable_set_text(GTK_EDITABLE(search_entry), rendered_hw);
             if (search_button_label) {
                 gtk_label_set_text(GTK_LABEL(search_button_label), rendered_hw);
@@ -5641,7 +5661,7 @@ static void on_tab_selected(AdwTabView *view, GParamSpec *pspec, gpointer user_d
         
         g_signal_handlers_block_by_func(search_entry, on_search_changed, NULL);
         if (query) {
-            char *display_query = normalize_headword_for_render(query, strlen(query), TRUE);
+            char *display_query = normalize_headword_for_render(query, strlen(query), FALSE);
             gtk_editable_set_text(GTK_EDITABLE(search_entry), display_query);
             if (search_button_label) gtk_label_set_text(GTK_LABEL(search_button_label), display_query);
             g_free(display_query);

@@ -595,19 +595,30 @@ char *normalize_headword_for_render(const char *text, size_t length, gboolean ke
     const char *p = valid;
 
     while (*p) {
-        if (g_str_has_prefix(p, "{*}")) {
-            if (keep_middle_dot) {
-                g_string_append(out, "*");
+        if (*p == '{') {
+            const char *br = strchr(p, '}');
+            if (br) {
+                if (keep_middle_dot) {
+                    /* Special case: hide braces but show content for some markers */
+                    if (g_str_has_prefix(p + 1, "·") && p[1 + strlen("·")] == '}') {
+                        g_string_append(out, "·");
+                    } else if (g_str_has_prefix(p + 1, "*") && p[2] == '}') {
+                        g_string_append(out, "*");
+                    } else if (g_str_has_prefix(p + 1, "ˈ") && p[1 + strlen("ˈ")] == '}') {
+                        g_string_append(out, "ˈ");
+                    } else if (g_str_has_prefix(p + 1, "ˌ") && p[1 + strlen("ˌ")] == '}') {
+                        g_string_append(out, "ˌ");
+                    }
+                }
+                p = br + 1;
+                continue;
             }
-            p += strlen("{*}");
+            p++;
             continue;
         }
 
-        if (g_str_has_prefix(p, "{·}")) {
-            if (keep_middle_dot) {
-                g_string_append(out, "·");
-            }
-            p += strlen("{·}");
+        if (*p == '*') {
+            p++;
             continue;
         }
 
@@ -620,18 +631,17 @@ char *normalize_headword_for_render(const char *text, size_t length, gboolean ke
         }
 
         /* Stress accent tags */
-        if (g_str_has_prefix(p, "{[']}") || g_str_has_prefix(p, "[']")) {
-            /* start accent - skip */
-            p += (p[0] == '{') ? 5 : 3;
+        if (g_str_has_prefix(p, "[']")) {
+            p += 3;
+            continue;
+        }
+        if (g_str_has_prefix(p, "[/']")) {
+            g_string_append(out, "\xCC\x81");
+            p += 4;
             continue;
         }
 
-        if (g_str_has_prefix(p, "{[/']}") || g_str_has_prefix(p, "[/']")) {
-            /* end accent - replace with combining acute accent U+0301 */
-            g_string_append(out, "\xCC\x81");
-            p += (p[0] == '{') ? 6 : 4;
-            continue;
-        }
+        if (*p == '}') { p++; continue; }
 
         if (*p == '\\' && p[1] != '\0') {
             const char *next = p + 1;
@@ -721,15 +731,18 @@ static char *normalize_tagged_plain_markup(const char *text, size_t length, size
         }
 
         if (text[i] == '{') {
-            if (g_str_has_prefix(text + i, "{[']}")) {
-                i += 5;
+            const char *br = memchr(text + i, '}', length - i);
+            if (br) {
+                size_t skip = (size_t)(br - (text + i)) + 1;
+                /* Preserve the combining acute accent if this was a closing stress tag */
+                if (g_str_has_prefix(text + i, "{[/']}")) {
+                    g_string_append(out, "\xCC\x81");
+                }
+                i += skip;
                 continue;
             }
-            if (g_str_has_prefix(text + i, "{[/']}")) {
-                g_string_append(out, "\xCC\x81");
-                i += 6;
-                continue;
-            }
+            i++;
+            continue;
         }
         
         if (text[i] == '[') {

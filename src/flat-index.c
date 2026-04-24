@@ -8,25 +8,48 @@
 /* ── helpers ──────────────────────────────────────────── */
 
 
-static bool is_dsl_ignored(char c) {
-    return g_ascii_isspace(c) || 
-           c == '{' || c == '}' || c == '\\' || c == '~' ||
-           c == '[' || c == ']' || c == '\'' || c == '/';
+static size_t get_dsl_ignored_len(const char *s, size_t max_len) {
+    if (max_len == 0) return 0;
+    
+    // Support block-skipping for curly braces {...}
+    if (s[0] == '{') {
+        size_t i = 1;
+        while (i < max_len && s[i] != '}') i++;
+        if (i < max_len && s[i] == '}') return i + 1;
+        return 1; // skip lone '{'
+    }
+
+    char c = s[0];
+    if (g_ascii_isspace(c) || 
+        c == '}' || c == '\\' || c == '~' ||
+        c == '[' || c == ']' || c == '*') {
+        return 1;
+    }
+    
+    unsigned char u0 = (unsigned char)s[0];
+    if (max_len >= 2) {
+        unsigned char u1 = (unsigned char)s[1];
+        if (u0 == 0xC2 && u1 == 0xB7) return 2; /* U+00B7 Middle Dot */
+        if (u0 == 0xCB && (u1 == 0x88 || u1 == 0x8C)) return 2; /* U+02C8, U+02CC Stress marks */
+        if (u0 == 0xCC && u1 == 0x81) return 2; /* U+0301 Combining Acute Accent */
+    }
+    return 0;
 }
 
 static int compare_dsl_agnostic(const char *raw, size_t raw_len, const char *clean, size_t clean_len) {
     size_t r = 0, c = 0;
+    size_t skip;
 
-    while (r < raw_len && is_dsl_ignored(raw[r])) r++;
-    while (c < clean_len && is_dsl_ignored(clean[c])) c++;
+    while (r < raw_len && (skip = get_dsl_ignored_len(raw + r, raw_len - r)) > 0) r += skip;
+    while (c < clean_len && (skip = get_dsl_ignored_len(clean + c, clean_len - c)) > 0) c += skip;
 
     while (r < raw_len && c < clean_len) {
-        if (is_dsl_ignored(raw[r])) {
-            r++;
+        if ((skip = get_dsl_ignored_len(raw + r, raw_len - r)) > 0) {
+            r += skip;
             continue;
         }
-        if (is_dsl_ignored(clean[c])) {
-            c++;
+        if ((skip = get_dsl_ignored_len(clean + c, clean_len - c)) > 0) {
+            c += skip;
             continue;
         }
 
@@ -36,8 +59,8 @@ static int compare_dsl_agnostic(const char *raw, size_t raw_len, const char *cle
         c++;
     }
 
-    while (r < raw_len && is_dsl_ignored(raw[r])) r++;
-    while (c < clean_len && is_dsl_ignored(clean[c])) c++;
+    while (r < raw_len && (skip = get_dsl_ignored_len(raw + r, raw_len - r)) > 0) r += skip;
+    while (c < clean_len && (skip = get_dsl_ignored_len(clean + c, clean_len - c)) > 0) c += skip;
 
     if (r == raw_len && c == clean_len) return 0;
     if (r == raw_len) return -1;
@@ -54,17 +77,18 @@ static int compare_prefix(const char *data, const FlatTreeEntry *entry,
     size_t r = 0, c = 0;
     const char *raw = data + entry->h_off;
     size_t raw_len = entry->h_len;
+    size_t skip;
 
-    while (r < raw_len && is_dsl_ignored(raw[r])) r++;
-    while (c < plen && is_dsl_ignored(prefix[c])) c++;
+    while (r < raw_len && (skip = get_dsl_ignored_len(raw + r, raw_len - r)) > 0) r += skip;
+    while (c < plen && (skip = get_dsl_ignored_len(prefix + c, plen - c)) > 0) c += skip;
 
     while (r < raw_len && c < plen) {
-        if (is_dsl_ignored(raw[r])) {
-            r++;
+        if ((skip = get_dsl_ignored_len(raw + r, raw_len - r)) > 0) {
+            r += skip;
             continue;
         }
-        if (is_dsl_ignored(prefix[c])) {
-            c++;
+        if ((skip = get_dsl_ignored_len(prefix + c, plen - c)) > 0) {
+            c += skip;
             continue;
         }
 
@@ -99,12 +123,13 @@ static int sort_compare(const void *a, const void *b) {
     while (j < lb && g_ascii_isspace(rb[j])) j++;
 
     while (i < la && j < lb) {
-        if (is_dsl_ignored(ra[i])) {
-            i++;
+        size_t skip;
+        if ((skip = get_dsl_ignored_len(ra + i, la - i)) > 0) {
+            i += skip;
             continue;
         }
-        if (is_dsl_ignored(rb[j])) {
-            j++;
+        if ((skip = get_dsl_ignored_len(rb + j, lb - j)) > 0) {
+            j += skip;
             continue;
         }
 
@@ -114,8 +139,9 @@ static int sort_compare(const void *a, const void *b) {
         j++;
     }
 
-    while (i < la && is_dsl_ignored(ra[i])) i++;
-    while (j < lb && is_dsl_ignored(rb[j])) j++;
+    size_t skip;
+    while (i < la && (skip = get_dsl_ignored_len(ra + i, la - i)) > 0) i += skip;
+    while (j < lb && (skip = get_dsl_ignored_len(rb + j, lb - j)) > 0) j += skip;
 
     if (i == la && j == lb) {
         /* Tie-breaker: Case-sensitive exact comparison of the RAW bytes */

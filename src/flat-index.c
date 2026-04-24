@@ -215,6 +215,24 @@ size_t flat_index_search_prefix(const FlatIndex *idx, const char *prefix) {
     return result;
 }
 
+size_t flat_index_search_fts(const FlatIndex *idx, GRegex *regex, size_t start_pos) {
+    if (!idx || !idx->entries || start_pos >= idx->count || !regex)
+        return (size_t)-1;
+
+    for (size_t i = start_pos; i < idx->count; i++) {
+        const FlatTreeEntry *entry = &idx->entries[i];
+        if (entry->d_len == 0) continue;
+
+        const char *def = idx->mmap_data + entry->d_off;
+        /* Match without string copy, bounding to definition length. */
+        if (g_regex_match_full(regex, def, (gssize)entry->d_len, 0, 0, NULL, NULL)) {
+            return i;
+        }
+    }
+
+    return (size_t)-1;
+}
+
 const FlatTreeEntry* flat_index_get(const FlatIndex *idx, size_t pos) {
     if (!idx || !idx->entries || pos >= idx->count)
         return NULL;

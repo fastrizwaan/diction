@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <glib.h>
 
 /* TreeEntry: same layout used in cache files. Each entry stores
  * byte offsets and lengths into the mmap'd cache data for headword
@@ -40,6 +41,11 @@ size_t flat_index_search(const FlatIndex *idx, const char *query);
 /* Search for the first entry whose headword starts with `prefix`
  * (case-insensitive). Returns position or (size_t)-1. */
 size_t flat_index_search_prefix(const FlatIndex *idx, const char *prefix);
+
+/* Full-text search inside definition payloads using a precompiled GRegex.
+ * Iterates through entries starting at `start_pos` until a match is found.
+ * Returns the matching position or (size_t)-1 if none. */
+size_t flat_index_search_fts(const FlatIndex *idx, GRegex *regex, size_t start_pos);
 
 /* Get entry at position `pos`. Returns NULL if out of range. */
 const FlatTreeEntry* flat_index_get(const FlatIndex *idx, size_t pos);

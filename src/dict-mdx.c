@@ -24,36 +24,7 @@
 
 /* Cache helpers for persistent dictionary storage */
 
-/* Validate and clean UTF-8 string */
-static char* validate_utf8_string(const char *input) {
-    if (!input) return NULL;
-    
-    /* Check if valid UTF-8 */
-    if (g_utf8_validate(input, -1, NULL)) {
-        return g_strdup(input);
-    }
-    
-    /* Try to convert from Latin-1 to UTF-8 */
-    GError *error = NULL;
-    char *converted = g_convert(input, -1, "UTF-8", "ISO-8859-1", NULL, NULL, &error);
-    if (converted) {
-        return converted;
-    }
-    
-    if (error) g_error_free(error);
-    
-    /* Fallback: strip invalid characters */
-    GString *result = g_string_new("");
-    const char *p = input;
-    while (*p) {
-        if ((unsigned char)*p < 128) {
-            g_string_append_c(result, *p);
-        }
-        p++;
-    }
-    
-    return g_string_free(result, FALSE);
-}
+
 
 /* Strip HTML tags from string */
 static char* strip_html_tags(const char *input) {

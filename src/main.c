@@ -463,6 +463,8 @@ typedef struct {
     guint source_id;
     GPtrArray *global_bucket_labels[BUCKET_COUNT];
     GPtrArray *global_bucket_payloads[BUCKET_COUNT];
+    gboolean is_fts;
+    GRegex *fts_regex;
 } SidebarSearchState;
 
 static SidebarSearchState *sidebar_search_state = NULL;
@@ -1086,6 +1088,9 @@ static void sidebar_search_state_free(SidebarSearchState *state) {
             g_ptr_array_free(state->global_bucket_payloads[i], TRUE);
         }
     }
+    if (state->fts_regex) {
+        g_regex_unref(state->fts_regex);
+    }
     g_free(state);
 }
 
@@ -1590,24 +1595,45 @@ static gboolean continue_sidebar_search(gpointer user_data) {
             continue;
         }
 
-        const FlatTreeEntry *node = flat_index_get(state->current_dict->dict->index, state->current_pos);
-        if (!node) {
-            state->has_current_pos = FALSE;
-            continue;
-        }
-        state->current_pos++;
-        if (state->current_pos >= flat_index_count(state->current_dict->dict->index)) {
-            state->has_current_pos = FALSE;
-        }
-
-        // FAST PRE-FILTER (zero alloc, length-safe)
-        if (!fast_strncasestr(state->current_dict->dict->data + node->h_off, node->h_len, state->query)) {
-            processed++;
-            if ((processed & 63) == 0) {
-                if (g_get_monotonic_time() > deadline_us)
-                    break;
+        const FlatTreeEntry *node = NULL;
+        if (state->is_fts) {
+            if (!state->fts_regex) {
+                state->has_current_pos = FALSE;
+                continue;
             }
-            continue;
+            size_t match_pos = flat_index_search_fts(state->current_dict->dict->index, state->fts_regex, state->current_pos);
+            if (match_pos == (size_t)-1) {
+                processed += flat_index_count(state->current_dict->dict->index) - state->current_pos;
+                state->has_current_pos = FALSE;
+                continue;
+            }
+            processed += (match_pos - state->current_pos) + 1;
+            state->current_pos = match_pos;
+            node = flat_index_get(state->current_dict->dict->index, state->current_pos);
+            state->current_pos++;
+            if (state->current_pos >= flat_index_count(state->current_dict->dict->index)) {
+                state->has_current_pos = FALSE;
+            }
+        } else {
+            node = flat_index_get(state->current_dict->dict->index, state->current_pos);
+            if (!node) {
+                state->has_current_pos = FALSE;
+                continue;
+            }
+            state->current_pos++;
+            if (state->current_pos >= flat_index_count(state->current_dict->dict->index)) {
+                state->has_current_pos = FALSE;
+            }
+
+            // FAST PRE-FILTER (zero alloc, length-safe)
+            if (!fast_strncasestr(state->current_dict->dict->data + node->h_off, node->h_len, state->query)) {
+                processed++;
+                if ((processed & 63) == 0) {
+                    if (g_get_monotonic_time() > deadline_us)
+                        break;
+                }
+                continue;
+            }
         }
 
         char *word = g_strndup(state->current_dict->dict->data + node->h_off, node->h_len);
@@ -1622,8 +1648,17 @@ static gboolean continue_sidebar_search(gpointer user_data) {
         char *word_key = g_utf8_casefold(clean_word, -1);
         SearchBucket bucket;
         double fuzzy_score = 0.0;
+        gboolean is_valid_match = FALSE;
 
-            if (classify_search_candidate(state->query_key, state->query_len, word_key, &bucket, &fuzzy_score)) {
+        if (state->is_fts) {
+            is_valid_match = TRUE;
+            bucket = SEARCH_BUCKET_SUBSTRING;
+            fuzzy_score = 1.0;
+        } else {
+            is_valid_match = classify_search_candidate(state->query_key, state->query_len, word_key, &bucket, &fuzzy_score);
+        }
+
+        if (is_valid_match) {
                 if (!g_hash_table_contains(state->seen_words, word_key)) {
                     RelatedRowPayload *payload = g_new0(RelatedRowPayload, 1);
                     payload->type = RELATED_ROW_CANDIDATE;
@@ -1780,9 +1815,29 @@ static void populate_search_sidebar(const char *query) {
     // We allow this to show all headwords.
 
     sidebar_search_state = g_new0(SidebarSearchState, 1);
+    
+    sidebar_search_state->is_fts = (clean && g_str_has_prefix(clean, "* "));
+    char *clean_query = clean;
+    if (sidebar_search_state->is_fts) {
+        clean_query = g_strdup(clean + 2);
+        g_free(clean);
+        clean = clean_query;
+    }
+
     sidebar_search_state->query = clean ? clean : g_strdup("");
     sidebar_search_state->query_key = g_utf8_casefold(sidebar_search_state->query, -1);
     sidebar_search_state->query_len = utf8_length_or_bytes(sidebar_search_state->query_key);
+    
+    if (sidebar_search_state->is_fts && strlen(sidebar_search_state->query) > 0) {
+        GError *err = NULL;
+        char *escaped = g_regex_escape_string(sidebar_search_state->query, -1);
+        sidebar_search_state->fts_regex = g_regex_new(escaped, G_REGEX_CASELESS | G_REGEX_OPTIMIZE, 0, &err);
+        g_free(escaped);
+        if (err) {
+            g_clear_error(&err);
+        }
+    }
+
     sidebar_search_state->seen_words = g_hash_table_new_full(
         g_str_hash, g_str_equal, g_free, NULL);
     sidebar_search_state->current_entry = all_dicts;
@@ -1792,7 +1847,9 @@ static void populate_search_sidebar(const char *query) {
         sidebar_search_state->global_bucket_payloads[i] = g_ptr_array_new();
     }
 
-    if (seed_search_sidebar_fast_rows(sidebar_search_state) == 0) {
+    if (sidebar_search_state->is_fts) {
+        populate_search_sidebar_status("Full Text Search…", NULL);
+    } else if (seed_search_sidebar_fast_rows(sidebar_search_state) == 0) {
         populate_search_sidebar_status("Searching…", NULL);
     }
     sidebar_search_state->source_id = g_idle_add_full(

@@ -4021,14 +4021,12 @@ static void on_random_clicked(GtkButton *btn, gpointer user_data) {
         if (node && tmp_hw) {
             fprintf(stderr, "[Random word]: '%s'\n", clean_hw ? clean_hw : tmp_hw);
             
-            g_signal_handlers_block_by_func(search_entry, on_search_changed, NULL);
             char *rendered_hw = normalize_headword_for_render(tmp_hw, tmp_hw ? strlen(tmp_hw) : 0, FALSE);
             gtk_editable_set_text(GTK_EDITABLE(search_entry), rendered_hw);
             if (search_button_label) {
                 gtk_label_set_text(GTK_LABEL(search_button_label), rendered_hw);
             }
             g_free(rendered_hw);
-            g_signal_handlers_unblock_by_func(search_entry, on_search_changed, NULL);
 
             g_free(tmp_hw);
             if (clean_hw) g_free(clean_hw);

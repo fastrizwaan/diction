@@ -2919,7 +2919,7 @@ char* dsl_render_to_html(const char *dsl_text,
             } else { i++; continue; }
         }
         else if (dsl_text[i] == '\n') {
-            if (!in_media) buf_append_str(&b, "\n");
+            if (!in_media) buf_append_str(&b, "<br>\n");
             i++;
             continue;
         } 

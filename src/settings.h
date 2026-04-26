@@ -40,6 +40,7 @@ typedef struct {
     int      scan_popup_delay_ms; // Debounce delay (default 500)
     char    *scan_modifier_key;   // "none", "ctrl", "alt", "meta"
     char    *global_shortcut;     // Shortcut key string (e.g. "<Ctrl>F12")
+    GMutex   mutex;
 } AppSettings;
 
 // Settings management
@@ -79,3 +80,4 @@ gboolean settings_is_dictionary_ignored(AppSettings *settings, const char *path)
 void settings_set_dictionary_ignored(AppSettings *settings, const char *path, gboolean ignored);
 char* settings_resolve_dictionary_name(const char *path);
 void settings_scan_progress_notify(const char *path, int percent);
+gboolean path_is_inside_dir(const char *path, const char *dir_path);

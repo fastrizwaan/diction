@@ -455,7 +455,7 @@ static DictMmap *open_cached_stardict(const char *cache_path, char *bookname, ch
         if (!flat_index_validate(dict->index)) {
             fprintf(stderr, "[IFO] Cache index validation failed for %s — rebuilding index.\n", cache_path);
             flat_index_close(dict->index);
-            dict->index = calloc(1, sizeof(FlatIndex));
+            dict->index = g_new0(FlatIndex, 1);
             dict->index->mmap_data = dict->data;
             dict->index->mmap_size = dict->size;
         }

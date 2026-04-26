@@ -213,7 +213,7 @@ DictMmap* dict_load_any(const char *path, DictFormat fmt, volatile gint *cancel_
 
 /* ── directory scanner ───────────────────────────────────── */
 
-static void scan_recursive(const char *dirpath, GList **head,
+static void scan_recursive(const char *dirpath,
                            DictLoaderCallback callback, void *user_data,
                            GHashTable *seen_dsl_families,
                            volatile gint *cancel_flag,
@@ -239,7 +239,7 @@ static void scan_recursive(const char *dirpath, GList **head,
             if (!ends_with_ci(full, ".files") &&
                 !ends_with_ci(full, ".dsl.files") &&
                 !ends_with_ci(full, ".dsl.dz.files")) {
-                scan_recursive(full, head, callback, user_data, seen_dsl_families, cancel_flag, expected_generation, depth + 1);
+                scan_recursive(full, callback, user_data, seen_dsl_families, cancel_flag, expected_generation, depth + 1);
             }
             g_free(full);
             continue;
@@ -270,7 +270,7 @@ static void scan_recursive(const char *dirpath, GList **head,
 
         /* Signal discovery */
         if (callback) {
-            DictEntry discovery_entry = {0};
+            DictEntry discovery_entry = {0}; discovery_entry.magic = 0xDEADC0DE; discovery_entry.ref_count = 9999;
             char *base = basename_noext(load_path);
             discovery_entry.name = base;
             discovery_entry.path = (char*)load_path;
@@ -325,16 +325,15 @@ static void scan_recursive(const char *dirpath, GList **head,
         g_free(full);
         entry->format = fmt;
         entry->dict = loaded;
+        entry->ref_count = 1; entry->magic = 0xDEADC0DE;
         if (loaded->icon_path) {
             entry->icon_path = g_strdup(loaded->icon_path);
         }
 
         if (callback) {
             callback(entry, DICT_LOADER_EVENT_FINISHED, user_data);
-        }
-
-        if (head) {
-            *head = g_list_prepend(*head, entry);
+        } else {
+            dict_entry_unref(entry);
         }
 
         g_free(family_key);
@@ -421,7 +420,7 @@ static void discover_with_find(const char *dirpath, DictLoaderCallback callback,
         }
 
         if (callback) {
-            DictEntry discovery_entry = {0};
+            DictEntry discovery_entry = {0}; discovery_entry.magic = 0xDEADC0DE; discovery_entry.ref_count = 9999;
             char *base = basename_noext(load_path);
             discovery_entry.name = base;
             discovery_entry.path = (char*)load_path;
@@ -473,6 +472,7 @@ static void discover_with_find(const char *dirpath, DictLoaderCallback callback,
         g_free(valid_path);
         entry->format = fmt;
         entry->dict = loaded;
+        entry->ref_count = 1; entry->magic = 0xDEADC0DE;
         if (loaded->icon_path) {
             entry->icon_path = g_strdup(loaded->icon_path);
         }
@@ -493,10 +493,17 @@ static void discover_with_find(const char *dirpath, DictLoaderCallback callback,
     g_hash_table_unref(seen_dsl_families);
 }
 
+static void scan_collect_callback(DictEntry *entry, DictLoaderEventType event, void *user_data) {
+    if (event == DICT_LOADER_EVENT_FINISHED && entry) {
+        GList **head = user_data;
+        *head = g_list_prepend(*head, entry);
+    }
+}
+
 DictEntry* dict_loader_scan_directory(const char *dirpath) {
     GList *head = NULL;
     GHashTable *seen_dsl_families = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
-    scan_recursive(dirpath, &head, NULL, NULL, seen_dsl_families, NULL, 0, 0);
+    scan_recursive(dirpath, scan_collect_callback, &head, seen_dsl_families, NULL, 0, 0);
     g_hash_table_destroy(seen_dsl_families);
     
     DictEntry *result = NULL;
@@ -520,31 +527,46 @@ void dict_loader_scan_directory_streaming(const char *dirpath, DictLoaderCallbac
     if (has_find) {
         discover_with_find(dirpath, callback, user_data, cancel_flag, expected_generation, cancellable);
     } else {
-        GList *head = NULL;
         GHashTable *seen_dsl_families = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
 
-        scan_recursive(dirpath, &head, callback, user_data, seen_dsl_families, cancel_flag, expected_generation, 0);
+        scan_recursive(dirpath, callback, user_data, seen_dsl_families, cancel_flag, expected_generation, 0);
 
         g_hash_table_unref(seen_dsl_families);
-
-        for (GList *l = head; l; l = l->next) {
-            dict_loader_free((DictEntry *)l->data);
-        }
-        g_list_free(head);
     }
     
     callback(NULL, DICT_LOADER_EVENT_FINISHED, user_data);
 }
 
-void dict_loader_free(DictEntry *head) {
+void dict_entry_ref(DictEntry *entry) {
+    if (!entry) return;
+    if (entry->magic != 0xDEADC0DE) {
+        fprintf(stderr, "[FATAL] dict_entry_ref: Invalid magic 0x%08X at %p\n", entry->magic, entry);
+        return;
+    }
+    g_atomic_int_inc(&entry->ref_count);
+}
+
+void dict_entry_unref(DictEntry *entry) {
+    if (!entry) return;
+    if (entry->magic != 0xDEADC0DE) {
+        fprintf(stderr, "[FATAL] dict_entry_unref: Invalid magic 0x%08X at %p\n", entry->magic, entry);
+        return;
+    }
+    if (g_atomic_int_dec_and_test(&entry->ref_count)) {
+        entry->magic = 0xD1EDD1ED;
+        if (entry->dict) dict_mmap_close(entry->dict);
+        g_free(entry->name);
+        g_free(entry->path);
+        g_free(entry->guessed_lang_group);
+        g_free(entry->icon_path);
+        g_free(entry);
+    }
+}
+
+void dict_loader_free_list(DictEntry *head) {
     while (head) {
         DictEntry *next = head->next;
-        if (head->dict) dict_mmap_close(head->dict);
-        g_free(head->name);
-        g_free(head->path);
-        g_free(head->guessed_lang_group);
-        g_free(head->icon_path);
-        g_free(head);
+        dict_entry_unref(head);
         head = next;
     }
 }

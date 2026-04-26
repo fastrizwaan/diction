@@ -19,6 +19,12 @@ static DictEntry *all_dicts = NULL;
 static DictEntry *active_entry = NULL;
 static AdwTabView *tab_view = NULL;
 
+static volatile gint loader_generation = 0;
+static GMutex loader_cancel_mutex;
+static GCancellable *loader_cancellable = NULL;
+static GMutex dict_loader_mutex;
+
+
 static WebKitWebView *get_web_view_from_scroll(GtkWidget *scroll) {
     if (!scroll || !GTK_IS_SCROLLED_WINDOW(scroll)) return NULL;
     WebKitWebView *stored = g_object_get_data(G_OBJECT(scroll), "web-view");
@@ -718,15 +724,29 @@ static gboolean try_play_encoded_sound_uri(const char *uri) {
     fprintf(stderr, "[AUDIO CLICKED] File: %s\n", sound_file);
 
     char *audio_path = NULL;
-    for (DictEntry *e = all_dicts; e; e = e->next) {
+    g_mutex_lock(&dict_loader_mutex);
+    DictEntry *e = all_dicts;
+    while (e) {
+        dict_entry_ref(e);
+        g_mutex_unlock(&dict_loader_mutex);
+
         if (e->dict && e->dict->resource_dir && g_strcmp0(e->dict->resource_dir, resource_dir) == 0) {
             if (e->dict->resource_reader) {
                 fprintf(stderr, "[AUDIO DEBUG] Searching ResourceReader for '%s'\n", sound_file);
                 audio_path = resource_reader_get(e->dict->resource_reader, sound_file);
-                if (audio_path) break;
+                if (audio_path) {
+                    dict_entry_unref(e);
+                    break;
+                }
             }
         }
+        
+        g_mutex_lock(&dict_loader_mutex);
+        DictEntry *next = e->next;
+        dict_entry_unref(e);
+        e = next;
     }
+    g_mutex_unlock(&dict_loader_mutex);
 
     if (!audio_path) {
         audio_path = g_build_filename(resource_dir, sound_file, NULL);
@@ -948,6 +968,9 @@ static void sidebar_row_payload_free(SidebarRowPayload *payload) {
     g_free(payload->subtitle);
     g_free(payload->scope_id);
     g_free(payload->icon_path);
+    if (payload->dict_entry) {
+        dict_entry_unref(payload->dict_entry);
+    }
     g_free(payload);
 }
 
@@ -1274,6 +1297,8 @@ static void sidebar_search_state_free(SidebarSearchState *state) {
     if (state->fts_regex) {
         g_regex_unref(state->fts_regex);
     }
+    if (state->current_entry) dict_entry_unref(state->current_entry);
+    if (state->current_dict) dict_entry_unref(state->current_dict);
     g_free(state);
 }
 
@@ -1762,7 +1787,13 @@ static gboolean continue_sidebar_search(gpointer user_data) {
             gboolean found_dict = FALSE;
             while (state->current_entry) {
                 DictEntry *entry = state->current_entry;
+                dict_entry_ref(entry);
                 state->current_entry = state->current_entry->next;
+                if (state->current_entry) dict_entry_ref(state->current_entry);
+                
+                // Unref the old entry pointer we just moved past
+                dict_entry_unref(entry);
+                
                 if (!entry->dict || !entry->dict->index ||
                     flat_index_count(entry->dict->index) == 0 ||
                     !dict_entry_in_active_scope(entry)) {
@@ -1770,7 +1801,11 @@ static gboolean continue_sidebar_search(gpointer user_data) {
                 }
                 state->current_pos = 0;
                 state->has_current_pos = TRUE;
+                
+                if (state->current_dict) dict_entry_unref(state->current_dict);
                 state->current_dict = entry;
+                dict_entry_ref(state->current_dict);
+                
                 found_dict = TRUE;
                 break;
             }
@@ -1940,9 +1975,15 @@ static guint seed_search_sidebar_fast_rows(SidebarSearchState *state) {
     gint64 deadline_us = g_get_monotonic_time() + 5000; /* 5ms UI thread budget */
     guint added = 0;
 
+    g_mutex_lock(&dict_loader_mutex);
     for (DictEntry *entry = all_dicts; entry && added < max_seed_rows; entry = entry->next) {
         if (g_get_monotonic_time() > deadline_us) break;
+        dict_entry_ref(entry);
+        g_mutex_unlock(&dict_loader_mutex);
+
         if (!entry->dict || !entry->dict->index || !dict_entry_in_active_scope(entry)) {
+            dict_entry_unref(entry);
+            g_mutex_lock(&dict_loader_mutex);
             continue;
         }
 
@@ -1997,7 +2038,11 @@ static guint seed_search_sidebar_fast_rows(SidebarSearchState *state) {
             pos++;
             if (pos >= flat_index_count(entry->dict->index)) break;
         }
+        
+        dict_entry_unref(entry);
+        g_mutex_lock(&dict_loader_mutex);
     }
+    g_mutex_unlock(&dict_loader_mutex);
 
     if (labels->len > 0) {
         set_related_rows(labels, payloads);
@@ -2048,7 +2093,10 @@ static void populate_search_sidebar_with_mode(const char *query, gboolean force_
 
     sidebar_search_state->seen_words = g_hash_table_new_full(
         g_str_hash, g_str_equal, g_free, NULL);
+    g_mutex_lock(&dict_loader_mutex);
     sidebar_search_state->current_entry = all_dicts;
+    if (sidebar_search_state->current_entry) dict_entry_ref(sidebar_search_state->current_entry);
+    g_mutex_unlock(&dict_loader_mutex);
     
     /* Update FTS highlight query based on current search */
     g_free(fts_highlight_query);
@@ -2144,6 +2192,10 @@ static void update_history_word(const char *word) {
 
 static gboolean dict_entry_enabled(DictEntry *entry) {
     if (!entry || !app_settings) {
+        return TRUE;
+    }
+    if (!entry->path) {
+        // g_warning("dict_entry_enabled: entry->path is NULL for entry %p!", entry);
         return TRUE;
     }
     DictConfig *cfg = settings_find_dictionary_by_path(app_settings, entry->path);
@@ -2488,6 +2540,14 @@ static void on_dictionary_root_parent_changed(GFileMonitor *monitor,
     request_dictionary_directory_rescan(TRUE);
 }
 
+static void set_active_entry(DictEntry *new_entry) {
+    if (active_entry == new_entry) return;
+    DictEntry *old = active_entry;
+    active_entry = new_entry;
+    if (active_entry) dict_entry_ref(active_entry);
+    if (old) dict_entry_unref(old);
+}
+
 static DictEntry *dict_entry_new_shell(const char *name, const char *path) {
     if (!path || !*path) {
         return NULL;
@@ -2497,6 +2557,7 @@ static DictEntry *dict_entry_new_shell(const char *name, const char *path) {
     entry->format = dict_detect_format(path);
     entry->path = g_strdup(path);
     entry->name = g_strdup((name && *name) ? name : path);
+    entry->ref_count = 1; entry->magic = 0xDEADC0DE;
     return entry;
 }
 
@@ -2505,16 +2566,21 @@ static DictEntry *find_dict_entry_by_path(const char *path) {
         return NULL;
     }
 
+    g_mutex_lock(&dict_loader_mutex);
     for (DictEntry *entry = all_dicts; entry; entry = entry->next) {
         if (g_strcmp0(entry->path, path) == 0) {
-            return entry;
+            DictEntry *ret = entry;
+            dict_entry_ref(ret);
+            g_mutex_unlock(&dict_loader_mutex);
+            return ret;
         }
     }
-
+    g_mutex_unlock(&dict_loader_mutex);
     return NULL;
 }
 
 static guint rebuild_dict_entries_from_settings(void) {
+    g_mutex_lock(&dict_loader_mutex);
     DictEntry *old_head = all_dicts;
     DictEntry *new_head = NULL;
     DictEntry *new_tail = NULL;
@@ -2573,7 +2639,7 @@ static guint rebuild_dict_entries_from_settings(void) {
         DictEntry *entry = g_ptr_array_index(old_entries, i);
         if (!g_hash_table_contains(reused_entries, entry)) {
             entry->next = NULL;
-            dict_loader_free(entry);
+            dict_entry_unref(entry);
         }
     }
 
@@ -2583,10 +2649,12 @@ static guint rebuild_dict_entries_from_settings(void) {
     g_hash_table_unref(reused_entries);
 
     all_dicts = new_head;
-    active_entry = active_path ? find_dict_entry_by_path(active_path) : NULL;
-    if (!active_entry) {
-        active_entry = all_dicts;
-    }
+    g_mutex_unlock(&dict_loader_mutex);
+    
+    DictEntry *found = active_path ? find_dict_entry_by_path(active_path) : NULL;
+    set_active_entry(found ? found : all_dicts);
+    if (found) dict_entry_unref(found);
+    
     g_free(active_path);
     return count;
 }
@@ -2649,13 +2717,23 @@ static void sync_settings_dictionaries_from_loaded(void) {
     }
 
     GHashTable *loaded_paths = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
-    for (DictEntry *entry = all_dicts; entry; entry = entry->next) {
-        if (!entry->dict || !entry->path) {
-            continue;
+    g_mutex_lock(&dict_loader_mutex);
+    DictEntry *entry = all_dicts;
+    while (entry) {
+        dict_entry_ref(entry);
+        g_mutex_unlock(&dict_loader_mutex);
+
+        if (entry->dict && entry->path) {
+            settings_upsert_dictionary(app_settings, entry->name, entry->path, "directory");
+            g_hash_table_add(loaded_paths, g_strdup(entry->path));
         }
-        settings_upsert_dictionary(app_settings, entry->name, entry->path, "directory");
-        g_hash_table_add(loaded_paths, g_strdup(entry->path));
+
+        g_mutex_lock(&dict_loader_mutex);
+        DictEntry *next = entry->next;
+        dict_entry_unref(entry);
+        entry = next;
     }
+    g_mutex_unlock(&dict_loader_mutex);
 
     settings_prune_directory_dictionaries(app_settings, loaded_paths);
     g_hash_table_unref(loaded_paths);
@@ -2732,11 +2810,22 @@ static void populate_groups_sidebar(void) {
     SidebarRowPayload *active_payload = NULL;
 
     guint all_count = 0;
-    for (DictEntry *entry = all_dicts; entry; entry = entry->next) {
+    g_mutex_lock(&dict_loader_mutex);
+    DictEntry *entry = all_dicts;
+    while (entry) {
+        dict_entry_ref(entry);
+        g_mutex_unlock(&dict_loader_mutex);
+        
         if (dict_entry_enabled(entry)) {
             all_count++;
         }
+        
+        g_mutex_lock(&dict_loader_mutex);
+        DictEntry *next = entry->next;
+        dict_entry_unref(entry);
+        entry = next;
     }
+    g_mutex_unlock(&dict_loader_mutex);
 
     SidebarRowPayload *all_payload = g_new0(SidebarRowPayload, 1);
     char all_subtitle[64];
@@ -2762,20 +2851,33 @@ static void populate_groups_sidebar(void) {
     for (guint i = 0; i < app_settings->dictionary_groups->len; i++) {
         DictGroup *grp = g_ptr_array_index(app_settings->dictionary_groups, i);
         guint member_count = 0;
-        for (DictEntry *entry = all_dicts; entry; entry = entry->next) {
-            if (!dict_entry_enabled(entry)) {
-                continue;
-            }
-            char *dict_id = settings_make_dictionary_id(entry->path);
-            for (guint j = 0; j < grp->members->len; j++) {
-                const char *member = g_ptr_array_index(grp->members, j);
-                if (g_strcmp0(member, dict_id) == 0) {
-                    member_count++;
-                    break;
+        
+        g_mutex_lock(&dict_loader_mutex);
+        DictEntry *entry = all_dicts;
+        while (entry) {
+            dict_entry_ref(entry);
+            g_mutex_unlock(&dict_loader_mutex);
+            
+            if (dict_entry_enabled(entry)) {
+                char *dict_id = settings_make_dictionary_id(entry->path);
+                if (dict_id) {
+                    for (guint j = 0; j < grp->members->len; j++) {
+                        const char *member = g_ptr_array_index(grp->members, j);
+                        if (g_strcmp0(member, dict_id) == 0) {
+                            member_count++;
+                            break;
+                        }
+                    }
+                    g_free(dict_id);
                 }
             }
-            g_free(dict_id);
+            
+            g_mutex_lock(&dict_loader_mutex);
+            DictEntry *next = entry->next;
+            dict_entry_unref(entry);
+            entry = next;
         }
+        g_mutex_unlock(&dict_loader_mutex);
 
         SidebarRowPayload *payload = g_new0(SidebarRowPayload, 1);
         char subtitle[64];
@@ -3592,8 +3694,21 @@ static int append_exact_matches_html(GString *html_res, const char *query) {
     int found_count = 0;
     int dict_idx = 0;
 
-    for (DictEntry *e = all_dicts; e; e = e->next) {
-        if (!e->dict || !dict_entry_in_active_scope(e)) continue;
+    g_mutex_lock(&dict_loader_mutex);
+    DictEntry *e = all_dicts;
+    while (e) {
+        dict_entry_ref(e);
+        g_mutex_unlock(&dict_loader_mutex);
+
+        if (!e->dict || !dict_entry_in_active_scope(e)) {
+            g_mutex_lock(&dict_loader_mutex);
+            DictEntry *next = e->next;
+            dict_entry_unref(e);
+            e = next;
+            continue;
+        }
+
+        // ... (rest of search logic)
 
         size_t pos = flat_index_search(e->dict->index, query);
         int dict_header_shown = 0;
@@ -3649,7 +3764,13 @@ static int append_exact_matches_html(GString *html_res, const char *query) {
         g_free(last_hw_clean);
         g_free(last_hw_render);
         dict_idx++;
+        
+        g_mutex_lock(&dict_loader_mutex);
+        DictEntry *next = e->next;
+        dict_entry_unref(e);
+        e = next;
     }
+    if (e == NULL) g_mutex_unlock(&dict_loader_mutex);
 
     return found_count;
 }
@@ -3682,7 +3803,10 @@ static void render_query_to_webview(const char *query_raw, WebKitWebView *target
     g_free(escaped_query_attr);
     gsize html_prefix_len = html_res->len;
 
+    g_mutex_lock(&dict_loader_mutex);
     for (DictEntry *e = all_dicts; e; e = e->next) e->has_matches = FALSE;
+    g_mutex_unlock(&dict_loader_mutex);
+
     int found_count = append_exact_matches_html(html_res, query);
     if (found_count == 0) {
         char *fallback_query = exact_lookup_definite_article_variant(query);
@@ -3975,6 +4099,7 @@ static void on_random_clicked(GtkButton *btn, gpointer user_data) {
     (void)btn; (void)user_data;
     if (!all_dicts) return;
 
+    g_mutex_lock(&dict_loader_mutex);
     // Count dicts in active scope
     int count = 0;
     for (DictEntry *e = all_dicts; e; e = e->next) {
@@ -3982,19 +4107,24 @@ static void on_random_clicked(GtkButton *btn, gpointer user_data) {
             count++;
         }
     }
-    if (count == 0) return;
-
-    // Pick random dict
-    int target = rand() % count;
-    DictEntry *e = all_dicts;
-    int cur = 0;
-    while (e) {
-        if (e->dict && e->dict->index && flat_index_count(e->dict->index) > 0 && dict_entry_in_active_scope(e)) {
-            if (cur == target) break;
-            cur++;
+    
+    DictEntry *e = NULL;
+    if (count > 0) {
+        // Pick random dict
+        int target = rand() % count;
+        e = all_dicts;
+        int cur = 0;
+        while (e) {
+            if (e->dict && e->dict->index && flat_index_count(e->dict->index) > 0 && dict_entry_in_active_scope(e)) {
+                if (cur == target) break;
+                cur++;
+            }
+            e = e->next;
         }
-        e = e->next;
     }
+    
+    if (e) dict_entry_ref(e);
+    g_mutex_unlock(&dict_loader_mutex);
 
     if (e && e->dict && flat_index_count(e->dict->index) > 0) {
         int attempts = 0;
@@ -4036,13 +4166,12 @@ static void on_random_clicked(GtkButton *btn, gpointer user_data) {
             // Search will be triggered by "search-changed" signal, but we want it instantly
             execute_search_now();
         }
+        dict_entry_unref(e);
     }
 }
 
 static void maybe_show_startup_random_word(void) {
-    if (!startup_random_word_pending || !search_entry) {
-        return;
-    }
+    return; // DEBUG: Disable startup random word
 
 
     const char *current = gtk_editable_get_text(GTK_EDITABLE(search_entry));
@@ -4052,12 +4181,24 @@ static void maybe_show_startup_random_word(void) {
     }
 
     int loaded_count = 0;
-    for (DictEntry *e = all_dicts; e; e = e->next) {
+    g_mutex_lock(&dict_loader_mutex);
+    DictEntry *e = all_dicts;
+    while (e) {
+        dict_entry_ref(e);
+        g_mutex_unlock(&dict_loader_mutex);
+
         if (e->dict && e->dict->index && flat_index_count(e->dict->index) > 0 && dict_entry_in_active_scope(e)) {
             loaded_count++;
+            dict_entry_unref(e);
             break;
         }
+
+        g_mutex_lock(&dict_loader_mutex);
+        DictEntry *next = e->next;
+        dict_entry_unref(e);
+        e = next;
     }
+    if (e == NULL) g_mutex_unlock(&dict_loader_mutex);
 
     if (loaded_count == 0) {
         return;
@@ -4071,16 +4212,27 @@ static void activate_dictionary_entry(DictEntry *e) {
     if (!e) return;
     int idx = -1;
     int current = 0;
-    for (DictEntry *cursor = all_dicts; cursor; cursor = cursor->next) {
-        if (!cursor->dict || !dict_entry_in_active_scope(cursor)) {
-            continue;
+    g_mutex_lock(&dict_loader_mutex);
+    DictEntry *cursor = all_dicts;
+    while (cursor) {
+        dict_entry_ref(cursor);
+        g_mutex_unlock(&dict_loader_mutex);
+
+        if (cursor->dict && dict_entry_in_active_scope(cursor)) {
+            if (cursor == e) {
+                idx = current;
+                dict_entry_unref(cursor);
+                break;
+            }
+            current++;
         }
-        if (cursor == e) {
-            idx = current;
-            break;
-        }
-        current++;
+        
+        g_mutex_lock(&dict_loader_mutex);
+        DictEntry *next = cursor->next;
+        dict_entry_unref(cursor);
+        cursor = next;
     }
+    if (cursor == NULL) g_mutex_unlock(&dict_loader_mutex);
     if (idx < 0) {
         return;
     }
@@ -4091,7 +4243,7 @@ static void activate_dictionary_entry(DictEntry *e) {
         "if (el) { el.scrollIntoView({behavior: 'smooth', block: 'start'}); }",
         idx);
     webkit_web_view_evaluate_javascript(web_view, js, -1, NULL, NULL, NULL, NULL, NULL);
-    active_entry = e;
+    set_active_entry(e);
 }
 
 // Refresh the current search results when theme changes
@@ -4500,11 +4652,8 @@ static void on_web_view_load_changed(WebKitWebView *wv,
     g_object_set_data(G_OBJECT(wv), "pending-fts-highlight-query", NULL);
 }
 
-static GMutex dict_loader_mutex;
-static volatile gint loader_generation = 0;
 
-static GMutex loader_cancel_mutex;
-static GCancellable *loader_cancellable = NULL;
+
 
 static void reload_dictionaries_from_settings(void *user_data);
 
@@ -4584,7 +4733,7 @@ static void finalize_dictionary_loading(gboolean allow_random_word, gboolean syn
     extern void settings_scan_notify(const char *name, const char *path, int event_type);
     settings_scan_notify(NULL, NULL, -1);
     if (!active_entry && all_dicts) {
-        active_entry = all_dicts;
+        set_active_entry(all_dicts);
     }
     populate_dict_sidebar();
     populate_groups_sidebar();
@@ -4797,12 +4946,18 @@ static void populate_dict_sidebar(void) {
     GPtrArray *payloads = g_ptr_array_new();
     SidebarRowPayload *active_payload = NULL;
 
-    for (DictEntry *e = all_dicts; e; e = e->next) {
+    g_mutex_lock(&dict_loader_mutex);
+    DictEntry *e = all_dicts;
+    while (e) {
+        dict_entry_ref(e);
+        g_mutex_unlock(&dict_loader_mutex);
+
         if (dict_entry_visible_in_sidebar(e)) {
             SidebarRowPayload *payload = g_new0(SidebarRowPayload, 1);
             payload->type = SIDEBAR_ROW_DICT;
             payload->title = g_strdup(e->name ? e->name : "Dictionary");
             payload->dict_entry = e;
+            dict_entry_ref(e); // payload owns a ref
             if (e->icon_path) {
                 payload->icon_path = g_strdup(e->icon_path);
             }
@@ -4812,7 +4967,13 @@ static void populate_dict_sidebar(void) {
                 active_payload = payload;
             }
         }
+        
+        g_mutex_lock(&dict_loader_mutex);
+        DictEntry *next = e->next;
+        dict_entry_unref(e);
+        e = next;
     }
+    g_mutex_unlock(&dict_loader_mutex);
 
     if (labels->len == 0) {
         SidebarRowPayload *payload = g_new0(SidebarRowPayload, 1);
@@ -5114,6 +5275,8 @@ static DictEntry *create_dict_entry_from_loaded(const char *path, DictFormat fmt
     }
 
     DictEntry *entry = g_new0(DictEntry, 1);
+    entry->magic = 0xDEADC0DE;
+    entry->ref_count = 1;
     entry->format = fmt;
     entry->dict = dict;
 
@@ -5252,7 +5415,7 @@ static gboolean on_dict_loaded_idle(gpointer user_data) {
 
     if (ld->generation != g_atomic_int_get(&loader_generation)) {
         if (ld->entry) {
-            dict_loader_free(ld->entry);
+            dict_entry_unref(ld->entry);
         }
         g_free(ld->status_text);
         g_free(ld);
@@ -5265,26 +5428,32 @@ static gboolean on_dict_loaded_idle(gpointer user_data) {
         DictEntry *e = ld->entry;
         e->next = NULL;
 
-        /* Inform settings dialog(s) of finished entry */
+        // Inform settings dialog(s) of finished entry
         extern void settings_scan_notify(const char *name, const char *path, int event_type);
         settings_scan_notify(e->name ? e->name : "(Unknown)", e->path ? e->path : "", DICT_LOADER_EVENT_FINISHED);
 
+
         DictConfig *cfg = app_settings ? settings_find_dictionary_by_path(app_settings, e->path) : NULL;
         if (cfg && !cfg->enabled) {
-            dict_loader_free(e);
+            dict_entry_unref(e);
             g_free(ld->status_text);
             g_free(ld);
             return G_SOURCE_REMOVE;
         }
 
-        // Check for duplicate in global list (might exist if reload/re-scan happened)
+        /* Check for duplicate in global list (might exist if reload/re-scan happened) */
+        g_mutex_lock(&dict_loader_mutex);
+        DictEntry *prev = NULL;
         DictEntry *existing = NULL;
         for (DictEntry *curr = all_dicts; curr; curr = curr->next) {
             if (curr->path && strcmp(curr->path, e->path) == 0) {
                 existing = curr;
                 break;
             }
+            prev = curr;
         }
+        if (existing) dict_entry_ref(existing);
+        g_mutex_unlock(&dict_loader_mutex);
 
         if (e->dict) {
             char *guessed = NULL;
@@ -5338,27 +5507,34 @@ static gboolean on_dict_loaded_idle(gpointer user_data) {
             populate_dict_sidebar();
         }
 
-        if (existing) {
-            // Already there, just update the loaded dict data
-            // (The sidebar row already points to this 'existing' entry)
-            if (existing->dict) dict_mmap_close(existing->dict);
-            existing->dict = e->dict;
-            existing->format = e->format;
-
-            if (e->name) {
-                g_free(existing->name);
-                existing->name = g_strdup(e->name);
+        // Replace in global list under lock
+        g_mutex_lock(&dict_loader_mutex);
+        prev = NULL;
+        DictEntry *found_again = NULL;
+        for (DictEntry *curr = all_dicts; curr; curr = curr->next) {
+            if (curr->path && strcmp(curr->path, e->path) == 0) {
+                found_again = curr;
+                break;
             }
-            if (e->icon_path) {
-                g_free(existing->icon_path);
-                existing->icon_path = g_strdup(e->icon_path);
-            }
+            prev = curr;
+        }
 
-            // We can free the 'e' shell now as 'e->dict' is transferred
-            e->dict = NULL;
-            dict_loader_free(e);
+        if (found_again) {
+            // Replace 'found_again' (which should be 'existing') with 'e'
+            e->next = found_again->next;
+            if (prev) {
+                prev->next = e;
+            } else {
+                all_dicts = e;
+            }
+            if (active_entry == found_again) {
+                set_active_entry(e);
+            }
+            found_again->next = NULL;
+            dict_entry_unref(found_again);
         } else {
-            // New unique entry
+            // New unique entry - append to list
+            e->next = NULL;
             if (!all_dicts) {
                 all_dicts = e;
             } else {
@@ -5367,9 +5543,11 @@ static gboolean on_dict_loaded_idle(gpointer user_data) {
                 last->next = e;
             }
         }
+        g_mutex_unlock(&dict_loader_mutex);
+        if (existing) dict_entry_unref(existing);
 
         if (!active_entry && all_dicts) {
-            active_entry = all_dicts;
+            set_active_entry(all_dicts);
         }
 
         if (!startup_loading_active) {
@@ -6520,7 +6698,7 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
 
     /* Auto-select first dictionary */
     if (all_dicts) {
-        active_entry = all_dicts;
+        set_active_entry(all_dicts);
         populate_dict_sidebar();
     }
 
@@ -6584,7 +6762,7 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
         // CLI-mode: dicts already loaded synchronously, just populate
         populate_dict_sidebar();
         if (all_dicts) {
-            active_entry = all_dicts;
+            set_active_entry(all_dicts);
             populate_dict_sidebar();
         }
         render_idle_page_to_webview(
@@ -6655,11 +6833,13 @@ int main(int argc, char *argv[]) {
                 DictFormat fmt = dict_detect_format(argv[1]);
                 DictMmap *d = dict_load_any(argv[1], fmt, NULL, 0);
                 if (d) {
-                    DictEntry *e = calloc(1, sizeof(DictEntry));
+                    DictEntry *e = g_new0(DictEntry, 1);
+                    e->magic = 0xDEADC0DE;
+                    e->ref_count = 1;
                     const char *slash = strrchr(argv[1], '/');
                     const char *base = slash ? slash + 1 : argv[1];
-                    e->name = strdup(base);
-                    e->path = strdup(argv[1]);
+                    e->name = g_strdup(base);
+                    e->path = g_strdup(argv[1]);
                     e->format = fmt;
                     e->dict = d;
                     all_dicts = e;
@@ -6685,7 +6865,7 @@ int main(int argc, char *argv[]) {
             g_printerr("[SCAN_ONLY] name='%s' path='%s'\n",
                         e->name ? e->name : "(null)", e->path ? e->path : "(null)");
         }
-        dict_loader_free(head);
+        dict_loader_free_list(head);
         return 0;
     }
 
@@ -6731,7 +6911,8 @@ int main(int argc, char *argv[]) {
     g_free(last_search_query);
 
     g_object_unref(app);
-    dict_loader_free(all_dicts);
+    set_active_entry(NULL);
+    dict_loader_free_list(all_dicts);
 
     return status;
 }

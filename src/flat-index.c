@@ -197,7 +197,7 @@ FlatIndex* flat_index_open(const char *data, size_t size) {
 
     if (count == 0 || index_size + 8 > size) {
         /* No index or invalid — return empty index */
-        FlatIndex *idx = calloc(1, sizeof(FlatIndex));
+        FlatIndex *idx = g_new0(FlatIndex, 1);
         if (!idx) return NULL;
         idx->entries = NULL;
         idx->count = 0;
@@ -209,7 +209,7 @@ FlatIndex* flat_index_open(const char *data, size_t size) {
     size_t index_off = size - index_size;
     const FlatTreeEntry *entries = (const FlatTreeEntry *)(data + index_off);
 
-    FlatIndex *idx = calloc(1, sizeof(FlatIndex));
+    FlatIndex *idx = g_new0(FlatIndex, 1);
     if (!idx) return NULL;
     idx->entries = entries;
     idx->count = (size_t)count;
@@ -219,7 +219,7 @@ FlatIndex* flat_index_open(const char *data, size_t size) {
 }
 
 void flat_index_close(FlatIndex *idx) {
-    free(idx); /* entries are mmap'd, not heap-allocated */
+    g_free(idx); /* entries are mmap'd, not heap-allocated */
 }
 
 size_t flat_index_search(const FlatIndex *idx, const char *query) {

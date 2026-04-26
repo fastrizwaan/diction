@@ -174,7 +174,7 @@ static uint32_t read_u8or16(const unsigned char **pp, int is_v2) {
 static unsigned char *zlib_inflate(const unsigned char *src, size_t src_len,
                                     size_t hint, size_t *out_len) {
     size_t cap = hint ? hint : src_len * 4;
-    unsigned char *dst = malloc(cap);
+    unsigned char *dst = g_malloc(cap);
     if (!dst) return NULL;
 
     z_stream zs = {0};
@@ -183,11 +183,11 @@ static unsigned char *zlib_inflate(const unsigned char *src, size_t src_len,
     zs.next_out = dst;
     zs.avail_out = cap;
 
-    if (inflateInit(&zs) != Z_OK) { free(dst); return NULL; }
+    if (inflateInit(&zs) != Z_OK) { g_free(dst); return NULL; }
     int ret = inflate(&zs, Z_FINISH);
     inflateEnd(&zs);
 
-    if (ret != Z_STREAM_END && ret != Z_OK) { free(dst); return NULL; }
+    if (ret != Z_STREAM_END && ret != Z_OK) { g_free(dst); return NULL; }
     *out_len = zs.total_out;
     return dst;
 }
@@ -209,7 +209,7 @@ static unsigned char *lzo_inflate(const unsigned char *src, size_t src_len,
     }
 
     for (int attempt = 0; attempt < 8; attempt++) {
-        unsigned char *dst = malloc(cap);
+        unsigned char *dst = g_malloc(cap);
         if (!dst) {
             return NULL;
         }
@@ -221,7 +221,7 @@ static unsigned char *lzo_inflate(const unsigned char *src, size_t src_len,
             return dst;
         }
 
-        free(dst);
+        g_free(dst);
         if (ret != LZO_E_OUTPUT_OVERRUN) {
             return NULL;
         }
@@ -241,7 +241,7 @@ static unsigned char *mdx_block_decompress(const unsigned char *block,
     size_t payload_len = comp_size - 8;
 
     if (type == 0x00000000) {
-        unsigned char *c = malloc(payload_len);
+        unsigned char *c = g_malloc(payload_len);
         if (!c) return NULL;
         memcpy(c, payload, payload_len);
         *out_len = payload_len;
@@ -528,15 +528,15 @@ static char* mdd_get(ResourceReader *reader, const char *name) {
                 if (end_off <= b_dstart || start_off >= b_dend) continue;
                 
                 fseek(in, fs->rbis[i].file_offset, SEEK_SET);
-                unsigned char *comp = malloc(fs->rbis[i].comp);
+                unsigned char *comp = g_malloc(fs->rbis[i].comp);
                 if (!comp || fread(comp, 1, fs->rbis[i].comp, in) != fs->rbis[i].comp) {
-                    free(comp);
+                    g_free(comp);
                     continue;
                 }
                 
                 size_t dlen = 0;
                 unsigned char *decomp = mdx_block_decompress(comp, fs->rbis[i].comp, fs->rbis[i].decomp, &dlen);
-                free(comp);
+                g_free(comp);
                 
                 if (decomp) {
                     uint64_t slice_start = (start_off > b_dstart) ? start_off : b_dstart;
@@ -546,7 +546,7 @@ static char* mdd_get(ResourceReader *reader, const char *name) {
                     size_t slice_len = slice_end - slice_start;
                     
                     fwrite(decomp + offset_in_block, 1, slice_len, out);
-                    free(decomp);
+                    g_free(decomp);
                 }
             }
             fclose(in);
@@ -590,13 +590,13 @@ static void mdd_close(ResourceReader *reader) {
     for (size_t f = 0; f < mdd->num_files; f++) {
         MddFileState *fs = mdd->files[f];
         g_free(fs->mdd_path);
-        free(fs->rbis);
-        for (size_t i = 0; i < fs->res_count; i++) free(fs->resources[i].name);
-        free(fs->resources);
-        free(fs);
+        g_free(fs->rbis);
+        for (size_t i = 0; i < fs->res_count; i++) g_free(fs->resources[i].name);
+        g_free(fs->resources);
+        g_free(fs);
     }
-    free(mdd->files);
-    free(mdd);
+    g_free(mdd->files);
+    g_free(mdd);
 }
 
 static ResourceReader* mdx_open_mdd_reader(GPtrArray *mdd_paths, const char *extract_dir, int is_v2, int num_size, int encoding_is_utf16, int encrypted, volatile gint *cancel_flag, gint expected) {
@@ -616,10 +616,10 @@ static ResourceReader* mdx_open_mdd_reader(GPtrArray *mdd_paths, const char *ext
 
         int mdd_is_v2 = is_v2, mdd_num_size = num_size, mdd_encoding_is_utf16 = encoding_is_utf16, mdd_encrypted = encrypted;
         if (hts <= 10 * 1024 * 1024) {
-            unsigned char *header_raw = malloc(hts);
+            unsigned char *header_raw = g_malloc(hts);
             if (header_raw && fread(header_raw, 1, hts, f) == hts) {
                 size_t ascii_len = hts / 2;
-                char *ascii_hdr = malloc(ascii_len + 1);
+                char *ascii_hdr = g_malloc(ascii_len + 1);
                 if (ascii_hdr) {
                     for (size_t i = 0; i < ascii_len; i++) ascii_hdr[i] = header_raw[i * 2];
                     ascii_hdr[ascii_len] = '\0';
@@ -647,18 +647,18 @@ static ResourceReader* mdx_open_mdd_reader(GPtrArray *mdd_paths, const char *ext
                     } else mdd_encoding_is_utf16 = mdd_is_v2 ? 1 : encoding_is_utf16;
                     char *xp = strstr(ascii_hdr, "Encrypted=\"");
                     if (xp) mdd_encrypted = atoi(xp + 11);
-                    free(ascii_hdr);
+                    g_free(ascii_hdr);
                 }
             }
-            free(header_raw);
+            g_free(header_raw);
         } else {
             fseek(f, hts, SEEK_CUR);
         }
 
         fseek(f, 4, SEEK_CUR);
         int kbh_size = mdd_is_v2 ? (mdd_num_size * 5) : (mdd_num_size * 4);
-        unsigned char *kbh = malloc(kbh_size);
-        if (!kbh || fread(kbh, 1, kbh_size, f) != (size_t)kbh_size) { free(kbh); fclose(f); continue; }
+        unsigned char *kbh = g_malloc(kbh_size);
+        if (!kbh || fread(kbh, 1, kbh_size, f) != (size_t)kbh_size) { g_free(kbh); fclose(f); continue; }
         
         const unsigned char *kp = kbh;
         uint64_t num_key_blocks = read_num(&kp, mdd_num_size);
@@ -666,16 +666,16 @@ static ResourceReader* mdx_open_mdd_reader(GPtrArray *mdd_paths, const char *ext
         uint64_t kbi_decomp = mdd_is_v2 ? read_num(&kp, mdd_num_size) : 0;
         uint64_t kbi_comp = read_num(&kp, mdd_num_size);
         uint64_t kb_data_size = read_num(&kp, mdd_num_size);
-        free(kbh);
+        g_free(kbh);
         
         if (mdd_is_v2) fseek(f, 4, SEEK_CUR);
-        unsigned char *kbi_raw = malloc(kbi_comp);
-        if (!kbi_raw || fread(kbi_raw, 1, kbi_comp, f) != kbi_comp) { free(kbi_raw); fclose(f); continue; }
+        unsigned char *kbi_raw = g_malloc(kbi_comp);
+        if (!kbi_raw || fread(kbi_raw, 1, kbi_comp, f) != kbi_comp) { g_free(kbi_raw); fclose(f); continue; }
         
         long kb_data_pos = ftell(f);
         typedef struct { uint64_t comp, decomp; } KBI;
-        KBI *kbis = calloc(num_key_blocks, sizeof(KBI));
-        if (!kbis) { free(kbi_raw); fclose(f); continue; }
+        KBI *kbis = g_malloc0_n(num_key_blocks, sizeof(KBI));
+        if (!kbis) { g_free(kbi_raw); fclose(f); continue; }
         
         size_t kbc = 0;
         if (mdd_is_v2) {
@@ -696,7 +696,7 @@ static ResourceReader* mdx_open_mdd_reader(GPtrArray *mdd_paths, const char *ext
                     kbis[kbc].decomp = read_num(&ip, mdd_num_size);
                     kbc++;
                 }
-                free(data);
+                g_free(data);
             }
         } else {
             const unsigned char *ip = kbi_raw, *ie = kbi_raw + kbi_comp;
@@ -712,21 +712,21 @@ static ResourceReader* mdx_open_mdd_reader(GPtrArray *mdd_paths, const char *ext
                 kbc++;
             }
         }
-        free(kbi_raw);
+        g_free(kbi_raw);
         
-        MDDRes *resources = calloc(num_entries, sizeof(MDDRes));
-        if (!resources) { free(kbis); fclose(f); continue; }
+        MDDRes *resources = g_malloc0_n(num_entries, sizeof(MDDRes));
+        if (!resources) { g_free(kbis); fclose(f); continue; }
         
         size_t res_count = 0;
         fseek(f, kb_data_pos, SEEK_SET);
         for (size_t bi = 0; bi < kbc; bi++) {
             if (cancel_flag && g_atomic_int_get(cancel_flag) != expected) break;
-            unsigned char *comp = malloc(kbis[bi].comp);
-            if (!comp || fread(comp, 1, kbis[bi].comp, f) != kbis[bi].comp) { free(comp); continue; }
+            unsigned char *comp = g_malloc(kbis[bi].comp);
+            if (!comp || fread(comp, 1, kbis[bi].comp, f) != kbis[bi].comp) { g_free(comp); continue; }
             
             size_t dlen = 0;
             unsigned char *data = mdx_block_decompress(comp, kbis[bi].comp, kbis[bi].decomp, &dlen);
-            free(comp);
+            g_free(comp);
             if (!data) continue;
             
             const unsigned char *hp = data, *he = data + dlen;
@@ -748,10 +748,10 @@ static ResourceReader* mdx_open_mdd_reader(GPtrArray *mdd_paths, const char *ext
                     if (hp < he) hp++;
                 }
                 mdx_normalize_resource_path(word);
-                resources[res_count].name = strdup(word);
+                resources[res_count].name = g_strdup(word);
                 res_count++;
             }
-            free(data);
+            g_free(data);
         }
         fseek(f, kb_data_pos + kb_data_size, SEEK_SET);
         unsigned char rbh[64]; if(fread(rbh, 1, mdd_num_size * 4, f) != (size_t)(mdd_num_size * 4)) {}
@@ -760,7 +760,7 @@ static ResourceReader* mdx_open_mdd_reader(GPtrArray *mdd_paths, const char *ext
         read_num(&rp, mdd_num_size);
         read_num(&rp, mdd_num_size);
         
-        MDD_RBI *rbis = calloc(nrb, sizeof(MDD_RBI));
+        MDD_RBI *rbis = g_malloc0_n(nrb, sizeof(MDD_RBI));
         if (rbis) {
             uint64_t current_file_offset = ftell(f) + nrb * mdd_num_size * 2;
             uint64_t current_decomp_offset = 0;
@@ -798,11 +798,11 @@ static ResourceReader* mdx_open_mdd_reader(GPtrArray *mdd_paths, const char *ext
             
             mdd->files[mdd->num_files++] = fs;
         } else {
-            for(size_t i=0; i<res_count; i++) free(resources[i].name);
-            free(resources);
+            for(size_t i=0; i<res_count; i++) g_free(resources[i].name);
+            g_free(resources);
         }
         
-        free(kbis);
+        g_free(kbis);
         fclose(f);
     }
     
@@ -976,7 +976,7 @@ DictMmap *parse_mdx_file(const char *path, volatile gint *cancel_flag, gint expe
     if (fread(buf4, 1, 4, fh) == 4) {
         header_text_size = ru32be(buf4);
         if (header_text_size <= 10*1024*1024) {
-            unsigned char *header_raw = malloc(header_text_size);
+            unsigned char *header_raw = g_malloc(header_text_size);
             if (header_raw && fread(header_raw, 1, header_text_size, fh) == header_text_size) {
                 char *utf8_hdr = NULL;
                 /* Try UTF-16LE first as it's common for v2.0+ */
@@ -1051,7 +1051,7 @@ DictMmap *parse_mdx_file(const char *path, volatile gint *cancel_flag, gint expe
 
                     g_free(utf8_hdr);
                 }
-                free(header_raw);
+                g_free(header_raw);
             }
         }
     }
@@ -1098,7 +1098,7 @@ DictMmap *parse_mdx_file(const char *path, volatile gint *cancel_flag, gint expe
             if (!flat_index_validate(dict->index)) {
                 fprintf(stderr, "[MDX] Cache index validation failed for %s — rebuilding index.\n", path);
                 flat_index_close(dict->index);
-                dict->index = calloc(1, sizeof(FlatIndex));
+                dict->index = g_new0(FlatIndex, 1);
                 dict->index->mmap_data = dict->data;
                 dict->index->mmap_size = dict->size;
             }
@@ -1134,7 +1134,7 @@ rebuild_cache:
     fseek(fh, 4 + header_text_size + 4, SEEK_SET); // skip HeaderLen + Header + Checksum
 
     int kbh_size = is_v2 ? (num_size * 5) : (num_size * 4);
-    unsigned char *kbh = malloc(kbh_size);
+    unsigned char *kbh = g_malloc(kbh_size);
     fread(kbh, 1, kbh_size, fh);
 
     const unsigned char *kp = kbh;
@@ -1144,17 +1144,17 @@ rebuild_cache:
     uint64_t kbi_decomp = is_v2 ? read_num(&kp, num_size) : 0;
     uint64_t kbi_comp = read_num(&kp, num_size);
     uint64_t kb_data_size = read_num(&kp, num_size);
-    free(kbh);
+    g_free(kbh);
 
     if (is_v2) fseek(fh, 4, SEEK_CUR);
-    unsigned char *kbi_raw = malloc(kbi_comp);
+    unsigned char *kbi_raw = g_malloc(kbi_comp);
     fread(kbi_raw, 1, kbi_comp, fh);
 
     /* --- BUFFERED WRITING FOR CACHE --- */
-    char *write_buf = malloc(1024 * 1024);
+    char *write_buf = g_malloc(1024 * 1024);
     setvbuf(cache, write_buf, _IOFBF, 1024 * 1024);
 
-    TreeEntry *tree_entries = calloc(num_entries, sizeof(TreeEntry));
+    TreeEntry *tree_entries = g_malloc0_n(num_entries, sizeof(TreeEntry));
     size_t valid_count = 0;
     size_t valid_count_processed = 0;
     long headword_section_end = 0;
@@ -1165,7 +1165,7 @@ rebuild_cache:
     if (is_v2) {
         if (encrypted & 2) mdx_decrypt_key_block_info(kbi_raw, kbi_comp);
         kbi_data = mdx_block_decompress(kbi_raw, kbi_comp, kbi_decomp, &kbi_dlen);
-        free(kbi_raw);
+        g_free(kbi_raw);
     } else {
         kbi_data = kbi_raw;
         kbi_dlen = kbi_comp;
@@ -1190,7 +1190,7 @@ rebuild_cache:
             uint64_t decomp_size = read_num(&ip, num_size);
 
             long next_kb = ftell(fh) + (long)comp_size;
-            unsigned char *kb_comp = malloc(comp_size);
+            unsigned char *kb_comp = g_malloc(comp_size);
             if (fread(kb_comp, 1, comp_size, fh) == comp_size) {
                 size_t kb_dlen = 0;
                 unsigned char *kb_data = mdx_block_decompress(kb_comp, comp_size, decomp_size, &kb_dlen);
@@ -1264,13 +1264,13 @@ rebuild_cache:
                         tree_entries[valid_count].d_off = (int64_t)id;
                         valid_count++;
                     }
-                    free(kb_data);
+                    g_free(kb_data);
                 }
             }
-            free(kb_comp);
+            g_free(kb_comp);
             fseek(fh, next_kb, SEEK_SET);
         }
-        free(kbi_data);
+        g_free(kbi_data);
     } 
     
     headword_section_end = ftell(cache);
@@ -1286,7 +1286,7 @@ rebuild_cache:
     read_num(&rp, num_size);
 
     typedef struct { uint64_t comp, decomp; } RB;
-    RB *rbs = calloc(nrb, sizeof(RB));
+    RB *rbs = g_malloc0_n(nrb, sizeof(RB));
     for (uint64_t i = 0; i < nrb; i++) {
         unsigned char tmp[16];
         if (fread(tmp, 1, num_size * 2, fh) != (size_t)(num_size * 2)) break;
@@ -1299,7 +1299,7 @@ rebuild_cache:
     for (uint64_t j = 0; j < nrb; j++) {
         if (cancel_flag && g_atomic_int_get(cancel_flag) != expected) break;
         
-        unsigned char *comp = malloc(rbs[j].comp);
+        unsigned char *comp = g_malloc(rbs[j].comp);
         if (fread(comp, 1, rbs[j].comp, fh) == rbs[j].comp) {
             size_t dlen = 0;
             unsigned char *data = mdx_block_decompress(comp, rbs[j].comp, rbs[j].decomp, &dlen);
@@ -1373,13 +1373,13 @@ rebuild_cache:
                     valid_count_processed++;
                 }
                 current_decomp_offset += dlen;
-                free(data);
+                g_free(data);
             }
         }
-        free(comp);
+        g_free(comp);
         if ((j % 10) == 0) settings_scan_progress_notify(path, 40 + (int)(40 * j / nrb));
     }
-    free(rbs);
+    g_free(rbs);
 
     /* Sort entries for binary search using mmap for speed */
     fflush(cache);
@@ -1425,14 +1425,14 @@ rebuild_cache:
     dict->source_dir = source_dir;
     dict->mdx_stylesheet = stylesheet;
     dict->index = flat_index_open(dict->data, dict->size);
-    free(tree_entries);
+    g_free(tree_entries);
     g_free(cache_path);
 
     dict->resource_dir = mdx_prepare_resource_dir(path, is_v2, num_size, encoding_is_utf16, encrypted, cancel_flag, expected, &dict->resource_reader);
     mdx_detect_icon(dict, path);
     
     settings_scan_progress_notify(path, 100);
-    free(write_buf);
+    g_free(write_buf);
 
     return dict;
 }

@@ -23,6 +23,8 @@ typedef struct DictEntry {
     gboolean has_matches; /* Set during search if this dict has matches */
     char *guessed_lang_group; /* Lazily computed volatile language group like "English->Hindi" */
     char *icon_path;
+    int ref_count;        /* Reference counter for lifecycle management */
+    guint32 magic;        /* 0xDEADC0DE */
     struct DictEntry *next;
 } DictEntry;
 
@@ -49,8 +51,12 @@ void dict_loader_scan_directory_streaming(const char *dirpath,
                                            gint expected_generation,
                                            GCancellable *cancellable);
 
-/* Free all entries in a DictEntry linked list */
-void dict_loader_free(DictEntry *head);
+/* Lifecycle management: ref/unref */
+void dict_entry_ref(DictEntry *entry);
+void dict_entry_unref(DictEntry *entry);
+
+/* Legacy helper: Free all entries in a DictEntry linked list by unreffing each */
+void dict_loader_free_list(DictEntry *head);
 
 /* Detect format from file path */
 DictFormat dict_detect_format(const char *path);

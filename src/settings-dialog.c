@@ -374,8 +374,18 @@ static void on_rescan_directories(GtkButton *btn, SettingsDialogData *data) {
     }
     int n = (int)data->settings->dictionary_dirs->len;
     char **dirs = g_new0(char *, n + 1);
-    for (int i = 0; i < n; i++)
-        dirs[i] = g_strdup(g_ptr_array_index(data->settings->dictionary_dirs, i));
+    for (int i = 0; i < n; i++) {
+        const char *dir_path = g_ptr_array_index(data->settings->dictionary_dirs, i);
+        dirs[i] = g_strdup(dir_path);
+        
+        /* Clear ignored paths in this directory so they can be rediscovered */
+        for (gint j = (gint)data->settings->ignored_dictionary_paths->len - 1; j >= 0; j--) {
+            const char *ignored_path = g_ptr_array_index(data->settings->ignored_dictionary_paths, (guint)j);
+            if (path_is_inside_dir(ignored_path, dir_path)) {
+                g_ptr_array_remove_index(data->settings->ignored_dictionary_paths, (guint)j);
+            }
+        }
+    }
     dirs[n] = NULL;
     extern void show_scan_dialog_for_dirs(SettingsDialogData *data, char **dirs, int n_dirs, gboolean call_reload);
     show_scan_dialog_for_dirs(data, dirs, n, TRUE);
@@ -592,7 +602,7 @@ static void scan_worker_callback(DictEntry *entry, DictLoaderEventType event, vo
 
     /* Free the loaded entry (we don't keep the mmap in settings dialog) */
     if (event == DICT_LOADER_EVENT_FINISHED && entry) {
-        dict_loader_free(entry);
+        dict_entry_unref(entry);
     }
 }
 

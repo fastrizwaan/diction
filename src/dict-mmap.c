@@ -329,7 +329,7 @@ static size_t parse_dsl_into_entries(DictMmap *dict, TreeEntry **out_entries, si
     FLUSH_HEADWORDS();
     #undef FLUSH_HEADWORDS
 
-    free(hws);
+    g_free(hws);
     if (out_entries) {
         /* Sort entries for binary search */
         if (entries && word_count > 0) {
@@ -337,7 +337,7 @@ static size_t parse_dsl_into_entries(DictMmap *dict, TreeEntry **out_entries, si
         }
         *out_entries = entries;
     } else {
-        free(entries);
+        g_free(entries);
     }
     printf("[DEBUG] parse_dsl_into_entries: indexed %zu headwords.\n", word_count);
     return word_count;
@@ -432,7 +432,7 @@ DictMmap* dict_mmap_open(const char *path, volatile gint *cancel_flag, gint expe
         dict->fd = open(cache_path, O_RDONLY);
         if (dict->fd < 0) {
             g_free(cache_path);
-            free(dict);
+            g_free(dict);
             return NULL;
         }
 
@@ -440,7 +440,7 @@ DictMmap* dict_mmap_open(const char *path, volatile gint *cancel_flag, gint expe
         if (fstat(dict->fd, &st) < 0 || st.st_size < 8) {
             close(dict->fd);
             g_free(cache_path);
-            free(dict);
+            g_free(dict);
             return NULL;
         }
         dict->size = st.st_size;
@@ -449,7 +449,7 @@ DictMmap* dict_mmap_open(const char *path, volatile gint *cancel_flag, gint expe
         if (map == MAP_FAILED) {
             close(dict->fd);
             g_free(cache_path);
-            free(dict);
+            g_free(dict);
             return NULL;
         }
 
@@ -518,41 +518,54 @@ DictMmap* dict_mmap_open(const char *path, volatile gint *cancel_flag, gint expe
                 // abort and cleanup
                 if (dict->fd >= 0) close(dict->fd);
                 if (dict->tmp_file) fclose(dict->tmp_file);
-                free(entries);
-                free(dict);
+                g_free(entries);
+                g_free(dict);
                 g_free(cache_path);
                 return NULL;
             }
 
             if (word_count > 0 && entries) {
-                // Re-open O_RDWR to upgrade cache
-                int fd_rw = open(cache_path, O_RDWR);
-                if (fd_rw >= 0) {
-                    // Truncate to remove any old/stale index before appending new one
-                    ftruncate(fd_rw, (off_t)data_size);
-
-                    lseek(fd_rw, 0, SEEK_END);
-                    write(fd_rw, entries, word_count * sizeof(TreeEntry));
-                    lseek(fd_rw, 0, SEEK_SET);
+                // Atomic Upgrade: Write new cache to temp file then rename
+                char *tmp_cache = g_strdup_printf("%s.tmp", cache_path);
+                FILE *f_tmp = fopen(tmp_cache, "wb");
+                if (f_tmp) {
                     uint64_t final_cnt = (uint64_t)word_count;
-                    write(fd_rw, &final_cnt, 8);
-                    close(fd_rw);
+                    fwrite(&final_cnt, 8, 1, f_tmp);
+                    fwrite(dict->data + 8, 1, data_size - 8, f_tmp);
+                    fwrite(entries, sizeof(TreeEntry), word_count, f_tmp);
+                    fclose(f_tmp);
 
-                    // Re-mmap the newly written file
-                    munmap((void*)dict->data, dict->size);
-                    close(dict->fd);
-                    dict->fd = open(cache_path, O_RDONLY);
-                    struct stat st_new;
-                    fstat(dict->fd, &st_new);
-                    dict->size = st_new.st_size;
-                    dict->data = mmap(NULL, dict->size, PROT_READ, MAP_PRIVATE, dict->fd, 0);
+                    // Sync time to match original
+                    struct stat src_st;
+                    if (stat(path, &src_st) == 0) {
+                        struct utimbuf times = { .actime = src_st.st_mtime, .modtime = src_st.st_mtime };
+                        utime(tmp_cache, &times);
+                    }
 
-                    // Reopen flat index with new data
-                    flat_index_close(dict->index);
-                    dict->index = flat_index_open(dict->data, dict->size);
-                    printf("[DSL] Auto-upgraded cache for %s (%lu entries).\n", path, (unsigned long)word_count);
+                    if (rename(tmp_cache, cache_path) == 0) {
+                        // Re-mmap the newly written file
+                        munmap((void*)dict->data, dict->size);
+                        if (dict->fd >= 0) close(dict->fd);
+                        dict->fd = open(cache_path, O_RDONLY);
+                        struct stat st_new;
+                        fstat(dict->fd, &st_new);
+                        dict->size = st_new.st_size;
+                        dict->data = (const char*)mmap(NULL, dict->size, PROT_READ, MAP_PRIVATE, dict->fd, 0);
+                        if (dict->data == MAP_FAILED) {
+                            dict->data = NULL;
+                            fprintf(stderr, "[DSL] MAP_FAILED for upgraded cache %s\n", cache_path);
+                        }
+
+                        // Reopen flat index with new data
+                        flat_index_close(dict->index);
+                        dict->index = flat_index_open(dict->data, dict->size);
+                        printf("[DSL] Auto-upgraded cache for %s (%lu entries).\n", path, (unsigned long)word_count);
+                    } else {
+                        fprintf(stderr, "[DSL] Failed to rename upgraded cache to %s\n", cache_path);
+                    }
                 }
-                free(entries);
+                g_free(tmp_cache);
+                g_free(entries);
             }
         }
         
@@ -564,16 +577,18 @@ DictMmap* dict_mmap_open(const char *path, volatile gint *cancel_flag, gint expe
         gzFile gz = gzopen(path, "rb");
         if (!gz) {
             g_free(cache_path);
-            free(dict);
+            g_free(dict);
             return NULL;
         }
 
-        // Open cache file for writing
-        FILE *cache_file = fopen(cache_path, "wb");
+        // Open temporary cache file for writing
+        char *tmp_cache = g_strdup_printf("%s.tmp", cache_path);
+        FILE *cache_file = fopen(tmp_cache, "wb");
         if (!cache_file) {
             gzclose(gz);
+            g_free(tmp_cache);
             g_free(cache_path);
-            free(dict);
+            g_free(dict);
             return NULL;
         }
 
@@ -588,7 +603,7 @@ DictMmap* dict_mmap_open(const char *path, volatile gint *cancel_flag, gint expe
             gzclose(gz);
             fclose(cache_file);
             g_free(cache_path);
-            free(dict);
+            g_free(dict);
             return NULL;
         }
 
@@ -639,9 +654,10 @@ DictMmap* dict_mmap_open(const char *path, volatile gint *cancel_flag, gint expe
             if (cancel_flag && g_atomic_int_get(cancel_flag) != expected) {
                 gzclose(gz);
                 fclose(cache_file);
-                unlink(cache_path);
+                unlink(tmp_cache);
+                g_free(tmp_cache);
                 g_free(cache_path);
-                free(dict);
+                g_free(dict);
                 return NULL;
             }
             int total = bytes_read + has_pending;
@@ -676,10 +692,11 @@ DictMmap* dict_mmap_open(const char *path, volatile gint *cancel_flag, gint expe
         fclose(cache_file);
 
         // Now open the cached file
-        dict->fd = open(cache_path, O_RDWR);
+        dict->fd = open(tmp_cache, O_RDWR);
         if (dict->fd < 0) {
+            g_free(tmp_cache);
             g_free(cache_path);
-            free(dict);
+            g_free(dict);
             return NULL;
         }
 
@@ -687,7 +704,7 @@ DictMmap* dict_mmap_open(const char *path, volatile gint *cancel_flag, gint expe
         if (fstat(dict->fd, &st) < 0 || st.st_size == 0) {
             close(dict->fd);
             g_free(cache_path);
-            free(dict);
+            g_free(dict);
             return NULL;
         }
         dict->size = st.st_size;
@@ -696,7 +713,7 @@ DictMmap* dict_mmap_open(const char *path, volatile gint *cancel_flag, gint expe
         if (map == MAP_FAILED) {
             close(dict->fd);
             g_free(cache_path);
-            free(dict);
+            g_free(dict);
             return NULL;
         }
 
@@ -715,7 +732,7 @@ DictMmap* dict_mmap_open(const char *path, volatile gint *cancel_flag, gint expe
             uint64_t final_count = (uint64_t)word_count;
             write(dict->fd, &final_count, 8);
 
-            free(entries);
+            g_free(entries);
         }
 
         // Sync cache mtime to match source (after all writes including index)
@@ -725,21 +742,39 @@ DictMmap* dict_mmap_open(const char *path, volatile gint *cancel_flag, gint expe
                 struct utimbuf times;
                 times.actime = src_st.st_mtime;
                 times.modtime = src_st.st_mtime;
-                utime(cache_path, &times);
+                utime(tmp_cache, &times);
             }
+        }
+
+        // Atomic Swap
+        if (rename(tmp_cache, cache_path) != 0) {
+            fprintf(stderr, "[DSL] Failed to rename temp cache to %s\n", cache_path);
+            munmap(map, dict->size);
+            close(dict->fd);
+            g_free(tmp_cache);
+            g_free(cache_path);
+            g_free(dict);
+            return NULL;
         }
 
         // Remap as read-only for final use
         munmap(map, dict->size);
         struct stat st_final;
-        fstat(dict->fd, &st_final);
-        dict->size = st_final.st_size;
-        dict->data = mmap(NULL, dict->size, PROT_READ, MAP_PRIVATE, dict->fd, 0);
+        if (stat(cache_path, &st_final) == 0) {
+            dict->size = st_final.st_size;
+        }
+        dict->fd = open(cache_path, O_RDONLY);
+        dict->data = (const char*)mmap(NULL, dict->size, PROT_READ, MAP_PRIVATE, dict->fd, 0);
+        if (dict->data == MAP_FAILED) {
+            dict->data = NULL;
+            fprintf(stderr, "[DSL] MAP_FAILED for final cache %s\n", cache_path);
+        }
         close(dict->fd);
         dict->fd = -1;
 
         // Open flat index from the newly written cache
         dict->index = flat_index_open(dict->data, dict->size);
+        g_free(tmp_cache);
     }
 
     return dict;

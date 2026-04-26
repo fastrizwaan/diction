@@ -380,7 +380,7 @@ static size_t transcode_bgl_blocks(const char *data, size_t data_size, FILE *out
         fflush(out_file);
         // Let the caller handle index sorting since it requires memory map of the new file.
     } else {
-        free(entries);
+        g_free(entries);
         *out_entries = NULL;
     }
     
@@ -452,7 +452,7 @@ DictMmap* parse_bgl_file(const char *path, volatile gint *cancel_flag, gint expe
             flat_index_close(dict->index);
             munmap((void*)dict->data, dict->size);
             close(dict->fd);
-            free(dict);
+            g_free(dict);
             dict_data = NULL;
             // fallthrough and rebuild!
             cache_valid = FALSE;
@@ -521,7 +521,7 @@ DictMmap* parse_bgl_file(const char *path, volatile gint *cancel_flag, gint expe
             fwrite(&final_count, 8, 1, cache_file);
         }
         fclose(cache_file);
-        free(entries);
+        g_free(entries);
 
         struct stat src_st;
         if (stat(path, &src_st) == 0) {

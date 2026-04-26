@@ -8,9 +8,9 @@
 #include <gio/gio.h>
 #include "dict-mmap.h"
 
-static gboolean path_is_inside_dir(const char *path, const char *dir_path);
 static GPtrArray *settings_collect_mdx_companion_paths(const char *mdx_path);
 static gboolean ends_with_ci(const char *text, const char *suffix);
+
 
 static char *settings_fallback_dictionary_name(const char *path) {
     char *basename = g_path_get_basename(path ? path : "");
@@ -138,7 +138,7 @@ gboolean settings_path_is_in_directory_list(AppSettings *settings, const char *p
     return FALSE;
 }
 
-static gboolean path_is_inside_dir(const char *path, const char *dir_path) {
+gboolean path_is_inside_dir(const char *path, const char *dir_path) {
     if (!path || !dir_path) {
         return FALSE;
     }
@@ -643,14 +643,11 @@ gboolean settings_is_dictionary_ignored(AppSettings *settings, const char *path)
 }
 
 void settings_set_dictionary_ignored(AppSettings *settings, const char *path, gboolean ignored) {
-    if (!settings || !path || !*path) {
+    if (!settings || !path || !*path || !settings->ignored_dictionary_paths) {
         return;
     }
 
-    if (!settings->ignored_dictionary_paths) {
-        settings->ignored_dictionary_paths = g_ptr_array_new_with_free_func(g_free);
-    }
-
+    g_mutex_lock(&settings->mutex);
     for (guint i = 0; i < settings->ignored_dictionary_paths->len; i++) {
         const char *ignored_path = g_ptr_array_index(settings->ignored_dictionary_paths, i);
         if (g_strcmp0(ignored_path, path) != 0) {
@@ -660,71 +657,83 @@ void settings_set_dictionary_ignored(AppSettings *settings, const char *path, gb
         if (!ignored) {
             g_ptr_array_remove_index(settings->ignored_dictionary_paths, i);
         }
+        g_mutex_unlock(&settings->mutex);
         return;
     }
 
     if (ignored) {
         g_ptr_array_add(settings->ignored_dictionary_paths, g_strdup(path));
     }
+    g_mutex_unlock(&settings->mutex);
 }
 
 DictConfig* settings_find_dictionary_by_id(AppSettings *settings, const char *id) {
-    if (!settings || !id) {
+    if (!settings || !id || !settings->dictionaries) {
         return NULL;
     }
 
+    g_mutex_lock(&settings->mutex);
+    DictConfig *found = NULL;
     for (guint i = 0; i < settings->dictionaries->len; i++) {
         DictConfig *cfg = g_ptr_array_index(settings->dictionaries, i);
         if (g_strcmp0(cfg->id, id) == 0) {
-            return cfg;
+            found = cfg;
+            break;
         }
     }
+    g_mutex_unlock(&settings->mutex);
 
-    return NULL;
+    return found;
 }
 
 DictConfig* settings_find_dictionary_by_path(AppSettings *settings, const char *path) {
-    if (!settings || !path) {
+    if (!settings || !path || !settings->dictionaries) {
         return NULL;
     }
 
+    g_mutex_lock(&settings->mutex);
+    DictConfig *found = NULL;
     for (guint i = 0; i < settings->dictionaries->len; i++) {
         DictConfig *cfg = g_ptr_array_index(settings->dictionaries, i);
-        if (g_strcmp0(cfg->path, path) == 0) {
-            return cfg;
+        if (!cfg) {
+            continue;
+        }
+        
+        if (cfg->path && g_strcmp0(cfg->path, path) == 0) {
+            found = cfg;
+            break;
         }
     }
+    g_mutex_unlock(&settings->mutex);
 
-    return NULL;
+    return found;
 }
 
 void settings_upsert_dictionary(AppSettings *settings, const char *name, const char *path, const char *source) {
-    if (!settings || !path || !*path) {
-        return;
-    }
-
-    DictConfig *cfg = settings_find_dictionary_by_path(settings, path);
-    if (cfg) {
-        if (name && *name) {
-            g_free(cfg->name);
-            cfg->name = g_strdup(name);
-        }
-        if (source && *source &&
-            (!cfg->source || !*cfg->source || g_strcmp0(cfg->source, "directory") == 0)) {
-            g_free(cfg->source);
-            cfg->source = g_strdup(source);
+    if (!settings || !path) return;
+    
+    DictConfig *existing = settings_find_dictionary_by_path(settings, path);
+    if (existing) {
+        // Update name if it changed
+        if (name && g_strcmp0(existing->name, name) != 0) {
+            g_mutex_lock(&settings->mutex);
+            g_free(existing->name);
+            existing->name = g_strdup(name);
+            g_mutex_unlock(&settings->mutex);
         }
         return;
     }
 
-    g_ptr_array_add(settings->dictionaries, dict_config_new(name ? name : path, path, source));
+    DictConfig *cfg = dict_config_new(name, path, source);
+    g_mutex_lock(&settings->mutex);
+    g_ptr_array_add(settings->dictionaries, cfg);
+    g_mutex_unlock(&settings->mutex);
 }
 
 void settings_prune_directory_dictionaries(AppSettings *settings, GHashTable *loaded_paths) {
-    if (!settings) {
-        return;
-    }
-
+    if (!settings || !loaded_paths) return;
+    
+    g_mutex_lock(&settings->mutex);
     GPtrArray *cleanup_tasks = cleanup_task_array_new();
     for (gint i = (gint)settings->dictionaries->len - 1; i >= 0; i--) {
         DictConfig *cfg = g_ptr_array_index(settings->dictionaries, (guint)i);
@@ -739,6 +748,7 @@ void settings_prune_directory_dictionaries(AppSettings *settings, GHashTable *lo
         settings_strip_dict_from_groups(settings, cfg->id);
         g_ptr_array_remove_index(settings->dictionaries, (guint)i);
     }
+    g_mutex_unlock(&settings->mutex);
 
     dispatch_cleanup_tasks(cleanup_tasks);
 }
@@ -763,6 +773,7 @@ AppSettings* settings_load(void) {
     settings->scan_popup_delay_ms = 500;
     settings->scan_modifier_key = g_strdup("none");
     settings->global_shortcut = g_strdup("");
+    g_mutex_init(&settings->mutex);
 
     char *path = get_settings_file_path();
     if (!g_file_test(path, G_FILE_TEST_EXISTS)) {
@@ -954,6 +965,9 @@ AppSettings* settings_load(void) {
 }
 
 void settings_save(AppSettings *settings) {
+    if (!settings) return;
+    g_mutex_lock(&settings->mutex);
+
     ensure_config_dir();
     char *path = get_settings_file_path();
 
@@ -1032,12 +1046,17 @@ void settings_save(AppSettings *settings) {
     JsonGenerator *gen = json_generator_new();
     json_generator_set_pretty(gen, TRUE);
     json_generator_set_root(gen, node);
+    
+    // Release lock before I/O if possible? No, we need the JSON node to be stable.
+    // json_generator_to_file might be slow, but it's safe since it's on the main thread mostly.
     json_generator_to_file(gen, path, NULL);
 
     g_object_unref(gen);
     json_node_free(node);
     json_object_unref(root);
     g_free(path);
+
+    g_mutex_unlock(&settings->mutex);
 }
 
 void settings_free(AppSettings *settings) {
@@ -1359,6 +1378,8 @@ void settings_add_dictionary(AppSettings *settings, const char *name, const char
 }
 
 void settings_remove_dictionary(AppSettings *settings, const char *id) {
+    if (!settings || !id) return;
+    g_mutex_lock(&settings->mutex);
     for (guint i = 0; i < settings->dictionaries->len; i++) {
         DictConfig *cfg = g_ptr_array_index(settings->dictionaries, i);
         if (strcmp(cfg->id, id) == 0) {
@@ -1373,21 +1394,28 @@ void settings_remove_dictionary(AppSettings *settings, const char *id) {
             queue_cleanup_task(cleanup_tasks, cfg->path,
                                delete_payload ? CLEANUP_DELETE_PAYLOAD : CLEANUP_CACHE_ONLY);
             if (hidden_from_watch_dirs) {
+                // Need to be careful here if settings_set_dictionary_ignored also locks
+                // I'll make sure it does.
                 settings_set_dictionary_ignored(settings, cfg->path, TRUE);
             } else {
                 settings_set_dictionary_ignored(settings, cfg->path, FALSE);
             }
             g_free(managed_dir);
             settings_strip_dict_from_groups(settings, cfg->id);
-            // g_ptr_array_remove_index calls dict_config_free via the array's destroy func
             g_ptr_array_remove_index(settings->dictionaries, i);
+            
+            g_mutex_unlock(&settings->mutex);
+            settings_save(settings);
             dispatch_cleanup_tasks(cleanup_tasks);
             return;
         }
     }
+    g_mutex_unlock(&settings->mutex);
 }
 
 void settings_move_dictionary(AppSettings *settings, const char *id, int direction) {
+    if (!settings || !id) return;
+    g_mutex_lock(&settings->mutex);
     int idx = -1;
     for (guint i = 0; i < settings->dictionaries->len; i++) {
         DictConfig *cfg = g_ptr_array_index(settings->dictionaries, i);
@@ -1396,14 +1424,21 @@ void settings_move_dictionary(AppSettings *settings, const char *id, int directi
             break;
         }
     }
-    if (idx < 0) return;
+    if (idx < 0) {
+        g_mutex_unlock(&settings->mutex);
+        return;
+    }
 
     int new_idx = idx + direction;
-    if (new_idx < 0 || new_idx >= (int)settings->dictionaries->len) return;
+    if (new_idx < 0 || new_idx >= (int)settings->dictionaries->len) {
+        g_mutex_unlock(&settings->mutex);
+        return;
+    }
 
     gpointer tmp = g_ptr_array_index(settings->dictionaries, idx);
     g_ptr_array_index(settings->dictionaries, idx) = g_ptr_array_index(settings->dictionaries, new_idx);
     g_ptr_array_index(settings->dictionaries, new_idx) = tmp;
+    g_mutex_unlock(&settings->mutex);
 }
 
 void settings_create_group(AppSettings *settings, const char *name, GPtrArray *dict_ids) {
@@ -1417,6 +1452,7 @@ void settings_create_group(AppSettings *settings, const char *name, GPtrArray *d
 gboolean settings_upsert_guessed_group(AppSettings *settings, const char *name, const char *dict_id) {
     if (!settings || !name || !dict_id) return FALSE;
 
+    g_mutex_lock(&settings->mutex);
     gboolean changed = FALSE;
 
     for (gint i = (gint)settings->dictionary_groups->len - 1; i >= 0; i--) {
@@ -1444,10 +1480,12 @@ gboolean settings_upsert_guessed_group(AppSettings *settings, const char *name, 
         if (g_strcmp0(grp->name, name) == 0 && g_strcmp0(grp->source, "guessed") == 0) {
             for (guint j = 0; j < grp->members->len; j++) {
                 if (g_strcmp0(g_ptr_array_index(grp->members, j), dict_id) == 0) {
+                    g_mutex_unlock(&settings->mutex);
                     return changed;
                 }
             }
             g_ptr_array_add(grp->members, g_strdup(dict_id));
+            g_mutex_unlock(&settings->mutex);
             return TRUE;
         }
     }
@@ -1457,6 +1495,7 @@ gboolean settings_upsert_guessed_group(AppSettings *settings, const char *name, 
     grp->source = g_strdup("guessed");
     g_ptr_array_add(grp->members, g_strdup(dict_id));
     g_ptr_array_add(settings->dictionary_groups, grp);
+    g_mutex_unlock(&settings->mutex);
     return TRUE;
 }
 

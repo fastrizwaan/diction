@@ -1299,6 +1299,9 @@ rebuild_cache:
     for (uint64_t j = 0; j < nrb; j++) {
         if (cancel_flag && g_atomic_int_get(cancel_flag) != expected) break;
         
+        /* Yield to the OS to reduce I/O pressure during heavy extraction */
+        g_usleep(1000); /* 1ms delay per block */
+        
         unsigned char *comp = g_malloc(rbs[j].comp);
         if (fread(comp, 1, rbs[j].comp, fh) == rbs[j].comp) {
             size_t dlen = 0;

@@ -2243,7 +2243,7 @@ char* dsl_render_to_html(const char *dsl_text,
     buf_append_str(&b, ".m11{color:"); buf_append_str(&b, translit_color); buf_append_str(&b, ";}");
     /* entry structure */
     buf_append_str(&b, ".rendered-entry{margin:0 0 10px 0;}");
-    buf_append_str(&b, ".rendered-entry-body{line-height:1.45;}");
+    buf_append_str(&b, ".rendered-entry-body{line-height:1.45; white-space: pre-wrap;}");
     buf_append_str(&b, ".dict-source-bar{background:");
     buf_append_str(&b, border_color);
     buf_append_str(&b, ";color:");

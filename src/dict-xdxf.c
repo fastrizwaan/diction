@@ -133,27 +133,33 @@ static void process_xml_xdxf(xmlTextReaderPtr reader, XdxfParserState *state, vo
                 GString *hw_str = g_string_new("");
                 GString *def_str = g_string_new("");
                 
-                int inner_ret = xmlTextReaderRead(reader);
-                while (inner_ret == 1 && xmlTextReaderDepth(reader) > ar_depth) {
+                while (xmlTextReaderRead(reader) == 1 && xmlTextReaderDepth(reader) > ar_depth) {
                     const xmlChar *inner_name = xmlTextReaderConstLocalName(reader);
                     int inner_type = xmlTextReaderNodeType(reader);
                     
                     if (inner_type == XML_READER_TYPE_ELEMENT) {
                         if (xmlStrEqual(inner_name, (const xmlChar*)"k")) {
-                            xmlChar *hw = xmlTextReaderReadString(reader);
-                            if (hw) {
-                                if (hw_str->len > 0) g_string_append(hw_str, "; ");
-                                g_string_append(hw_str, (const char*)hw);
-                                xmlFree(hw);
+                            int k_depth = xmlTextReaderDepth(reader);
+                            while (xmlTextReaderRead(reader) == 1 && xmlTextReaderDepth(reader) > k_depth) {
+                                if (xmlTextReaderNodeType(reader) == XML_READER_TYPE_TEXT || xmlTextReaderNodeType(reader) == XML_READER_TYPE_CDATA) {
+                                    const xmlChar *val = xmlTextReaderConstValue(reader);
+                                    if (val) {
+                                        if (hw_str->len > 0) g_string_append(hw_str, "; ");
+                                        g_string_append(hw_str, (const char*)val);
+                                    }
+                                }
                             }
+                            continue;
                         } else if (xmlStrEqual(inner_name, (const xmlChar*)"def")) {
-                            // def is a container, we'll process its children in the next iterations
+                            // def is a container
                         } else if (xmlStrEqual(inner_name, (const xmlChar*)"co")) {
                             g_string_append(def_str, "<span class=\"com\">");
                         } else if (xmlStrEqual(inner_name, (const xmlChar*)"dtrn")) {
-                            g_string_append(def_str, "<div class=\"trn\">");
+                            g_string_append(def_str, "<span class=\"trn\">");
                         } else if (xmlStrEqual(inner_name, (const xmlChar*)"ex")) {
                             g_string_append(def_str, "<span class=\"ex\">");
+                        } else if (xmlStrEqual(inner_name, (const xmlChar*)"tr")) {
+                            g_string_append(def_str, "<i>");
                         } else if (xmlStrEqual(inner_name, (const xmlChar*)"i")) {
                             g_string_append(def_str, "<i>");
                         } else if (xmlStrEqual(inner_name, (const xmlChar*)"b")) {
@@ -167,15 +173,17 @@ static void process_xml_xdxf(xmlTextReaderPtr reader, XdxfParserState *state, vo
                                 g_string_append(def_str, "<span>");
                             }
                         } else if (xmlStrEqual(inner_name, (const xmlChar*)"kref")) {
-                            g_string_append(def_str, "<a class=\"dict-link\" href=\"#\">");
+                            g_string_append(def_str, "<a class='dict-link' href='#'>");
                         }
                     } else if (inner_type == XML_READER_TYPE_END_ELEMENT) {
                         if (xmlStrEqual(inner_name, (const xmlChar*)"co") ||
                             xmlStrEqual(inner_name, (const xmlChar*)"ex") ||
-                            xmlStrEqual(inner_name, (const xmlChar*)"c")) {
+                            xmlStrEqual(inner_name, (const xmlChar*)"dtrn")) {
                             g_string_append(def_str, "</span>");
-                        } else if (xmlStrEqual(inner_name, (const xmlChar*)"dtrn")) {
-                            g_string_append(def_str, "</div>");
+                        } else if (xmlStrEqual(inner_name, (const xmlChar*)"tr")) {
+                            g_string_append(def_str, "</i>");
+                        } else if (xmlStrEqual(inner_name, (const xmlChar*)"c")) {
+                            g_string_append(def_str, "</span>");
                         } else if (xmlStrEqual(inner_name, (const xmlChar*)"i")) {
                             g_string_append(def_str, "</i>");
                         } else if (xmlStrEqual(inner_name, (const xmlChar*)"b")) {
@@ -183,7 +191,8 @@ static void process_xml_xdxf(xmlTextReaderPtr reader, XdxfParserState *state, vo
                         } else if (xmlStrEqual(inner_name, (const xmlChar*)"kref")) {
                             g_string_append(def_str, "</a>");
                         }
-                    } else if (inner_type == XML_READER_TYPE_TEXT || inner_type == XML_READER_TYPE_CDATA) {
+                    } else if (inner_type == XML_READER_TYPE_TEXT || inner_type == XML_READER_TYPE_CDATA ||
+                               inner_type == XML_READER_TYPE_WHITESPACE || inner_type == XML_READER_TYPE_SIGNIFICANT_WHITESPACE) {
                         const xmlChar *value = xmlTextReaderConstValue(reader);
                         if (value) {
                             char *escaped = g_markup_escape_text((const char*)value, -1);
@@ -191,7 +200,6 @@ static void process_xml_xdxf(xmlTextReaderPtr reader, XdxfParserState *state, vo
                             g_free(escaped);
                         }
                     }
-                    inner_ret = xmlTextReaderRead(reader);
                 }
                 
                 if (hw_str->len > 0) {
@@ -212,8 +220,6 @@ static void process_xml_xdxf(xmlTextReaderPtr reader, XdxfParserState *state, vo
                 g_string_free(hw_str, TRUE);
                 g_string_free(def_str, TRUE);
                 
-                if (inner_ret == 0) break;
-                ret = inner_ret;
                 continue;
             }
         }

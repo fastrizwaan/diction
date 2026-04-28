@@ -130,18 +130,34 @@ static void process_xml_xdxf(xmlTextReaderPtr reader, XdxfParserState *state, vo
                 }
             } else if (xmlStrEqual(name, (const xmlChar*)"ar")) {
                 int ar_depth = xmlTextReaderDepth(reader);
-                GString *hw_str = g_string_new("");
+                GString *hw_str  = g_string_new("");
                 GString *def_str = g_string_new("");
-                
+                /* Everything outside <dtrn> accumulates here as a label/preamble.
+                   When <dtrn> opens we inject it inside the block div. */
+                GString *label_buf  = g_string_new("");
+                gboolean in_dtrn = FALSE;
+
                 while (xmlTextReaderRead(reader) == 1 && xmlTextReaderDepth(reader) > ar_depth) {
                     const xmlChar *inner_name = xmlTextReaderConstLocalName(reader);
                     int inner_type = xmlTextReaderNodeType(reader);
-                    
+                    int cur_depth  = xmlTextReaderDepth(reader);
+
+                    /* Which GString gets appended — label before dtrn, def inside dtrn */
+                    GString *out = in_dtrn ? def_str : label_buf;
+
+                    /* Suppress structural whitespace outside dtrn */
+                    if (!in_dtrn &&
+                        (inner_type == XML_READER_TYPE_WHITESPACE ||
+                         inner_type == XML_READER_TYPE_SIGNIFICANT_WHITESPACE)) {
+                        continue;
+                    }
+
                     if (inner_type == XML_READER_TYPE_ELEMENT) {
                         if (xmlStrEqual(inner_name, (const xmlChar*)"k")) {
-                            int k_depth = xmlTextReaderDepth(reader);
+                            int k_depth = cur_depth;
                             while (xmlTextReaderRead(reader) == 1 && xmlTextReaderDepth(reader) > k_depth) {
-                                if (xmlTextReaderNodeType(reader) == XML_READER_TYPE_TEXT || xmlTextReaderNodeType(reader) == XML_READER_TYPE_CDATA) {
+                                if (xmlTextReaderNodeType(reader) == XML_READER_TYPE_TEXT ||
+                                    xmlTextReaderNodeType(reader) == XML_READER_TYPE_CDATA) {
                                     const xmlChar *val = xmlTextReaderConstValue(reader);
                                     if (val) {
                                         if (hw_str->len > 0) g_string_append(hw_str, "; ");
@@ -149,58 +165,77 @@ static void process_xml_xdxf(xmlTextReaderPtr reader, XdxfParserState *state, vo
                                     }
                                 }
                             }
-                            continue;
                         } else if (xmlStrEqual(inner_name, (const xmlChar*)"def")) {
-                            // def is a container
-                        } else if (xmlStrEqual(inner_name, (const xmlChar*)"co")) {
-                            g_string_append(def_str, "<span class=\"com\">");
+                            /* transparent container */
                         } else if (xmlStrEqual(inner_name, (const xmlChar*)"dtrn")) {
-                            g_string_append(def_str, "<span class=\"trn\">");
+                            in_dtrn = TRUE;
+                            g_string_append(def_str, "<div class=\"trn\">");
+                            if (label_buf->len > 0) {
+                                g_string_append(def_str, "<span class=\"trn-label\">");
+                                g_string_append(def_str, label_buf->str);
+                                g_string_append(def_str, "</span>");
+                                g_string_truncate(label_buf, 0);
+                            }
                         } else if (xmlStrEqual(inner_name, (const xmlChar*)"ex")) {
-                            g_string_append(def_str, "<span class=\"ex\">");
-                        } else if (xmlStrEqual(inner_name, (const xmlChar*)"tr")) {
-                            g_string_append(def_str, "<i>");
-                        } else if (xmlStrEqual(inner_name, (const xmlChar*)"i")) {
-                            g_string_append(def_str, "<i>");
+                            g_string_append(out, "<span class=\"ex\">");
+                        } else if (xmlStrEqual(inner_name, (const xmlChar*)"co")) {
+                            g_string_append(out, "<span class=\"com\">");
+                        } else if (xmlStrEqual(inner_name, (const xmlChar*)"abr")) {
+                            g_string_append(out, "<i>");
+                        } else if (xmlStrEqual(inner_name, (const xmlChar*)"tr") ||
+                                   xmlStrEqual(inner_name, (const xmlChar*)"i")) {
+                            g_string_append(out, "<i>");
                         } else if (xmlStrEqual(inner_name, (const xmlChar*)"b")) {
-                            g_string_append(def_str, "<b>");
+                            g_string_append(out, "<b>");
                         } else if (xmlStrEqual(inner_name, (const xmlChar*)"c")) {
                             xmlChar *c_attr = xmlTextReaderGetAttribute(reader, (const xmlChar*)"c");
                             if (c_attr) {
-                                g_string_append_printf(def_str, "<span style=\"color:%s\">", (const char*)c_attr);
+                                g_string_append_printf(out, "<span style=\"color:%s\">", (const char*)c_attr);
                                 xmlFree(c_attr);
                             } else {
-                                g_string_append(def_str, "<span>");
+                                g_string_append(out, "<span>");
                             }
                         } else if (xmlStrEqual(inner_name, (const xmlChar*)"kref")) {
-                            g_string_append(def_str, "<a class='dict-link' href='#'>");
+                            g_string_append(out, "<a class='dict-link' href='#'>");
                         }
                     } else if (inner_type == XML_READER_TYPE_END_ELEMENT) {
-                        if (xmlStrEqual(inner_name, (const xmlChar*)"co") ||
-                            xmlStrEqual(inner_name, (const xmlChar*)"ex") ||
-                            xmlStrEqual(inner_name, (const xmlChar*)"dtrn")) {
-                            g_string_append(def_str, "</span>");
-                        } else if (xmlStrEqual(inner_name, (const xmlChar*)"tr")) {
-                            g_string_append(def_str, "</i>");
-                        } else if (xmlStrEqual(inner_name, (const xmlChar*)"c")) {
-                            g_string_append(def_str, "</span>");
-                        } else if (xmlStrEqual(inner_name, (const xmlChar*)"i")) {
-                            g_string_append(def_str, "</i>");
+                        if (xmlStrEqual(inner_name, (const xmlChar*)"dtrn")) {
+                            g_string_append(def_str, "</div>");
+                            in_dtrn = FALSE;
+                        } else if (xmlStrEqual(inner_name, (const xmlChar*)"abr") ||
+                                   xmlStrEqual(inner_name, (const xmlChar*)"tr") ||
+                                   xmlStrEqual(inner_name, (const xmlChar*)"i")) {
+                            g_string_append(out, "</i>");
+                        } else if (xmlStrEqual(inner_name, (const xmlChar*)"co") ||
+                                   xmlStrEqual(inner_name, (const xmlChar*)"c") ||
+                                   xmlStrEqual(inner_name, (const xmlChar*)"ex")) {
+                            g_string_append(out, "</span>");
                         } else if (xmlStrEqual(inner_name, (const xmlChar*)"b")) {
-                            g_string_append(def_str, "</b>");
+                            g_string_append(out, "</b>");
                         } else if (xmlStrEqual(inner_name, (const xmlChar*)"kref")) {
-                            g_string_append(def_str, "</a>");
+                            g_string_append(out, "</a>");
                         }
-                    } else if (inner_type == XML_READER_TYPE_TEXT || inner_type == XML_READER_TYPE_CDATA ||
-                               inner_type == XML_READER_TYPE_WHITESPACE || inner_type == XML_READER_TYPE_SIGNIFICANT_WHITESPACE) {
+                    } else if (inner_type == XML_READER_TYPE_TEXT ||
+                               inner_type == XML_READER_TYPE_CDATA ||
+                               inner_type == XML_READER_TYPE_WHITESPACE ||
+                               inner_type == XML_READER_TYPE_SIGNIFICANT_WHITESPACE) {
                         const xmlChar *value = xmlTextReaderConstValue(reader);
                         if (value) {
                             char *escaped = g_markup_escape_text((const char*)value, -1);
-                            g_string_append(def_str, escaped);
+                            g_string_append(out, escaped);
                             g_free(escaped);
                         }
                     }
                 }
+                /* If label exists without dtrn, treat it as inline block (Fix Problem 1) */
+                if (label_buf->len > 0) {
+                    g_string_append(def_str, "<div class=\"trn\">");
+                    g_string_append(def_str, "<span class=\"trn-label\">");
+                    g_string_append(def_str, label_buf->str);
+                    g_string_append(def_str, "</span>");
+                    g_string_append(def_str, "</div>");
+                }
+                g_string_free(label_buf, TRUE);
                 
                 if (hw_str->len > 0) {
                     TreeEntry entry;

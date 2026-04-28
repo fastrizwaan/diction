@@ -151,7 +151,7 @@ static void process_xml_xdxf(xmlTextReaderPtr reader, XdxfParserState *state, vo
                 int ar_depth = xmlTextReaderDepth(reader);
                 GString *hw_str  = g_string_new("");
                 // Wrap the article in a semantic container
-                GString *def_str = g_string_new("<div class=\"dictionary-entry xdxf-ar\">\n");
+                GString *def_str = g_string_new("<div class=\"dictionary-entry xdxf-ar\">");
 
                 while (xmlTextReaderRead(reader) == 1 && xmlTextReaderDepth(reader) > ar_depth) {
                     const xmlChar *inner_name = xmlTextReaderConstLocalName(reader);
@@ -161,8 +161,6 @@ static void process_xml_xdxf(xmlTextReaderPtr reader, XdxfParserState *state, vo
                     if (inner_type == XML_READER_TYPE_ELEMENT) {
                         if (xmlStrEqual(inner_name, (const xmlChar*)"k")) {
                             int k_depth = cur_depth;
-                            g_string_append(def_str, "<h2 class=\"xdxf-k\">");
-                            
                             while (xmlTextReaderRead(reader) == 1 && xmlTextReaderDepth(reader) > k_depth) {
                                 if (xmlTextReaderNodeType(reader) == XML_READER_TYPE_TEXT ||
                                     xmlTextReaderNodeType(reader) == XML_READER_TYPE_CDATA) {
@@ -170,16 +168,11 @@ static void process_xml_xdxf(xmlTextReaderPtr reader, XdxfParserState *state, vo
                                     if (val) {
                                         if (hw_str->len > 0) g_string_append(hw_str, "; ");
                                         g_string_append(hw_str, (const char*)val);
-                                        
-                                        char *escaped = g_markup_escape_text((const char*)val, -1);
-                                        g_string_append(def_str, escaped);
-                                        g_free(escaped);
                                     }
                                 }
                             }
-                            g_string_append(def_str, "</h2>");
-                            
-                        } else if (xmlStrEqual(inner_name, (const xmlChar*)"b") ||
+                        }
+ else if (xmlStrEqual(inner_name, (const xmlChar*)"b") ||
                                    xmlStrEqual(inner_name, (const xmlChar*)"i") ||
                                    xmlStrEqual(inner_name, (const xmlChar*)"u") ||
                                    xmlStrEqual(inner_name, (const xmlChar*)"sub") ||
@@ -258,7 +251,8 @@ static void process_xml_xdxf(xmlTextReaderPtr reader, XdxfParserState *state, vo
                             // Smart whitespace parser: retains authored line breaks and bullet indents
                             while (*ptr) {
                                 if (*ptr == '\n') {
-                                    g_string_append(def_str, "<br/>\n");
+                                    /* Restore line breaks for dictionary layout */
+                                    g_string_append(def_str, "<br/>");
                                     is_line_start = TRUE;
                                 } else if (*ptr == '\t') {
                                     g_string_append(def_str, "&nbsp;&nbsp;&nbsp;&nbsp;");
@@ -280,7 +274,7 @@ static void process_xml_xdxf(xmlTextReaderPtr reader, XdxfParserState *state, vo
                     }
                 }
                 
-                g_string_append(def_str, "\n</div>");
+                g_string_append(def_str, "</div>");
                 
                 // Write payload to index
                 if (hw_str->len > 0) {

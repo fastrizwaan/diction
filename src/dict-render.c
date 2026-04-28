@@ -2415,11 +2415,15 @@ char* dsl_render_to_html(const char *dsl_text,
     } else if (goldendict_style) {
         buf_append_str(&b, "<div class='rendered-entry gold-entry-rendered'><div class='rendered-entry-body'>");
     } else {
-        buf_append_str(&b, "<div class='rendered-entry diction-entry-rendered'><h2 style='color:");
-        buf_append_str(&b, heading_color);
-        buf_append_str(&b, "; margin-bottom: 0.5em;'>");
-        buf_append_escaped_html(&b, display_headword, strlen(display_headword));
-        buf_append_str(&b, "</h2><div class='rendered-entry-body'>");
+        buf_append_str(&b, "<div class='rendered-entry diction-entry-rendered'>");
+        if (format != DICT_FORMAT_XDXF) {
+            buf_append_str(&b, "<h2 style='color:");
+            buf_append_str(&b, heading_color);
+            buf_append_str(&b, "; margin-bottom: 0.5em;'>");
+            buf_append_escaped_html(&b, display_headword, strlen(display_headword));
+            buf_append_str(&b, "</h2>");
+        }
+        buf_append_str(&b, "<div class='rendered-entry-body'>");
     }
 
     if (format == DICT_FORMAT_MDX || format == DICT_FORMAT_STARDICT || format == DICT_FORMAT_BGL || format == DICT_FORMAT_SLOB || format == DICT_FORMAT_XDXF) {

@@ -212,12 +212,26 @@ static void process_xml_xdxf(xmlTextReaderPtr reader, XdxfParserState *state, co
                             // Map dictionary cross-reference links
                             xmlChar *k_attr = xmlTextReaderGetAttribute(reader, (const xmlChar*)"k");
                             if (k_attr) {
-                                char *escaped_attr = g_markup_escape_text((const char*)k_attr, -1);
-                                g_string_append_printf(def_str, "<a href=\"#%s\" class=\"xdxf-kref\">", escaped_attr);
-                                g_free(escaped_attr);
+                                char *uri_attr = g_uri_escape_string((const char*)k_attr, NULL, TRUE);
+                                g_string_append_printf(def_str, "<a href=\"dict://%s\" class=\"xdxf-kref\">", uri_attr);
+                                g_free(uri_attr);
                                 xmlFree(k_attr);
                             } else {
-                                g_string_append(def_str, "<a href=\"#\" class=\"xdxf-kref\">");
+                                // If 'k' is missing, use the text content as the link target
+                                if (xmlTextReaderExpand(reader) >= 0) {
+                                    xmlNodePtr node = xmlTextReaderCurrentNode(reader);
+                                    xmlChar *val = xmlNodeGetContent(node);
+                                    if (val) {
+                                        char *uri_word = g_uri_escape_string((const char*)val, NULL, TRUE);
+                                        g_string_append_printf(def_str, "<a href=\"dict://%s\" class=\"xdxf-kref\">", uri_word);
+                                        g_free(uri_word);
+                                        xmlFree(val);
+                                    } else {
+                                        g_string_append(def_str, "<a href=\"dict://\" class=\"xdxf-kref\">");
+                                    }
+                                } else {
+                                    g_string_append(def_str, "<a href=\"dict://\" class=\"xdxf-kref\">");
+                                }
                             }
                             
                         } else if (xmlStrEqual(inner_name, (const xmlChar*)"def")) {
@@ -262,32 +276,64 @@ static void process_xml_xdxf(xmlTextReaderPtr reader, XdxfParserState *state, co
                                inner_type == XML_READER_TYPE_SIGNIFICANT_WHITESPACE) {
                         const xmlChar *value = xmlTextReaderConstValue(reader);
                         if (value) {
-                            char *escaped = g_markup_escape_text((const char*)value, -1);
-                            char *ptr = escaped;
+                            const char *ptr = (const char*)value;
+                            const char *start = ptr;
                             gboolean is_line_start = TRUE;
                             
-                            // Smart whitespace parser: retains authored line breaks and bullet indents
+                            // Smart whitespace and link parser: retains authored line breaks, bullet indents and expands {links}
                             while (*ptr) {
-                                if (*ptr == '\n') {
-                                    /* Restore line breaks for dictionary layout */
-                                    g_string_append(def_str, "<br/>");
-                                    is_line_start = TRUE;
-                                } else if (*ptr == '\t') {
-                                    g_string_append(def_str, "&nbsp;&nbsp;&nbsp;&nbsp;");
-                                    is_line_start = FALSE;
-                                } else if (*ptr == ' ') {
-                                    if (is_line_start) {
-                                        g_string_append(def_str, "&nbsp;");
-                                    } else {
-                                        g_string_append_c(def_str, ' ');
+                                if (*ptr == '{' || *ptr == '\n' || *ptr == '\t' || *ptr == ' ') {
+                                    // Flush preceding text
+                                    if (ptr > start) {
+                                        char *esc = g_markup_escape_text(start, (gssize)(ptr - start));
+                                        g_string_append(def_str, esc);
+                                        g_free(esc);
+                                        is_line_start = FALSE;
                                     }
+                                    
+                                    if (*ptr == '{') {
+                                        const char *end = strchr(ptr, '}');
+                                        if (end) {
+                                            char *word = g_strndup(ptr + 1, (gsize)(end - ptr - 1));
+                                            char *uri_word = g_uri_escape_string(word, NULL, TRUE);
+                                            char *markup_word = g_markup_escape_text(word, -1);
+                                            g_string_append_printf(def_str, "<a href=\"dict://%s\" class=\"xdxf-kref\">%s</a>", uri_word, markup_word);
+                                            g_free(word);
+                                            g_free(uri_word);
+                                            g_free(markup_word);
+                                            ptr = end + 1;
+                                            start = ptr;
+                                            is_line_start = FALSE;
+                                            continue;
+                                        }
+                                    } else if (*ptr == '\n') {
+                                        /* Restore line breaks for dictionary layout */
+                                        g_string_append(def_str, "<br/>");
+                                        is_line_start = TRUE;
+                                    } else if (*ptr == '\t') {
+                                        g_string_append(def_str, "&nbsp;&nbsp;&nbsp;&nbsp;");
+                                        is_line_start = FALSE;
+                                    } else if (*ptr == ' ') {
+                                        if (is_line_start) {
+                                            g_string_append(def_str, "&nbsp;");
+                                        } else {
+                                            g_string_append_c(def_str, ' ');
+                                        }
+                                    }
+                                    
+                                    ptr++;
+                                    start = ptr;
                                 } else {
-                                    g_string_append_c(def_str, *ptr);
-                                    is_line_start = FALSE;
+                                    ptr = g_utf8_next_char(ptr);
                                 }
-                                ptr++;
                             }
-                            g_free(escaped);
+                            
+                            // Flush remaining text
+                            if (ptr > start) {
+                                char *esc = g_markup_escape_text(start, (gssize)(ptr - start));
+                                g_string_append(def_str, esc);
+                                g_free(esc);
+                            }
                         }
                     }
                 }

@@ -80,6 +80,8 @@ static const char* get_dark_mode_color(const char *color_name) {
         {"darkslategrey", "#8fc9cf"},
         {"dimgray", "#d8d8d8"},
         {"dimgrey", "#d8d8d8"},
+        {"darkgrey", "#808080"},
+        {"darkgray", "#808080"},        
         {"silver", "#c8c8c8"},
         {NULL, NULL}
     };
@@ -103,6 +105,7 @@ static const char* get_light_mode_color(const char *color_name) {
         {"lightyellow", "goldenrod"},
         {"white", "beige"},
         {"yellow", "darkgoldenrod"},
+        {"darkorange", "#FF4433"},
         {NULL, NULL}
     };
     char *normalized = normalize_color_name_key(color_name);
@@ -2190,10 +2193,10 @@ char* dsl_render_to_html(const char *dsl_text,
         "table{max-width:100%;border-collapse:collapse;}"
         "td,th{vertical-align:top;}"
         "pre,code{white-space:pre-wrap;border-radius:6px;padding:0.2em 0.35em;}"
-        ".dict-link, a, a:link, a:visited, a:active, kref, ref, .reference{color:");
+        ".dict-link, a, a:link, a:visited, a:active, kref, ref, .reference, .xdxf-kref{color:");
     buf_append_str(&b, link_color);
     buf_append_str(&b, " !important;text-decoration:none;cursor:pointer;}");
-    buf_append_str(&b, "a:hover, .dict-link:hover, kref:hover, ref:hover{text-decoration:underline !important;}");
+    buf_append_str(&b, "a:hover, .dict-link:hover, kref:hover, ref:hover, .xdxf-kref:hover{text-decoration:underline !important;}");
     buf_append_str(&b, ".dsl-media-image{display:block;max-width:100%;height:auto;margin:0.35em 0;}");
     buf_append_str(&b, ".trn, .sense{color:");
     buf_append_str(&b, trn_color);

@@ -1,0 +1,22 @@
+aqueel@fedora:~/diction-c$ du -h ~/.cache/diction/
+16K	/var/home/aqueel/.cache/diction/HSTS
+8.0K	/var/home/aqueel/.cache/diction/CacheStorage
+16K	/var/home/aqueel/.cache/diction/dicts-v7/e3f31d0282b583d8e0010cb70813ba29aa62f6a3.res
+28K	/var/home/aqueel/.cache/diction/dicts-v7
+4.0K	/var/home/aqueel/.cache/diction/WebKitCache/Version 17/Blobs
+12K	/var/home/aqueel/.cache/diction/WebKitCache/Version 17
+16K	/var/home/aqueel/.cache/diction/WebKitCache
+2.8M	/var/home/aqueel/.cache/diction/icons
+21G	/var/home/aqueel/.cache/diction/dicts-v8
+21G	/var/home/aqueel/.cache/diction/
+
+
+limit the cache/ check disk availability before extracting.
+
+limit full text search (fts) to 30 dictionaries; or group of dictionaries.
+
+When a group is selected, it should not search from other dictionaries.
+
+
+selected sidebar item should be highlighted. 
+

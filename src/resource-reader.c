@@ -6,15 +6,8 @@
 #include <sys/stat.h>
 #include <stdio.h>
 #include <stdlib.h>
-
-#include "resource-reader.h"
-#include <archive.h>
-#include <archive_entry.h>
-#include <string.h>
-#include <strings.h>
-#include <sys/stat.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <glib/gstdio.h>
+#include "dict-cache.h"
 
 struct ResourceReader {
     char *extract_dir;
@@ -61,10 +54,11 @@ static gboolean zip_extract_single_file(const char *zip_path, const char *archiv
     while (archive_read_next_header(a, &entry) == ARCHIVE_OK) {
         const char *pathname = archive_entry_pathname(entry);
         if (pathname && strcmp(pathname, archive_name) == 0) {
-            /* Ensure parent directory exists */
-            char *dir = g_path_get_dirname(dest_path);
-            g_mkdir_with_parents(dir, 0755);
-            g_free(dir);
+            la_int64_t entry_size = archive_entry_size(entry);
+            guint64 bytes_needed = entry_size > 0 ? (guint64) entry_size : 0;
+            if (!dict_cache_prepare_target_path(dest_path, bytes_needed)) {
+                break;
+            }
 
             /* Extract to dest_path */
             FILE *f = fopen(dest_path, "wb");
@@ -72,11 +66,19 @@ static gboolean zip_extract_single_file(const char *zip_path, const char *archiv
                 const void *buf;
                 size_t size;
                 int64_t offset;
+                gboolean write_ok = TRUE;
                 while (archive_read_data_block(a, &buf, &size, &offset) == ARCHIVE_OK) {
-                    fwrite(buf, 1, size, f);
+                    if (fwrite(buf, 1, size, f) != size) {
+                        write_ok = FALSE;
+                        break;
+                    }
                 }
                 fclose(f);
-                found = TRUE;
+                if (write_ok) {
+                    found = TRUE;
+                } else {
+                    g_unlink(dest_path);
+                }
             }
             break;
         }

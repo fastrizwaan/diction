@@ -543,7 +543,13 @@ DictMmap* dict_mmap_open(const char *path, volatile gint *cancel_flag, gint expe
             if (word_count > 0 && entries) {
                 // Atomic Upgrade: Write new cache to temp file then rename
                 char *tmp_cache = g_strdup_printf("%s.tmp", cache_path);
-                FILE *f_tmp = fopen(tmp_cache, "wb");
+                struct stat src_st;
+                guint64 cache_bytes_hint = (stat(path, &src_st) == 0 && src_st.st_size > 0)
+                    ? (guint64) src_st.st_size
+                    : 0;
+                FILE *f_tmp = dict_cache_prepare_target_path(tmp_cache, cache_bytes_hint)
+                    ? fopen(tmp_cache, "wb")
+                    : NULL;
                 if (f_tmp) {
                     uint64_t final_cnt = (uint64_t)word_count;
                     fwrite(&final_cnt, 8, 1, f_tmp);
@@ -552,7 +558,6 @@ DictMmap* dict_mmap_open(const char *path, volatile gint *cancel_flag, gint expe
                     fclose(f_tmp);
 
                     // Sync time to match original
-                    struct stat src_st;
                     if (stat(path, &src_st) == 0) {
                         struct utimbuf times = { .actime = src_st.st_mtime, .modtime = src_st.st_mtime };
                         utime(tmp_cache, &times);
@@ -599,6 +604,17 @@ DictMmap* dict_mmap_open(const char *path, volatile gint *cancel_flag, gint expe
 
         // Open temporary cache file for writing
         char *tmp_cache = g_strdup_printf("%s.tmp", cache_path);
+        struct stat src_st;
+        guint64 cache_bytes_hint = (stat(path, &src_st) == 0 && src_st.st_size > 0)
+            ? (guint64) src_st.st_size
+            : 0;
+        if (!dict_cache_prepare_target_path(tmp_cache, cache_bytes_hint)) {
+            gzclose(gz);
+            g_free(tmp_cache);
+            g_free(cache_path);
+            g_free(dict);
+            return NULL;
+        }
         FILE *cache_file = fopen(tmp_cache, "wb");
         if (!cache_file) {
             gzclose(gz);
@@ -805,4 +821,3 @@ DictMmap* dict_mmap_open(const char *path, volatile gint *cancel_flag, gint expe
 
     return dict;
 }
-

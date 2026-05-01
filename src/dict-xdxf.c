@@ -62,6 +62,15 @@ static char* extract_xdxf_xml_from_archive(const char *archive_path, const char 
 
             first_xdxf_path = g_strdup(extracted_path);
 
+            la_int64_t entry_size = archive_entry_size(entry);
+            guint64 bytes_needed = entry_size > 0 ? (guint64) entry_size : 0;
+            if (!dict_cache_prepare_target_path(extracted_path, bytes_needed)) {
+                g_free(first_xdxf_path);
+                first_xdxf_path = NULL;
+                g_free(extracted_path);
+                break;
+            }
+
             int fd = open(extracted_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
             if (fd >= 0) {
                 archive_read_data_into_fd(a, fd);
@@ -93,6 +102,16 @@ static char* decompress_xdxf_dz(const char *dz_path, const char *temp_dir) {
     char *out_name = g_strndup(base, strlen(base) - 3); // strip .dz
     char *out_path = g_build_filename(temp_dir, out_name, NULL);
     g_free(out_name);
+
+    struct stat st;
+    guint64 bytes_needed = (stat(dz_path, &st) == 0 && st.st_size > 0)
+        ? (guint64) st.st_size
+        : 0;
+    if (!dict_cache_prepare_target_path(out_path, bytes_needed)) {
+        gzclose(gz);
+        g_free(out_path);
+        return NULL;
+    }
 
     FILE *out = fopen(out_path, "wb");
     if (!out) {
@@ -517,6 +536,18 @@ DictMmap* parse_xdxf_file(const char *path, volatile gint *cancel_flag, gint exp
 
     xmlTextReaderPtr reader = xmlNewTextReaderFilename(xml_path);
     if (!reader) {
+        if (xml_path != path) { unlink(xml_path); g_free(xml_path); }
+        g_free(res_dir);
+        g_free(cache_path);
+        return NULL;
+    }
+
+    struct stat cache_src_st;
+    guint64 cache_bytes_hint = (stat(path, &cache_src_st) == 0 && cache_src_st.st_size > 0)
+        ? (guint64) cache_src_st.st_size
+        : 0;
+    if (!dict_cache_prepare_target_path(cache_path, cache_bytes_hint)) {
+        xmlFreeTextReader(reader);
         if (xml_path != path) { unlink(xml_path); g_free(xml_path); }
         g_free(res_dir);
         g_free(cache_path);

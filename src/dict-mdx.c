@@ -1121,6 +1121,21 @@ DictMmap *parse_mdx_file(const char *path, volatile gint *cancel_flag, gint expe
     /* ───────────────────────────── */
 rebuild_cache:
 
+    struct stat src_st;
+    guint64 cache_bytes_hint = (stat(path, &src_st) == 0 && src_st.st_size > 0)
+        ? (guint64) src_st.st_size
+        : 0;
+    if (!dict_cache_prepare_target_path(cache_path, cache_bytes_hint)) {
+        if (fh) fclose(fh);
+        g_free(cache_path);
+        g_free(stylesheet);
+        g_free(title);
+        g_free(s_lang);
+        g_free(t_lang);
+        g_free(source_dir);
+        g_free(dict_encoding);
+        return NULL;
+    }
     FILE *cache = fopen(cache_path, "wb");
     if (!cache) {
         if (fh) fclose(fh);
@@ -1436,6 +1451,5 @@ rebuild_cache:
 
     return dict;
 }
-
 
 

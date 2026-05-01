@@ -7,6 +7,7 @@
 #include <glib/gstdio.h>
 #include <gio/gio.h>
 #include "dict-mmap.h"
+#include "dict-cache.h"
 
 static GPtrArray *settings_collect_mdx_companion_paths(const char *mdx_path);
 static gboolean ends_with_ci(const char *text, const char *suffix);
@@ -261,8 +262,7 @@ static void remove_cache_artifacts_for_path(const char *path) {
 
     char *hash = g_compute_checksum_for_string(G_CHECKSUM_SHA1, path, -1);
     const char *cache_base = g_get_user_cache_dir();
-    /* Use the correct versioned cache subdirectory (dicts-v8) */
-    char *cache_path = g_build_filename(cache_base, "diction", "dicts-v8", hash, NULL);
+    char *cache_path = dict_cache_path_for(path);
     char *resource_dir = g_build_filename(cache_base, "diction", "resources", hash, NULL);
     remove_path_recursive(cache_path);
     remove_path_recursive(resource_dir);

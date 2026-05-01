@@ -240,6 +240,15 @@ DictMmap* parse_slob_file(const char *path, volatile gint *cancel_flag, gint exp
         }
 
         /* Now decompress items and store in cache */
+        if (!dict_cache_prepare_target_path(cache_path, (guint64) st_file.st_size)) {
+            g_free(temp_refs);
+            g_string_free(hw_data, TRUE);
+            munmap(map, st_file.st_size);
+            close(fd);
+            g_free(title);
+            g_free(cache_path);
+            return NULL;
+        }
         FILE *cf = g_fopen(cache_path, "wb");
         if (!cf) { g_free(temp_refs); g_string_free(hw_data, TRUE); munmap(map, st_file.st_size); close(fd); g_free(title); return NULL; }
         

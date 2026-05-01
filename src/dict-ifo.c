@@ -561,6 +561,16 @@ DictMmap* parse_stardict(const char *ifo_path, volatile gint *cancel_flag, gint 
         return NULL;
     }
 
+    if (!dict_cache_prepare_target_path(cache_path, (guint64)dict_raw_len + (guint64)idx_size)) {
+        g_free(bookname);
+        g_free(resource_dir);
+        g_free(cache_path);
+        g_free(idx_path);
+        g_free(dict_path);
+        g_free(dict_raw);
+        g_free(idx_data);
+        return NULL;
+    }
     FILE *cache_file = fopen(cache_path, "wb");
     if (!cache_file) {
         g_free(bookname);

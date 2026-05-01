@@ -56,6 +56,8 @@ static void on_tab_selected(AdwTabView *view, GParamSpec *pspec, gpointer user_d
 static GtkButton *search_button = NULL;
 static GtkLabel *search_button_label = NULL;
 static GtkImage *search_mode_icon = NULL;
+static GtkMenuButton *search_scope_button = NULL;
+static GtkLabel *search_scope_button_label = NULL;
 static char *last_search_query = NULL;
 static AppSettings *app_settings = NULL;
 static char *active_scope_id = NULL;
@@ -85,6 +87,7 @@ static void nav_history_item_free(gpointer data) {
 static GtkWidget *nav_back_btn = NULL;
 static GtkWidget *nav_forward_btn = NULL;
 static GSimpleAction *full_text_search_toggle_action = NULL;
+static GSimpleAction *search_scope_action = NULL;
 static guint search_execute_source_id = 0;
 static GtkStringList *related_string_list = NULL;
 static GtkSingleSelection *related_selection_model = NULL;
@@ -498,6 +501,7 @@ static void populate_search_sidebar(const char *query);
 static void execute_search_now(void);
 static void execute_search_now_for_query(const char *query_raw, gboolean push_history);
 static void activate_dictionary_entry(DictEntry *e);
+static void set_active_entry(DictEntry *new_entry);
 static void finalize_dictionary_loading(gboolean allow_random_word, gboolean sync_settings_from_loaded);
 static gboolean on_dict_loaded_idle(gpointer user_data);
 static void apply_font_to_webview(void *user_data);
@@ -506,10 +510,14 @@ static gboolean current_tab_is_full_text_search(void);
 static gboolean query_requests_full_text_search(const char *query_raw, gboolean preferred_fts);
 static void set_tab_full_text_search(AdwTabPage *page, gboolean is_fts);
 static void update_search_mode_visuals(gboolean is_fts);
+static void update_search_scope_button_label(void);
+static void rebuild_search_scope_menu(void);
+static void set_active_scope(const char *scope_id, gboolean refresh_results);
 static void apply_fts_highlight_to_web_view(WebKitWebView *wv, const char *query);
 static void queue_fts_highlight_for_web_view(WebKitWebView *wv, const char *query);
 
 #define BUCKET_COUNT 6
+#define MAX_FTS_DICTIONARIES 30
 
 typedef struct {
     char *query;
@@ -520,6 +528,9 @@ typedef struct {
     gboolean skip_fast_prefilter;
     GHashTable *seen_words;
     GPtrArray *search_entries;
+    guint scoped_dict_count;
+    guint searched_dict_count;
+    gboolean fts_limited;
     guint current_entry_index;
     DictEntry *current_dict;
     size_t current_dict_count;
@@ -1855,7 +1866,15 @@ static gboolean continue_sidebar_search(gpointer user_data) {
 
             if (!state->list_started &&
                 g_hash_table_size(state->seen_words) == 0) {
-                populate_search_sidebar_status("No results", NULL);
+                if (state->fts_limited) {
+                    char *subtitle = g_strdup_printf("Searched %u of %u dictionaries in this scope.",
+                                                     state->searched_dict_count,
+                                                     state->scoped_dict_count);
+                    populate_search_sidebar_status("No results", subtitle);
+                    g_free(subtitle);
+                } else {
+                    populate_search_sidebar_status("No results", NULL);
+                }
             }
 
             state->source_id = 0;
@@ -2159,6 +2178,18 @@ static void populate_search_sidebar_with_mode(const char *query, gboolean force_
     sidebar_search_state->seen_words = g_hash_table_new_full(
         g_str_hash, g_str_equal, g_free, NULL);
     sidebar_search_state->search_entries = build_search_entry_list();
+    sidebar_search_state->scoped_dict_count = sidebar_search_state->search_entries
+        ? sidebar_search_state->search_entries->len
+        : 0;
+    if (sidebar_search_state->is_fts &&
+        sidebar_search_state->search_entries &&
+        sidebar_search_state->search_entries->len > MAX_FTS_DICTIONARIES) {
+        sidebar_search_state->fts_limited = TRUE;
+        g_ptr_array_set_size(sidebar_search_state->search_entries, MAX_FTS_DICTIONARIES);
+    }
+    sidebar_search_state->searched_dict_count = sidebar_search_state->search_entries
+        ? sidebar_search_state->search_entries->len
+        : 0;
     
     /* Update FTS highlight query based on current search */
     g_free(fts_highlight_query);
@@ -2175,7 +2206,17 @@ static void populate_search_sidebar_with_mode(const char *query, gboolean force_
 
     guint seeded = seed_search_sidebar_fast_rows(sidebar_search_state);
     if (sidebar_search_state->is_fts) {
-        if (seeded == 0) populate_search_sidebar_status("Full Text Search…", NULL);
+        if (seeded == 0) {
+            if (sidebar_search_state->fts_limited) {
+                char *subtitle = g_strdup_printf("Searching the first %u of %u dictionaries in this scope.",
+                                                 sidebar_search_state->searched_dict_count,
+                                                 sidebar_search_state->scoped_dict_count);
+                populate_search_sidebar_status("Full Text Search…", subtitle);
+                g_free(subtitle);
+            } else {
+                populate_search_sidebar_status("Full Text Search…", NULL);
+            }
+        }
     } else if (seeded == 0) {
         populate_search_sidebar_status("Searching…", NULL);
     }
@@ -2291,6 +2332,106 @@ static gboolean dict_entry_in_scope(DictEntry *entry, const char *scope_id) {
 
 static gboolean dict_entry_in_active_scope(DictEntry *entry) {
     return dict_entry_in_scope(entry, active_scope_id);
+}
+
+static gboolean scope_id_exists(const char *scope_id) {
+    if (!scope_id || g_strcmp0(scope_id, "all") == 0 || !app_settings) {
+        return TRUE;
+    }
+
+    for (guint i = 0; i < app_settings->dictionary_groups->len; i++) {
+        DictGroup *grp = g_ptr_array_index(app_settings->dictionary_groups, i);
+        if (g_strcmp0(grp->id, scope_id) == 0) {
+            return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
+static void ensure_valid_active_scope(void) {
+    if (scope_id_exists(active_scope_id)) {
+        return;
+    }
+
+    g_free(active_scope_id);
+    active_scope_id = g_strdup("all");
+}
+
+static char *scope_display_name_dup(const char *scope_id) {
+    if (!scope_id || g_strcmp0(scope_id, "all") == 0 || !app_settings) {
+        return g_strdup("All Dictionaries");
+    }
+
+    for (guint i = 0; i < app_settings->dictionary_groups->len; i++) {
+        DictGroup *grp = g_ptr_array_index(app_settings->dictionary_groups, i);
+        if (g_strcmp0(grp->id, scope_id) == 0) {
+            return g_strdup(grp->name ? grp->name : "Group");
+        }
+    }
+
+    return g_strdup("All Dictionaries");
+}
+
+static guint count_enabled_dicts_in_scope(const char *scope_id) {
+    guint count = 0;
+
+    g_mutex_lock(&dict_loader_mutex);
+    DictEntry *entry = all_dicts;
+    while (entry) {
+        dict_entry_ref(entry);
+        g_mutex_unlock(&dict_loader_mutex);
+
+        if (dict_entry_in_scope(entry, scope_id)) {
+            count++;
+        }
+
+        g_mutex_lock(&dict_loader_mutex);
+        DictEntry *next = entry->next;
+        dict_entry_unref(entry);
+        entry = next;
+    }
+    g_mutex_unlock(&dict_loader_mutex);
+
+    return count;
+}
+
+static DictEntry *find_first_dict_in_active_scope(void) {
+    DictEntry *found = NULL;
+
+    g_mutex_lock(&dict_loader_mutex);
+    DictEntry *entry = all_dicts;
+    while (entry) {
+        dict_entry_ref(entry);
+        g_mutex_unlock(&dict_loader_mutex);
+
+        if (dict_entry_in_active_scope(entry)) {
+            found = entry;
+            break;
+        }
+
+        g_mutex_lock(&dict_loader_mutex);
+        DictEntry *next = entry->next;
+        dict_entry_unref(entry);
+        entry = next;
+    }
+    if (!found) {
+        g_mutex_unlock(&dict_loader_mutex);
+    }
+
+    return found;
+}
+
+static void ensure_active_entry_in_scope(void) {
+    if (active_entry && dict_entry_in_active_scope(active_entry)) {
+        return;
+    }
+
+    DictEntry *first = find_first_dict_in_active_scope();
+    set_active_entry(first);
+    if (first) {
+        dict_entry_unref(first);
+    }
 }
 
 typedef struct {
@@ -2869,31 +3010,15 @@ static void populate_favorites_sidebar(void) {
 }
 
 static void populate_groups_sidebar(void) {
+    ensure_valid_active_scope();
+
     GPtrArray *labels = g_ptr_array_new_with_free_func(g_free);
     GPtrArray *payloads = g_ptr_array_new();
     SidebarRowPayload *active_payload = NULL;
 
-    guint all_count = 0;
-    g_mutex_lock(&dict_loader_mutex);
-    DictEntry *entry = all_dicts;
-    while (entry) {
-        dict_entry_ref(entry);
-        g_mutex_unlock(&dict_loader_mutex);
-        
-        if (dict_entry_enabled(entry)) {
-            all_count++;
-        }
-        
-        g_mutex_lock(&dict_loader_mutex);
-        DictEntry *next = entry->next;
-        dict_entry_unref(entry);
-        entry = next;
-    }
-    g_mutex_unlock(&dict_loader_mutex);
-
     SidebarRowPayload *all_payload = g_new0(SidebarRowPayload, 1);
     char all_subtitle[64];
-    g_snprintf(all_subtitle, sizeof(all_subtitle), "%u dictionaries", all_count);
+    g_snprintf(all_subtitle, sizeof(all_subtitle), "%u dictionaries", count_enabled_dicts_in_scope("all"));
     all_payload->type = SIDEBAR_ROW_GROUP;
     all_payload->title = g_strdup("All Dictionaries");
     all_payload->subtitle = g_strdup(all_subtitle);
@@ -2909,41 +3034,16 @@ static void populate_groups_sidebar(void) {
         sidebar_list_select_payload(&groups_sidebar, active_payload);
         g_ptr_array_free(labels, TRUE);
         g_ptr_array_free(payloads, TRUE);
+        rebuild_search_scope_menu();
+        update_search_scope_button_label();
         return;
     }
 
     for (guint i = 0; i < app_settings->dictionary_groups->len; i++) {
         DictGroup *grp = g_ptr_array_index(app_settings->dictionary_groups, i);
-        guint member_count = 0;
-        
-        g_mutex_lock(&dict_loader_mutex);
-        DictEntry *entry = all_dicts;
-        while (entry) {
-            dict_entry_ref(entry);
-            g_mutex_unlock(&dict_loader_mutex);
-            
-            if (dict_entry_enabled(entry)) {
-                if (entry->dict_id) {
-                    for (guint j = 0; j < grp->members->len; j++) {
-                        const char *member = g_ptr_array_index(grp->members, j);
-                        if (g_strcmp0(member, entry->dict_id) == 0) {
-                            member_count++;
-                            break;
-                        }
-                    }
-                }
-            }
-            
-            g_mutex_lock(&dict_loader_mutex);
-            DictEntry *next = entry->next;
-            dict_entry_unref(entry);
-            entry = next;
-        }
-        g_mutex_unlock(&dict_loader_mutex);
-
         SidebarRowPayload *payload = g_new0(SidebarRowPayload, 1);
         char subtitle[64];
-        g_snprintf(subtitle, sizeof(subtitle), "%u dictionaries", member_count);
+        g_snprintf(subtitle, sizeof(subtitle), "%u dictionaries", count_enabled_dicts_in_scope(grp->id));
         payload->type = SIDEBAR_ROW_GROUP;
         payload->title = g_strdup(grp->name);
         payload->subtitle = g_strdup(subtitle);
@@ -2959,6 +3059,81 @@ static void populate_groups_sidebar(void) {
     sidebar_list_select_payload(&groups_sidebar, active_payload);
     g_ptr_array_free(labels, TRUE);
     g_ptr_array_free(payloads, TRUE);
+    rebuild_search_scope_menu();
+    update_search_scope_button_label();
+}
+
+static void update_search_scope_button_label(void) {
+    if (!search_scope_button_label) {
+        return;
+    }
+
+    ensure_valid_active_scope();
+    char *label = scope_display_name_dup(active_scope_id);
+    gtk_label_set_text(search_scope_button_label, label ? label : "All Dictionaries");
+    gtk_widget_set_tooltip_text(GTK_WIDGET(search_scope_button), label ? label : "All Dictionaries");
+    g_free(label);
+}
+
+static void rebuild_search_scope_menu(void) {
+    if (!search_scope_button) {
+        return;
+    }
+
+    ensure_valid_active_scope();
+
+    GMenu *menu = g_menu_new();
+
+    GMenuItem *all_item = g_menu_item_new("All Dictionaries", NULL);
+    g_menu_item_set_action_and_target(all_item, "app.search-scope", "s", "all");
+    g_menu_append_item(menu, all_item);
+    g_object_unref(all_item);
+
+    if (app_settings) {
+        for (guint i = 0; i < app_settings->dictionary_groups->len; i++) {
+            DictGroup *grp = g_ptr_array_index(app_settings->dictionary_groups, i);
+            GMenuItem *item = g_menu_item_new(grp->name ? grp->name : "Group", NULL);
+            g_menu_item_set_action_and_target(item, "app.search-scope", "s", grp->id);
+            g_menu_append_item(menu, item);
+            g_object_unref(item);
+        }
+    }
+
+    gtk_menu_button_set_menu_model(search_scope_button, G_MENU_MODEL(menu));
+    g_object_unref(menu);
+
+    if (search_scope_action) {
+        g_simple_action_set_state(search_scope_action, g_variant_new_string(active_scope_id ? active_scope_id : "all"));
+    }
+}
+
+static void set_active_scope(const char *scope_id, gboolean refresh_results) {
+    const char *desired_scope = (scope_id && scope_id_exists(scope_id)) ? scope_id : "all";
+
+    if (g_strcmp0(active_scope_id, desired_scope) == 0) {
+        update_search_scope_button_label();
+        if (search_scope_action) {
+            g_simple_action_set_state(search_scope_action, g_variant_new_string(desired_scope));
+        }
+        if (!refresh_results) {
+            return;
+        }
+    } else {
+        g_free(active_scope_id);
+        active_scope_id = g_strdup(desired_scope);
+        ensure_active_entry_in_scope();
+        update_search_scope_button_label();
+        if (search_scope_action) {
+            g_simple_action_set_state(search_scope_action, g_variant_new_string(desired_scope));
+        }
+    }
+
+    if (refresh_results) {
+        refresh_search_results();
+    } else {
+        populate_groups_sidebar();
+        populate_dict_sidebar();
+    }
 }
 
 
@@ -3400,9 +3575,7 @@ static void on_groups_item_activated(GtkListView *view, guint position, gpointer
     if (!payload || payload->type != SIDEBAR_ROW_GROUP) {
         return;
     }
-    g_free(active_scope_id);
-    active_scope_id = g_strdup(payload->scope_id ? payload->scope_id : "all");
-    refresh_search_results();
+    set_active_scope(payload->scope_id ? payload->scope_id : "all", TRUE);
     sidebar_list_select_payload(sidebar, payload);
 }
 
@@ -3414,6 +3587,7 @@ static void on_dict_item_activated(GtkListView *view, guint position, gpointer u
         return;
     }
     activate_dictionary_entry(payload->dict_entry);
+    populate_dict_sidebar();
     sidebar_list_select_payload(sidebar, payload);
 }
 
@@ -4161,7 +4335,7 @@ static void on_search_changed(GtkEditable *entry, gpointer user_data) {
         if (!query || strlen(query) == 0) {
             cancel_sidebar_search();
             g_clear_pointer(&fts_highlight_query, g_free);
-            populate_search_sidebar_status("Full Text Search", "Type a word or phrase to search all definitions.");
+            populate_search_sidebar_status("Full Text Search", "Type a word or phrase to search definitions in this scope.");
         } else {
             populate_search_sidebar_with_mode(query, TRUE);
         }
@@ -4357,6 +4531,7 @@ static void activate_dictionary_entry(DictEntry *e) {
         idx);
     webkit_web_view_evaluate_javascript(web_view, js, -1, NULL, NULL, NULL, NULL, NULL);
     set_active_entry(e);
+    populate_dict_sidebar();
 }
 
 // Refresh the current search results when theme changes
@@ -4391,8 +4566,9 @@ static void refresh_search_results(void) {
     
     // Also refresh the sidebars based on current selection
     const char *main_query = search_entry ? gtk_editable_get_text(GTK_EDITABLE(search_entry)) : NULL;
-    populate_search_sidebar(main_query);
+    populate_search_sidebar_with_mode(main_query, current_tab_is_full_text_search());
     populate_dict_sidebar();
+    populate_groups_sidebar();
 }
 
 static double shift_color_component(double val, double amount, int darken) {
@@ -4935,6 +5111,17 @@ static void on_focus_search_action(GSimpleAction *action, GVariant *parameter, g
     reveal_search_entry(TRUE);
 }
 
+static void on_search_scope_action(GSimpleAction *action, GVariant *parameter, gpointer user_data) {
+    (void)action;
+    (void)user_data;
+    if (!parameter) {
+        return;
+    }
+
+    const char *scope_id = g_variant_get_string(parameter, NULL);
+    set_active_scope(scope_id, TRUE);
+}
+
 static void on_full_text_search_action(GSimpleAction *action, GVariant *parameter, gpointer user_data) {
     (void)action; (void)parameter; (void)user_data;
 
@@ -4964,7 +5151,7 @@ static void on_full_text_search_action(GSimpleAction *action, GVariant *paramete
     char *clean_query = normalize_headword_for_search(query, FALSE);
     if (!clean_query || !*clean_query) {
         if (enable_fts) {
-            populate_search_sidebar_status("Full Text Search", "Type a word or phrase to search all definitions.");
+            populate_search_sidebar_status("Full Text Search", "Type a word or phrase to search definitions in this scope.");
         } else if (query && *query) {
             populate_search_sidebar(query);
         }
@@ -5051,6 +5238,9 @@ static void on_sidebar_tab_toggled(GtkToggleButton *btn, gpointer user_data) {
 }
 
 static void populate_dict_sidebar(void) {
+    ensure_valid_active_scope();
+    ensure_active_entry_in_scope();
+
     GPtrArray *labels = g_ptr_array_new_with_free_func(g_free);
     GPtrArray *payloads = g_ptr_array_new();
     SidebarRowPayload *active_payload = NULL;
@@ -6445,7 +6635,7 @@ static void on_tab_selected(AdwTabView *view, GParamSpec *pspec, gpointer user_d
             } else {
                 cancel_sidebar_search();
                 g_clear_pointer(&fts_highlight_query, g_free);
-                populate_search_sidebar_status("Full Text Search", "Type a word or phrase to search all definitions.");
+                populate_search_sidebar_status("Full Text Search", "Type a word or phrase to search definitions in this scope.");
             }
             g_free(clean_query);
         } else {
@@ -6635,7 +6825,7 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     g_signal_connect(toggle_sidebar_action, "activate", G_CALLBACK(on_toggle_sidebar), split_view);
     g_action_map_add_action(G_ACTION_MAP(app), G_ACTION(toggle_sidebar_action));
 
-    GtkWidget *search_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    GtkWidget *search_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
     gtk_widget_set_hexpand(search_box, TRUE);
 
     nav_back_btn = gtk_button_new_from_icon_name("go-previous-symbolic");
@@ -6653,6 +6843,7 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
      * icon slot and overrides any external set. */
     search_entry = GTK_ENTRY(gtk_entry_new());
     gtk_widget_set_hexpand(GTK_WIDGET(search_entry), TRUE);
+    gtk_widget_add_css_class(GTK_WIDGET(search_entry), "search-entry-joined");
     gtk_entry_set_placeholder_text(search_entry, "Search");
     gtk_entry_set_icon_from_icon_name(search_entry, GTK_ENTRY_ICON_PRIMARY, "system-search-symbolic");
     /* 'changed' fires on every keystroke; our schedule_execute_search debounces it. */
@@ -6702,10 +6893,28 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     gtk_stack_add_named(search_stack, GTK_WIDGET(search_entry), "entry");
     gtk_stack_set_visible_child_name(search_stack, "button");
 
+    GtkWidget *scope_btn_content = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    GtkWidget *scope_icon = gtk_image_new_from_icon_name("folder-symbolic");
+    search_scope_button_label = GTK_LABEL(gtk_label_new("All Dictionaries"));
+    gtk_label_set_ellipsize(search_scope_button_label, PANGO_ELLIPSIZE_END);
+    gtk_label_set_single_line_mode(search_scope_button_label, TRUE);
+    gtk_widget_set_hexpand(GTK_WIDGET(search_scope_button_label), FALSE);
+    GtkWidget *scope_arrow = gtk_image_new_from_icon_name("pan-down-symbolic");
+    gtk_box_append(GTK_BOX(scope_btn_content), scope_icon);
+    gtk_box_append(GTK_BOX(scope_btn_content), GTK_WIDGET(search_scope_button_label));
+    gtk_box_append(GTK_BOX(scope_btn_content), scope_arrow);
+
+    search_scope_button = GTK_MENU_BUTTON(gtk_menu_button_new());
+    gtk_widget_add_css_class(GTK_WIDGET(search_scope_button), "flat");
+    gtk_widget_add_css_class(GTK_WIDGET(search_scope_button), "search-scope-button");
+    gtk_menu_button_set_child(search_scope_button, scope_btn_content);
+    gtk_widget_set_tooltip_text(GTK_WIDGET(search_scope_button), "Search scope");
+
     adw_header_bar_pack_start(ADW_HEADER_BAR(content_header), nav_back_btn);
     adw_header_bar_pack_start(ADW_HEADER_BAR(content_header), nav_forward_btn);
 
     gtk_box_append(GTK_BOX(search_box), GTK_WIDGET(search_stack));
+    gtk_box_append(GTK_BOX(search_box), GTK_WIDGET(search_scope_button));
 
     adw_header_bar_set_title_widget(ADW_HEADER_BAR(content_header), search_box);
 
@@ -6765,6 +6974,12 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     GSimpleAction *focus_search_action = g_simple_action_new("focus-search", NULL);
     g_signal_connect(focus_search_action, "activate", G_CALLBACK(on_focus_search_action), NULL);
     g_action_map_add_action(G_ACTION_MAP(app), G_ACTION(focus_search_action));
+
+    search_scope_action = g_simple_action_new_stateful("search-scope",
+                                                       G_VARIANT_TYPE_STRING,
+                                                       g_variant_new_string(active_scope_id ? active_scope_id : "all"));
+    g_signal_connect(search_scope_action, "activate", G_CALLBACK(on_search_scope_action), NULL);
+    g_action_map_add_action(G_ACTION_MAP(app), G_ACTION(search_scope_action));
 
     full_text_search_toggle_action = g_simple_action_new("full-text-search", NULL);
     g_signal_connect(full_text_search_toggle_action, "activate", G_CALLBACK(on_full_text_search_action), NULL);
@@ -6854,8 +7069,11 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
         ".menu-item { font-weight: normal; padding: 4px 8px; min-height: 0; }"
         "overlay-split-view > separator { background: @sidebar_bg_color; min-width: 1px; opacity: 1; }"
         "headerbar.sidebar { box-shadow: none; border-bottom: none; margin: 0; padding: 0; }"
-        ".search-button-bg { background: alpha(@theme_fg_color, 0.08); border-radius: 6px; padding: 0px 8px; }"
+        ".search-button-bg { background: alpha(@theme_fg_color, 0.08); border-radius: 6px 0 0 6px; padding: 0px 8px; }"
         ".search-button-bg:hover { background: alpha(@theme_fg_color, 0.12); }"
+        ".search-scope-button { background: alpha(@theme_fg_color, 0.08); border-radius: 0 6px 6px 0; padding: 0px 10px; margin-left: 0; }"
+        ".search-scope-button:hover { background: alpha(@theme_fg_color, 0.12); }"
+        "entry.search-entry-joined { border-top-right-radius: 0; border-bottom-right-radius: 0; }"
     );
     gtk_style_context_add_provider_for_display(gdk_display_get_default(), GTK_STYLE_PROVIDER(css_provider), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
 

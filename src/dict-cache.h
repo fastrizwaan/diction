@@ -19,5 +19,10 @@ gboolean dict_cache_is_valid(const char *cache_path, const char *original_path);
 /* Ensure the diction/dicts cache directory exists. Returns TRUE on success. */
 gboolean dict_cache_ensure_dir(void);
 
+/* Ensure the target parent directory exists and there is reasonable free
+ * space before writing bytes_needed to it. Returns TRUE when writes should
+ * proceed. */
+gboolean dict_cache_prepare_target_path(const char *target_path, guint64 bytes_needed);
+
 /* Set the mtime of cache_path to match the newest source. */
 void dict_cache_sync_mtime(const char *cache_path, const char **sources, int n_sources);

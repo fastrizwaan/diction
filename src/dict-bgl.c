@@ -483,19 +483,25 @@ DictMmap* parse_bgl_file(const char *path, volatile gint *cancel_flag, gint expe
     if (!cache_valid) {
         printf("[BGL] Transcoding and building UTF-8 cache from source: %s\n", path);
 
+        int64_t total_src_size = 0;
+        {
+            struct stat src_st;
+            if (stat(path, &src_st) == 0) total_src_size = src_st.st_size;
+        }
+
         char tmp_raw[256];
         snprintf(tmp_raw, sizeof(tmp_raw), "%s.raw", cache_path);
+        if (!dict_cache_prepare_target_path(tmp_raw, total_src_size > 0 ? (guint64) total_src_size : 0)) {
+            gzclose(gz);
+            g_free(cache_path);
+            return NULL;
+        }
         FILE *tf = fopen(tmp_raw, "wb");
         if (!tf) { gzclose(gz); g_free(cache_path); return NULL; }
 
         unsigned char buf[65536];
         int n;
         int64_t total_transferred = 0;
-        int64_t total_src_size = 0;
-        {
-            struct stat src_st;
-            if (stat(path, &src_st) == 0) total_src_size = src_st.st_size;
-        }
 
         while ((n = gzread(gz, buf, sizeof(buf))) > 0) {
             total_transferred += n;
@@ -516,6 +522,13 @@ DictMmap* parse_bgl_file(const char *path, volatile gint *cancel_flag, gint expe
         fstat(raw_fd, &raw_st);
         const char *raw_data = mmap(NULL, raw_st.st_size, PROT_READ, MAP_PRIVATE, raw_fd, 0);
 
+        if (!dict_cache_prepare_target_path(cache_path, (guint64) raw_st.st_size)) {
+            munmap((void*)raw_data, raw_st.st_size);
+            close(raw_fd);
+            unlink(tmp_raw);
+            g_free(cache_path);
+            return NULL;
+        }
         FILE *cache_file = fopen(cache_path, "wb");
         uint64_t zero_count = 0;
         fwrite(&zero_count, 8, 1, cache_file);

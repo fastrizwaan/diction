@@ -2471,19 +2471,20 @@ char* dsl_render_to_html(const char *dsl_text,
 
     /* MDX thesaurus expand/collapse support (Cambridge SMART Thesaurus, etc.) */
     if (format == DICT_FORMAT_MDX) {
-        /* Derive pill background: darken link_color slightly in dark mode so it
-           reads as a badge rather than plain text; in light mode use it directly. */
+        /* Derive pill background from link_color */
         char pill_bg[64];
         char pill_hover[64];
         if (dark_mode) {
-            darken_hex_color(pill_bg, link_color, sizeof(pill_bg), 0.55);
+            darken_hex_color(pill_bg,    link_color, sizeof(pill_bg),    0.55);
             darken_hex_color(pill_hover, link_color, sizeof(pill_hover), 0.72);
         } else {
-            darken_hex_color(pill_bg, link_color, sizeof(pill_bg), 0.80);
+            darken_hex_color(pill_bg,    link_color, sizeof(pill_bg),    0.80);
             darken_hex_color(pill_hover, link_color, sizeof(pill_hover), 0.65);
         }
 
         buf_append_str(&b, "<style>");
+
+        /* ── Category expand pills (.expand_mcat) ─────────────────────────── */
         buf_append_str(&b, ".mcat{margin:0.5em 0 0.8em 0;}");
         buf_append_str(&b, ".expand_mcat a{display:inline-flex;align-items:center;cursor:pointer;font-weight:600;text-decoration:none;");
         buf_append_str(&b, "padding:0.28em 0.85em;border-radius:999px;font-size:0.72em;text-transform:uppercase;letter-spacing:0.04em;");
@@ -2492,11 +2493,30 @@ char* dsl_render_to_html(const char *dsl_text,
         buf_append_printf(&b, ".expand_mcat a:hover{background-color:%s;box-shadow:0 2px 5px rgba(0,0,0,0.22);transform:translateY(-0.5px);}", pill_hover);
         buf_append_str(&b, ".expand_mcat a::before{content:'\\25b6\\00a0';font-size:0.85em;margin-right:2px;transition:transform 0.2s;}");
         buf_append_str(&b, ".expand_mcat a.open::before{content:'\\25bc\\00a0';}");
+
+        /* ── "SMART THESAURUS" top button (button.smartthesaurus / .button-pill) */
+        /* Reset browser button defaults, then apply theme pill style */
+        buf_append_str(&b, "a button.smartthesaurus,a .button-pill,.smartthesaurus{");
+        buf_append_str(&b, "appearance:none;-webkit-appearance:none;border:none;outline:none;");
+        buf_append_str(&b, "display:inline-flex;align-items:center;cursor:pointer;font-weight:600;");
+        buf_append_str(&b, "padding:0.28em 0.85em;border-radius:999px;font-size:0.72em;");
+        buf_append_str(&b, "text-transform:uppercase;letter-spacing:0.04em;");
+        buf_append_str(&b, "margin:4px 0 6px 0;transition:all 0.2s ease;box-shadow:0 1px 2px rgba(0,0,0,0.18);");
+        buf_append_printf(&b, "background-color:%s;color:%s !important;}", pill_bg, bg_color);
+        buf_append_printf(&b, "a:hover button.smartthesaurus,a:hover .button-pill{background-color:%s;}", pill_hover);
+
+        /* ── Expand container (.smartt / .mcat-body) ──────────────────────── */
+        buf_append_printf(&b, ".smartt,.mcat-body{border-left:2px solid %s;padding-left:0.6em;margin:0.3em 0 0.5em 0.2em;}", border_color);
+
+        /* ── Word list links ──────────────────────────────────────────────── */
         buf_append_str(&b, ".thswords{list-style:none;margin:0.2em 0 0.2em 1.2em;padding:0;}");
-        buf_append_printf(&b, ".thswords a{text-decoration:none;color:%s !important;}", link_color);
+        buf_append_printf(&b, ".thswords a,.thswords a:link,.thswords a:visited{text-decoration:none;color:%s !important;}", link_color);
         buf_append_str(&b, ".thswords a:hover{text-decoration:underline;}");
-        buf_append_printf(&b, ".thssib{margin:0.3em 0 0 0.2em;font-size:0.9em;color:%s !important;}", link_color);
-        buf_append_printf(&b, ".thssib a{color:%s !important;}", link_color);
+
+        /* ── "Browse SMART Thesaurus" link (.thssib) ──────────────────────── */
+        buf_append_printf(&b, ".thssib,.thssib a,.thssib a:link,.thssib a:visited{color:%s !important;}", link_color);
+        buf_append_str(&b, ".thssib{margin:0.3em 0 0 0.2em;font-size:0.9em;}");
+
         buf_append_str(&b, "</style>");
 
         buf_append_str(&b,

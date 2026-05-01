@@ -2494,24 +2494,29 @@ char* dsl_render_to_html(const char *dsl_text,
         buf_append_str(&b, ".expand_mcat a{display:inline-flex;align-items:center;cursor:pointer;font-weight:600;text-decoration:none;");
         buf_append_str(&b, "padding:0.28em 0.85em;border-radius:999px;font-size:0.72em;text-transform:uppercase;letter-spacing:0.04em;");
         buf_append_str(&b, "margin:2px 0 6px 0;transition:all 0.2s ease;box-shadow:0 1px 2px rgba(0,0,0,0.18);");
-        buf_append_printf(&b, "background-color:%s;color:%s !important;}", pill_bg, bg_color);
-        /* Ensure visited/active states don't change the pill appearance */
-        buf_append_printf(&b, ".expand_mcat a:visited,.expand_mcat a:active{background-color:%s;color:%s !important;}", pill_bg, bg_color);
-        buf_append_printf(&b, ".expand_mcat a:hover{background-color:%s;box-shadow:0 2px 5px rgba(0,0,0,0.22);transform:translateY(-0.5px);}", pill_hover);
+        buf_append_printf(&b, "background-color:%s !important;color:%s !important;}", pill_bg, bg_color);
+        /* Lock visited/active/focus so browser states don't override our theme */
+        buf_append_printf(&b, ".expand_mcat a:visited,.expand_mcat a:active,.expand_mcat a:focus{background-color:%s !important;color:%s !important;}", pill_bg, bg_color);
+        buf_append_printf(&b, ".expand_mcat a:hover{background-color:%s !important;box-shadow:0 2px 5px rgba(0,0,0,0.22);transform:translateY(-0.5px);}", pill_hover);
         buf_append_str(&b, ".expand_mcat a::before{content:'\\25b6\\00a0';font-size:0.85em;margin-right:2px;transition:transform 0.2s;}");
         buf_append_str(&b, ".expand_mcat a.open::before{content:'\\25bc\\00a0';}");
 
         /* ── "SMART THESAURUS" top button (button.smartthesaurus / .button-pill) */
-        /* Reset browser button defaults, then apply theme pill style */
-        buf_append_str(&b, "a button.smartthesaurus,a .button-pill,.smartthesaurus,");
-        buf_append_str(&b, "a:visited button.smartthesaurus,a:active button.smartthesaurus{");
+        /* Selector covers all states so cacd_main.css (inlined later) can't win */
+        buf_append_str(&b, "button.smartthesaurus,.smartthesaurus,");
+        buf_append_str(&b, "a button.smartthesaurus,a .button-pill,");
+        buf_append_str(&b, "a:visited button.smartthesaurus,a:active button.smartthesaurus,");
+        buf_append_str(&b, "button.smartthesaurus:active,button.smartthesaurus:focus,");
+        buf_append_str(&b, "button.smartthesaurus:focus-visible,.smartthesaurus:active{");
         buf_append_str(&b, "appearance:none;-webkit-appearance:none;border:none;outline:none;");
         buf_append_str(&b, "display:inline-flex;align-items:center;cursor:pointer;font-weight:600;");
         buf_append_str(&b, "padding:0.28em 0.85em;border-radius:999px;font-size:0.72em;");
         buf_append_str(&b, "text-transform:uppercase;letter-spacing:0.04em;");
-        buf_append_str(&b, "margin:4px 0 6px 0;transition:all 0.2s ease;box-shadow:0 1px 2px rgba(0,0,0,0.18);");
-        buf_append_printf(&b, "background-color:%s;color:%s !important;}", pill_bg, bg_color);
-        buf_append_printf(&b, "a:hover button.smartthesaurus,a:hover .button-pill{background-color:%s;}", pill_hover);
+        buf_append_str(&b, "margin:4px 0 6px 0;transition:background-color 0.2s ease,box-shadow 0.2s ease;");
+        buf_append_str(&b, "box-shadow:0 1px 2px rgba(0,0,0,0.18);");
+        buf_append_printf(&b, "background-color:%s !important;color:%s !important;}", pill_bg, bg_color);
+        buf_append_printf(&b, "a:hover button.smartthesaurus,a:hover .button-pill{background-color:%s !important;}", pill_hover);
+
 
         /* ── Expand container (.smartt / .mcat-body) ──────────────────────── */
         buf_append_printf(&b, ".smartt,.mcat-body{border-left:2px solid %s;padding-left:0.6em;margin:0.3em 0 0.5em 0.2em;}", border_color);

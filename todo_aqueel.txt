@@ -19,3 +19,10 @@ also fix the slash window see image:
 
 it should be littler smaller and we see rounded corners, that should be the window style.
 There's icon and bad looking extra icon place hold. plz improve it.
+
+
+use goldendict's logic; but update css to match our themes
+
+Wikipedia support
+online wiktionary support
+online dictionary support

@@ -1,22 +1,21 @@
-aqueel@fedora:~/diction-c$ du -h ~/.cache/diction/
-16K	/var/home/aqueel/.cache/diction/HSTS
-8.0K	/var/home/aqueel/.cache/diction/CacheStorage
-16K	/var/home/aqueel/.cache/diction/dicts-v7/e3f31d0282b583d8e0010cb70813ba29aa62f6a3.res
-28K	/var/home/aqueel/.cache/diction/dicts-v7
-4.0K	/var/home/aqueel/.cache/diction/WebKitCache/Version 17/Blobs
-12K	/var/home/aqueel/.cache/diction/WebKitCache/Version 17
-16K	/var/home/aqueel/.cache/diction/WebKitCache
-2.8M	/var/home/aqueel/.cache/diction/icons
-21G	/var/home/aqueel/.cache/diction/dicts-v8
-21G	/var/home/aqueel/.cache/diction/
+remove the groups tab in the sidebar.
 
+and the drop should use 
+character "🌎  All" for all dictionaries
+and rest of language should show the countries icon
 
-limit the cache/ check disk availability before extracting.
+"🇮🇳 Hi -> Hi 🇮🇳" for for Hindi -> Hindi
+"🇺🇸 En -> En 🇺🇸" for English -> English
+"🇸🇦 Ar -> Ar 🇸🇦" for Arabic -> Arabic
 
-limit full text search (fts) to 30 dictionaries; or group of dictionaries.
+"🇵🇰 Ur -> Ur 🇵🇰" for Urdu -> Urdu
 
-When a group is selected, it should not search from other dictionaries.
+"🇺🇸 En -> Ur  🇵🇰" like that.
+"🇺🇸 En -> Zh 🇨🇳"  English to Chinese (use proper 2 letter code)
 
+"🇺🇸 En -> Te 🇮🇳" for Enlgish to Telugu.
 
-selected sidebar item should be highlighted. 
+also fix the slash window see image:
 
+it should be littler smaller and we see rounded corners, that should be the window style.
+There's icon and bad looking extra icon place hold. plz improve it.

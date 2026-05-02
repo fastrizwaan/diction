@@ -1554,7 +1554,7 @@ static GtkWidget *sidebar_list_item_make_label(void) {
     gtk_label_set_wrap(GTK_LABEL(label), TRUE);
     gtk_label_set_wrap_mode(GTK_LABEL(label), PANGO_WRAP_WORD_CHAR);
     gtk_label_set_use_markup(GTK_LABEL(label), TRUE);
-    gtk_widget_set_margin_start(label, 12);
+    gtk_widget_set_margin_start(label, 0);
     gtk_widget_set_margin_end(label, 12);
     gtk_widget_set_margin_top(label, 4);
     gtk_widget_set_margin_bottom(label, 4);
@@ -1593,6 +1593,7 @@ static void sidebar_list_item_setup(GtkSignalListItemFactory *factory, GtkListIt
     (void)user_data;
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
     gtk_widget_add_css_class(box, "sidebar-row");
+    gtk_widget_set_margin_start(box, 12);
 
     /* File-based icon (shown when dict has an icon image) */
     GtkWidget *icon = gtk_image_new();
@@ -3476,13 +3477,14 @@ static void related_list_item_setup(GtkSignalListItemFactory *factory, GtkListIt
     (void)user_data;
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
     gtk_widget_add_css_class(box, "sidebar-row");
+    gtk_widget_set_margin_start(box, 12);
     GtkWidget *label = gtk_label_new("");
     gtk_label_set_xalign(GTK_LABEL(label), 0.0f);
     gtk_label_set_wrap(GTK_LABEL(label), TRUE);
     gtk_label_set_wrap_mode(GTK_LABEL(label), PANGO_WRAP_WORD_CHAR);
     gtk_label_set_use_markup(GTK_LABEL(label), TRUE);
     gtk_widget_set_hexpand(label, TRUE);
-    gtk_widget_set_margin_start(label, 12);
+    gtk_widget_set_margin_start(label, 0);
     gtk_widget_set_margin_top(label, 4);
     gtk_widget_set_margin_bottom(label, 4);
     

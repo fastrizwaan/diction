@@ -6858,6 +6858,7 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     g_action_map_add_action(G_ACTION_MAP(app), G_ACTION(toggle_sidebar_action));
 
     GtkWidget *search_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_widget_add_css_class(search_box, "linked");
     gtk_widget_set_hexpand(search_box, TRUE);
 
     nav_back_btn = gtk_button_new_from_icon_name("go-previous-symbolic");
@@ -7094,19 +7095,15 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
         ".sidebar-tabs button image { opacity: 0.7; }"
         ".sidebar-tabs button:checked { background: alpha(@theme_fg_color, 0.1); }"
         ".sidebar-tabs button:checked image { opacity: 1.0; }"
-        ".sidebar-row { min-height: 34px; }"
-        ".navigation-sidebar { background: transparent; }"
-        ".navigation-sidebar listitem:hover, .navigation-sidebar row:hover { background: alpha(@theme_fg_color, 0.05); }"
-        ".navigation-sidebar listitem:selected, .navigation-sidebar row:selected { background: alpha(@theme_fg_color, 0.1); color: inherit; }"
+        ".sidebar-row { min-height: 34px; background: transparent; }"
         ".content-header { background: transparent; }\n"
         ".menu-item { font-weight: normal; padding: 4px 8px; min-height: 0; }"
         "overlay-split-view > separator { background: @sidebar_bg_color; min-width: 1px; opacity: 1; }"
         "headerbar.sidebar { box-shadow: none; border-bottom: none; margin: 0; padding: 0; }"
-        ".search-button-bg { background: alpha(@theme_fg_color, 0.08); border-radius: 6px 0 0 6px; padding: 0px 8px; }"
-        ".search-button-bg:hover { background: alpha(@theme_fg_color, 0.12); }"
-        ".search-scope-button { background: alpha(@theme_fg_color, 0.08); border-radius: 0 6px 6px 0; padding: 0px 10px; margin-left: 0; }"
-        ".search-scope-button:hover { background: alpha(@theme_fg_color, 0.12); }"
-        "entry.search-entry-joined { border-top-right-radius: 0; border-bottom-right-radius: 0; }"
+        ".linked entry { background: alpha(@theme_fg_color, 0.06); border: none; border-radius: 8px 0 0 8px; min-height: 34px; }"
+        ".linked .search-scope-button { background: alpha(@theme_fg_color, 0.06); border: none; border-radius: 0 8px 8px 0; min-height: 34px; }"
+        ".linked .search-scope-button:hover { background: alpha(@theme_fg_color, 0.1); }"
+        ".linked .search-scope-button button { background: none; border: none; box-shadow: none; }"
     );
     gtk_style_context_add_provider_for_display(gdk_display_get_default(), GTK_STYLE_PROVIDER(css_provider), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
 

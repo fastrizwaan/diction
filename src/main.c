@@ -1592,6 +1592,7 @@ static void sidebar_list_item_setup(GtkSignalListItemFactory *factory, GtkListIt
     (void)factory;
     (void)user_data;
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_widget_add_css_class(box, "sidebar-row");
 
     /* File-based icon (shown when dict has an icon image) */
     GtkWidget *icon = gtk_image_new();
@@ -3474,6 +3475,7 @@ static void related_list_item_setup(GtkSignalListItemFactory *factory, GtkListIt
     (void)factory;
     (void)user_data;
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_widget_add_css_class(box, "sidebar-row");
     GtkWidget *label = gtk_label_new("");
     gtk_label_set_xalign(GTK_LABEL(label), 0.0f);
     gtk_label_set_wrap(GTK_LABEL(label), TRUE);
@@ -7090,6 +7092,7 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
         ".sidebar-tabs button image { opacity: 0.7; }"
         ".sidebar-tabs button:checked { background: alpha(@theme_fg_color, 0.1); }"
         ".sidebar-tabs button:checked image { opacity: 1.0; }"
+        ".sidebar-row { min-height: 34px; }"
         ".navigation-sidebar { background: transparent; }"
         ".navigation-sidebar listitem:hover, .navigation-sidebar row:hover { background: alpha(@theme_fg_color, 0.05); }"
         ".navigation-sidebar listitem:selected, .navigation-sidebar row:selected { background: alpha(@theme_fg_color, 0.1); color: inherit; }"

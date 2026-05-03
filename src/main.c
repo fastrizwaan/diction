@@ -3041,36 +3041,33 @@ static void rebuild_search_scope_menu(void) {
 
     GMenu *menu = g_menu_new();
 
-    GMenu *dict_submenu = g_menu_new();
-    g_mutex_lock(&dict_loader_mutex);
-    for (DictEntry *e = all_dicts; e; e = e->next) {
-        if (!dict_entry_enabled(e)) continue;
-        GMenuItem *item = g_menu_item_new(e->name ? e->name : "Dictionary", NULL);
-        g_menu_item_set_action_and_target(item, "app.search-scope", "s", e->dict_id);
-        g_menu_append_item(dict_submenu, item);
-        g_object_unref(item);
-    }
-    g_mutex_unlock(&dict_loader_mutex);
-
-    if (g_menu_model_get_n_items(G_MENU_MODEL(dict_submenu)) > 0) {
-        g_menu_append_submenu(menu, "Dictionary", G_MENU_MODEL(dict_submenu));
-    }
-    g_object_unref(dict_submenu);
-
     GMenuItem *all_item = g_menu_item_new("All", NULL);
     g_menu_item_set_action_and_target(all_item, "app.search-scope", "s", "all");
     g_menu_append_item(menu, all_item);
     g_object_unref(all_item);
 
-    if (app_settings) {
+    if (app_settings && app_settings->dictionary_groups->len > 0) {
+        GMenu *group_submenu = g_menu_new();
         for (guint i = 0; i < app_settings->dictionary_groups->len; i++) {
             DictGroup *grp = g_ptr_array_index(app_settings->dictionary_groups, i);
             GMenuItem *item = g_menu_item_new(grp->name ? grp->name : "Group", NULL);
             g_menu_item_set_action_and_target(item, "app.search-scope", "s", grp->id);
-            g_menu_append_item(menu, item);
+            g_menu_append_item(group_submenu, item);
             g_object_unref(item);
         }
+        g_menu_append_submenu(menu, "Groups", G_MENU_MODEL(group_submenu));
+        g_object_unref(group_submenu);
     }
+
+    g_mutex_lock(&dict_loader_mutex);
+    for (DictEntry *e = all_dicts; e; e = e->next) {
+        if (!dict_entry_enabled(e)) continue;
+        GMenuItem *item = g_menu_item_new(e->name ? e->name : "Dictionary", NULL);
+        g_menu_item_set_action_and_target(item, "app.search-scope", "s", e->dict_id);
+        g_menu_append_item(menu, item);
+        g_object_unref(item);
+    }
+    g_mutex_unlock(&dict_loader_mutex);
 
     gtk_menu_button_set_menu_model(search_scope_button, G_MENU_MODEL(menu));
     g_object_unref(menu);

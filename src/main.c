@@ -3264,7 +3264,7 @@ static void on_history_item_activated(GtkListView *view, guint position, gpointe
         append_rendered_word_html(payload->title);
     }
     if (sidebar && sidebar->selection_model) {
-        gtk_single_selection_set_selected(sidebar->selection_model, position);
+        gtk_single_selection_set_selected(sidebar->selection_model, 0);
     }
 }
 
@@ -3552,7 +3552,13 @@ static void on_favorites_item_activated(GtkListView *view, guint position, gpoin
         append_rendered_word_html(payload->title);
     }
     if (sidebar && sidebar->selection_model) {
-        gtk_single_selection_set_selected(sidebar->selection_model, position);
+        for (guint i = 0; i < sidebar->payloads->len; i++) {
+            SidebarRowPayload *p = g_ptr_array_index(sidebar->payloads, i);
+            if (p && p->type == SIDEBAR_ROW_WORD && g_strcmp0(p->title, payload->title) == 0) {
+                gtk_single_selection_set_selected(sidebar->selection_model, i);
+                break;
+            }
+        }
     }
 }
 
@@ -4664,14 +4670,11 @@ static void update_theme_colors(void) {
     const char *popover_bg = (is_default_theme) ? (dark_mode ? "#2e2e32" : "#ffffff") : c_surface;
 
     /* Selection colors: standard blue for default, palette accent for others */
-    char sidebar_select[64];
     char sidebar_hover[64];
     if (is_default_theme) {
-        g_strlcpy(sidebar_select, dark_mode ? "rgba(255, 255, 255, 0.15)" : "rgba(0, 0, 0, 0.12)", sizeof(sidebar_select));
-        g_strlcpy(sidebar_hover, dark_mode ? "rgba(255, 255, 255, 0.08)" : "rgba(0, 0, 0, 0.05)", sizeof(sidebar_hover));
+        g_strlcpy(sidebar_hover, dark_mode ? "rgba(255, 255, 255, 0.12)" : "rgba(0, 0, 0, 0.08)", sizeof(sidebar_hover));
     } else {
-        g_snprintf(sidebar_select, sizeof(sidebar_select), "rgba(%u,%u,%u,0.35)", ar, ag, ab);
-        g_snprintf(sidebar_hover, sizeof(sidebar_hover), "rgba(%u,%u,%u,0.15)", ar, ag, ab);
+        g_snprintf(sidebar_hover, sizeof(sidebar_hover), "rgba(%u,%u,%u,0.2)", ar, ag, ab);
     }
 
     char *css = g_strdup_printf(
@@ -4723,9 +4726,10 @@ static void update_theme_colors(void) {
         "  color: inherit;\n"
         "}\n"
         "row:selected, listitem:selected {\n"
-        "  background-color: %s !important;\n"
-        "  color: inherit;\n"
+        "  background-color: @accent_bg_color !important;\n"
+        "  color: #ffffff !important;\n"
         "  outline: none;\n"
+        "  transition: none;\n"
         "}\n"
         "/* Explicitly set webview backgrounds */\n"
         "webkitwebview, webview {\n"
@@ -4788,8 +4792,6 @@ static void update_theme_colors(void) {
         sidebar_bg, w_fg, popover_bg, w_fg, accent,
         /* sidebar border (1) */
         palette.border,
-        /* row:selected (1) */
-        sidebar_select,
         /* row:hover (1) */
         sidebar_hover,
         /* popover row hover (1) */

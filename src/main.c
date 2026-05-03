@@ -2310,6 +2310,9 @@ static gboolean dict_entry_in_scope(DictEntry *entry, const char *scope_id) {
     if (!entry || !dict_entry_enabled(entry)) {
         return FALSE;
     }
+    if (scope_id && g_strcmp0(entry->dict_id, scope_id) == 0) {
+        return TRUE;
+    }
     if (!scope_id || g_strcmp0(scope_id, "all") == 0 || !app_settings) {
         return TRUE;
     }
@@ -2337,18 +2340,29 @@ static gboolean dict_entry_in_active_scope(DictEntry *entry) {
 }
 
 static gboolean scope_id_exists(const char *scope_id) {
-    if (!scope_id || g_strcmp0(scope_id, "all") == 0 || !app_settings) {
+    if (!scope_id || g_strcmp0(scope_id, "all") == 0) {
         return TRUE;
     }
 
-    for (guint i = 0; i < app_settings->dictionary_groups->len; i++) {
-        DictGroup *grp = g_ptr_array_index(app_settings->dictionary_groups, i);
-        if (g_strcmp0(grp->id, scope_id) == 0) {
-            return TRUE;
+    if (app_settings) {
+        for (guint i = 0; i < app_settings->dictionary_groups->len; i++) {
+            DictGroup *grp = g_ptr_array_index(app_settings->dictionary_groups, i);
+            if (g_strcmp0(grp->id, scope_id) == 0) {
+                return TRUE;
+            }
         }
     }
 
-    return FALSE;
+    gboolean found = FALSE;
+    g_mutex_lock(&dict_loader_mutex);
+    for (DictEntry *e = all_dicts; e; e = e->next) {
+        if (g_strcmp0(e->dict_id, scope_id) == 0) {
+            found = TRUE;
+            break;
+        }
+    }
+    g_mutex_unlock(&dict_loader_mutex);
+    return found;
 }
 
 static void ensure_valid_active_scope(void) {
@@ -2361,15 +2375,31 @@ static void ensure_valid_active_scope(void) {
 }
 
 static char *scope_display_name_dup(const char *scope_id) {
-    if (!scope_id || g_strcmp0(scope_id, "all") == 0 || !app_settings) {
+    if (!scope_id || g_strcmp0(scope_id, "all") == 0) {
         return g_strdup("All");
     }
 
-    for (guint i = 0; i < app_settings->dictionary_groups->len; i++) {
-        DictGroup *grp = g_ptr_array_index(app_settings->dictionary_groups, i);
-        if (g_strcmp0(grp->id, scope_id) == 0) {
-            return g_strdup(grp->name ? grp->name : "Group");
+    if (app_settings) {
+        for (guint i = 0; i < app_settings->dictionary_groups->len; i++) {
+            DictGroup *grp = g_ptr_array_index(app_settings->dictionary_groups, i);
+            if (g_strcmp0(grp->id, scope_id) == 0) {
+                return g_strdup(grp->name ? grp->name : "Group");
+            }
         }
+    }
+
+    char *found_name = NULL;
+    g_mutex_lock(&dict_loader_mutex);
+    for (DictEntry *e = all_dicts; e; e = e->next) {
+        if (g_strcmp0(e->dict_id, scope_id) == 0) {
+            found_name = g_strdup(e->name ? e->name : "Dictionary");
+            break;
+        }
+    }
+    g_mutex_unlock(&dict_loader_mutex);
+
+    if (found_name) {
+        return found_name;
     }
 
     return g_strdup("All");
@@ -3010,6 +3040,22 @@ static void rebuild_search_scope_menu(void) {
     ensure_valid_active_scope();
 
     GMenu *menu = g_menu_new();
+
+    GMenu *dict_submenu = g_menu_new();
+    g_mutex_lock(&dict_loader_mutex);
+    for (DictEntry *e = all_dicts; e; e = e->next) {
+        if (!dict_entry_enabled(e)) continue;
+        GMenuItem *item = g_menu_item_new(e->name ? e->name : "Dictionary", NULL);
+        g_menu_item_set_action_and_target(item, "app.search-scope", "s", e->dict_id);
+        g_menu_append_item(dict_submenu, item);
+        g_object_unref(item);
+    }
+    g_mutex_unlock(&dict_loader_mutex);
+
+    if (g_menu_model_get_n_items(G_MENU_MODEL(dict_submenu)) > 0) {
+        g_menu_append_submenu(menu, "Dictionary", G_MENU_MODEL(dict_submenu));
+    }
+    g_object_unref(dict_submenu);
 
     GMenuItem *all_item = g_menu_item_new("All", NULL);
     g_menu_item_set_action_and_target(all_item, "app.search-scope", "s", "all");

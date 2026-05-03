@@ -3567,9 +3567,18 @@ static void on_dict_item_activated(GtkListView *view, guint position, gpointer u
     if (!payload || payload->type != SIDEBAR_ROW_DICT || !payload->dict_entry) {
         return;
     }
-    activate_dictionary_entry(payload->dict_entry);
+    DictEntry *target_entry = payload->dict_entry;
+    activate_dictionary_entry(target_entry);
     populate_dict_sidebar();
-    sidebar_list_select_payload(sidebar, payload);
+
+    /* Find the new payload corresponding to the activated dictionary */
+    for (guint i = 0; i < sidebar->payloads->len; i++) {
+        SidebarRowPayload *p = g_ptr_array_index(sidebar->payloads, i);
+        if (p->type == SIDEBAR_ROW_DICT && p->dict_entry == target_entry) {
+            gtk_single_selection_set_selected(sidebar->selection_model, i);
+            break;
+        }
+    }
 }
 
 static gboolean run_debounced_search(gpointer user_data) {
@@ -4656,10 +4665,13 @@ static void update_theme_colors(void) {
 
     /* Selection colors: standard blue for default, palette accent for others */
     char sidebar_select[64];
+    char sidebar_hover[64];
     if (is_default_theme) {
-        g_strlcpy(sidebar_select, dark_mode ? "rgba(255, 255, 255, 0.1)" : "rgba(0, 0, 0, 0.08)", sizeof(sidebar_select));
+        g_strlcpy(sidebar_select, dark_mode ? "rgba(255, 255, 255, 0.15)" : "rgba(0, 0, 0, 0.12)", sizeof(sidebar_select));
+        g_strlcpy(sidebar_hover, dark_mode ? "rgba(255, 255, 255, 0.08)" : "rgba(0, 0, 0, 0.05)", sizeof(sidebar_hover));
     } else {
-        g_snprintf(sidebar_select, sizeof(sidebar_select), "rgba(%u,%u,%u,0.25)", ar, ag, ab);
+        g_snprintf(sidebar_select, sizeof(sidebar_select), "rgba(%u,%u,%u,0.35)", ar, ag, ab);
+        g_snprintf(sidebar_hover, sizeof(sidebar_hover), "rgba(%u,%u,%u,0.15)", ar, ag, ab);
     }
 
     char *css = g_strdup_printf(
@@ -4711,15 +4723,16 @@ static void update_theme_colors(void) {
         "  color: inherit;\n"
         "}\n"
         "row:selected, listitem:selected {\n"
-        "  background-color: %s;\n"
+        "  background-color: %s !important;\n"
         "  color: inherit;\n"
+        "  outline: none;\n"
         "}\n"
         "/* Explicitly set webview backgrounds */\n"
         "webkitwebview, webview {\n"
         "  background-color: @view_bg_color;\n"
         "}\n"
         "row:hover:not(:selected), listitem:hover:not(:selected) {\n"
-        "  background-color: %s;\n"
+        "  background-color: %s !important;\n"
         "}\n"
         "popover, popovermenu {\n"
         "  background-color: transparent;\n"
@@ -4778,7 +4791,7 @@ static void update_theme_colors(void) {
         /* row:selected (1) */
         sidebar_select,
         /* row:hover (1) */
-        hover_color,
+        sidebar_hover,
         /* popover row hover (1) */
         hover_color,
         /* content header (1) */
@@ -5238,7 +5251,6 @@ static void populate_dict_sidebar(void) {
 
     GPtrArray *labels = g_ptr_array_new_with_free_func(g_free);
     GPtrArray *payloads = g_ptr_array_new();
-    SidebarRowPayload *active_payload = NULL;
 
     g_mutex_lock(&dict_loader_mutex);
     DictEntry *e = all_dicts;
@@ -5257,9 +5269,6 @@ static void populate_dict_sidebar(void) {
             }
             g_ptr_array_add(labels, g_strdup(payload->title));
             g_ptr_array_add(payloads, payload);
-            if (e == active_entry) {
-                active_payload = payload;
-            }
         }
         
         g_mutex_lock(&dict_loader_mutex);
@@ -5279,9 +5288,7 @@ static void populate_dict_sidebar(void) {
     }
 
     set_sidebar_list_rows(&dict_sidebar, labels, payloads);
-    if (active_payload) {
-        sidebar_list_select_payload(&dict_sidebar, active_payload);
-    } else if (dict_sidebar.selection_model) {
+    if (dict_sidebar.selection_model) {
         gtk_single_selection_set_selected(dict_sidebar.selection_model, GTK_INVALID_LIST_POSITION);
     }
 

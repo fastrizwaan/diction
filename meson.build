@@ -20,6 +20,7 @@ zstd_dep = dependency('libzstd')
 lzma_dep = dependency('liblzma')
 bz2_dep = cc.find_library('bz2', required: true)
 lzo_dep = dependency('lzo2')
+sqlite3_dep = dependency('sqlite3')
 
 srcs = [
   'src/main.c',
@@ -50,7 +51,7 @@ srcs = [
 ]
 
 executable('diction', srcs,
-  dependencies: [ gtk_dep, adw_dep, webkit_dep, zlib_dep, json_dep, archive_dep, zstd_dep, lzma_dep, bz2_dep, lzo_dep, xml_dep ],
+  dependencies: [ gtk_dep, adw_dep, webkit_dep, zlib_dep, json_dep, archive_dep, zstd_dep, lzma_dep, bz2_dep, lzo_dep, xml_dep, sqlite3_dep ],
   install: true,
 )
 

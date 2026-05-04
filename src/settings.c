@@ -858,6 +858,7 @@ AppSettings* settings_load(void) {
     settings->scan_popup_delay_ms = 500;
     settings->scan_modifier_key = g_strdup("none");
     settings->global_shortcut = g_strdup("");
+    settings->fts_enabled = FALSE;
     g_mutex_init(&settings->mutex);
 
     char *path = get_settings_file_path();
@@ -966,6 +967,8 @@ AppSettings* settings_load(void) {
         g_free(settings->global_shortcut);
         settings->global_shortcut = g_strdup(global_shortcut);
     }
+    if (json_object_has_member(obj, "fts_enabled"))
+        settings->fts_enabled = json_object_get_boolean_member(obj, "fts_enabled");
 
     // Dictionary directories
     JsonArray *dirs = json_object_has_member(obj, "dictionary_dirs")
@@ -1078,6 +1081,7 @@ void settings_save(AppSettings *settings) {
         settings->scan_modifier_key ? settings->scan_modifier_key : "none");
     json_object_set_string_member(root, "global_shortcut",
         settings->global_shortcut ? settings->global_shortcut : "");
+    json_object_set_boolean_member(root, "fts_enabled", settings->fts_enabled);
 
     // Dictionary directories
     JsonArray *dirs = json_array_new();

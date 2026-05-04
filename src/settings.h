@@ -40,6 +40,7 @@ typedef struct {
     int      scan_popup_delay_ms; // Debounce delay (default 500)
     char    *scan_modifier_key;   // "none", "ctrl", "alt", "meta"
     char    *global_shortcut;     // Shortcut key string (e.g. "<Ctrl>F12")
+    gboolean fts_enabled;         // Enable persistent SQLite FTS index
     GMutex   mutex;
 } AppSettings;
 

@@ -102,6 +102,7 @@ struct DictChunkReader {
     uint32_t cached_chunk_idx;
     char *cached_chunk_data;
     size_t cached_chunk_len;
+    GMutex mutex;
 };
 
 DictChunkReader* dict_chunk_reader_new(const char *mmap_data, size_t mmap_size, const DictCacheHeader *header) {
@@ -122,6 +123,7 @@ DictChunkReader* dict_chunk_reader_new(const char *mmap_data, size_t mmap_size, 
     r->dctx = ZSTD_createDCtx();
     r->cached_chunk_idx = (uint32_t)-1;
     r->cached_chunk_data = g_malloc(DICT_CHUNK_SIZE);
+    g_mutex_init(&r->mutex);
     return r;
 }
 
@@ -136,12 +138,15 @@ char* dict_chunk_reader_get_definition(DictChunkReader *r, uint64_t offset, uint
     char *out = g_malloc((gsize)len + 1);
     uint64_t copied = 0;
 
+    g_mutex_lock(&r->mutex);
+
     while (copied < len) {
         uint64_t cur_off = offset + copied;
         uint32_t chunk_idx = (uint32_t)(cur_off / DICT_CHUNK_SIZE);
         uint32_t offset_in_chunk = (uint32_t)(cur_off % DICT_CHUNK_SIZE);
 
         if (chunk_idx >= r->header.chunk_count) {
+            g_mutex_unlock(&r->mutex);
             g_free(out);
             return NULL;
         }
@@ -153,6 +158,7 @@ char* dict_chunk_reader_get_definition(DictChunkReader *r, uint64_t offset, uint
                                 : r->header.chunk_table_off;
 
             if (next_off < comp_off || comp_off > r->mmap_size || next_off > r->mmap_size) {
+                g_mutex_unlock(&r->mutex);
                 g_free(out);
                 return NULL;
             }
@@ -161,6 +167,7 @@ char* dict_chunk_reader_get_definition(DictChunkReader *r, uint64_t offset, uint
             size_t decomp_size = ZSTD_decompressDCtx(r->dctx, r->cached_chunk_data, DICT_CHUNK_SIZE,
                                                      r->mmap_data + comp_off, comp_size);
             if (ZSTD_isError(decomp_size)) {
+                g_mutex_unlock(&r->mutex);
                 g_free(out);
                 return NULL;
             }
@@ -170,6 +177,7 @@ char* dict_chunk_reader_get_definition(DictChunkReader *r, uint64_t offset, uint
         }
 
         if (offset_in_chunk >= r->cached_chunk_len) {
+            g_mutex_unlock(&r->mutex);
             g_free(out);
             return NULL;
         }
@@ -180,12 +188,15 @@ char* dict_chunk_reader_get_definition(DictChunkReader *r, uint64_t offset, uint
         copied += to_copy;
     }
 
+    g_mutex_unlock(&r->mutex);
+
     out[len] = '\0';
     return out;
 }
 
 void dict_chunk_reader_free(DictChunkReader *r) {
     if (r) {
+        g_mutex_clear(&r->mutex);
         ZSTD_freeDCtx(r->dctx);
         g_free(r->cached_chunk_data);
         g_free(r);

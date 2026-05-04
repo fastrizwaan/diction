@@ -28,52 +28,39 @@ const char* dict_get_definition(DictMmap *dict, const FlatTreeEntry *entry, size
     return dict->data + entry->d_off;
 }
 
-static size_t dict_search_fts_scan(DictMmap *dict, GRegex *regex, size_t start_pos) {
-    if (!dict || !dict->index || start_pos >= dict->index->count || !regex)
+size_t dict_search_fts(DictMmap *dict, const char *dict_path,
+                       const char *query, GRegex *regex,
+                       size_t start_pos, gboolean fts_enabled)
+{
+    if (!fts_enabled || !dict || !dict->index || !query || !regex)
         return (size_t)-1;
 
-    for (size_t i = start_pos; i < dict->index->count; i++) {
-        const FlatTreeEntry *entry = flat_index_get(dict->index, i);
-        if (entry->d_len == 0) continue;
+    /* Get FTS5 candidate entry IDs — NULL if index missing or no hit. */
+    GArray *candidates = dict_fts_query_candidates(dict_path, query,
+                                                   start_pos, 2000);
+    if (!candidates)
+        return (size_t)-1; /* no index or no FTS hit — no fallback scan */
+
+    size_t result = (size_t)-1;
+    for (guint i = 0; i < candidates->len; i++) {
+        guint32 eid = g_array_index(candidates, guint32, i);
+        const FlatTreeEntry *entry = flat_index_get(dict->index, (size_t)eid);
+        if (!entry || entry->d_len == 0) continue;
 
         char *to_free = NULL;
         size_t def_len = 0;
         const char *def = dict_get_definition(dict, entry, &def_len, &to_free);
-        
-        if (def && g_regex_match_full(regex, def, (gssize)def_len, 0, 0, NULL, NULL)) {
-            if (to_free) g_free(to_free);
-            return i;
+        gboolean matches = def &&
+            g_regex_match_full(regex, def, (gssize)def_len, 0, 0, NULL, NULL);
+        g_free(to_free);
+        if (matches) {
+            result = (size_t)eid;
+            break;
         }
-        if (to_free) g_free(to_free);
     }
 
-    return (size_t)-1;
-}
-
-size_t dict_search_fts(DictMmap *dict, const char *query, GRegex *regex, size_t start_pos) {
-    if (!dict || !dict->index || start_pos >= dict->index->count || !regex)
-        return (size_t)-1;
-
-    if (!query || strlen(query) < 3) {
-        return dict_search_fts_scan(dict, regex, start_pos);
-    }
-
-    if (!dict->fts_index) {
-        fprintf(stderr, "[FTS] Building trigram index for %zu entries...\n", flat_index_count(dict->index));
-        dict->fts_index = dict_fts_index_build(dict);
-        fprintf(stderr, "[FTS] Trigram index ready.\n");
-    }
-
-    if (!dict->fts_index) {
-        return dict_search_fts_scan(dict, regex, start_pos);
-    }
-
-    size_t indexed = dict_fts_index_search(dict->fts_index, dict, query, regex, start_pos);
-    if (indexed != (size_t)-1) {
-        return indexed;
-    }
-
-    return (size_t)-1;
+    g_array_free(candidates, TRUE);
+    return result;
 }
 
 

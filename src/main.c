@@ -1866,6 +1866,24 @@ static GPtrArray *build_search_entry_list(void) {
     return entries;
 }
 
+/* Called from settings-dialog's FTS builder via extern declaration.
+ * Returns GPtrArray<DictEntry*> covering ALL loaded dicts (not scope-filtered).
+ * Each entry has its ref count incremented; caller must dict_entry_unref each. */
+GPtrArray* collect_fts_build_entries(void)
+{
+    GPtrArray *out = g_ptr_array_new(); /* no auto-free; caller manages refs */
+    g_mutex_lock(&dict_loader_mutex);
+    for (DictEntry *e = all_dicts; e; e = e->next) {
+        if (e->dict && e->dict->index &&
+            flat_index_count(e->dict->index) > 0) {
+            dict_entry_ref(e);
+            g_ptr_array_add(out, e);
+        }
+    }
+    g_mutex_unlock(&dict_loader_mutex);
+    return out;
+}
+
 static gboolean continue_sidebar_search(gpointer user_data) {
     SidebarSearchState *state = user_data;
     if (!state || state != sidebar_search_state) {
@@ -1965,7 +1983,12 @@ static gboolean continue_sidebar_search(gpointer user_data) {
                 state->has_current_pos = FALSE;
                 continue;
             }
-            size_t match_pos = dict_search_fts(state->current_dict->dict, state->query, state->fts_regex, state->current_pos);
+            size_t match_pos = dict_search_fts(
+                state->current_dict->dict,
+                state->current_dict->path,
+                state->query, state->fts_regex,
+                state->current_pos,
+                app_settings && app_settings->fts_enabled);
             if (match_pos == (size_t)-1) {
                 processed += state->current_dict_count - state->current_pos;
                 state->has_current_pos = FALSE;
@@ -2195,6 +2218,18 @@ static void populate_search_sidebar_with_mode(const char *query, gboolean force_
     sidebar_search_state = g_new0(SidebarSearchState, 1);
 
     sidebar_search_state->is_fts = force_fts || (clean && g_str_has_prefix(clean, "* "));
+
+    /* Block FTS if the persistent index setting is disabled */
+    if (sidebar_search_state->is_fts && !(app_settings && app_settings->fts_enabled)) {
+        g_free(clean);
+        g_free(sidebar_search_state);
+        sidebar_search_state = NULL;
+        populate_search_sidebar_status(
+            "Full Text Search Unavailable",
+            "Enable it in Preferences → System → Search.");
+        return;
+    }
+
     char *clean_query = clean;
     if (sidebar_search_state->is_fts) {
         if (clean && g_str_has_prefix(clean, "* ")) {
@@ -5702,15 +5737,15 @@ static char* sample_dict_and_detect_lang(DictEntry *entry) {
         const FlatTreeEntry *node = flat_index_get(entry->dict->index, idx);
         if (!node) continue;
 
-        char *hw = g_strndup(entry->dict->data + node->h_off, node->h_len);
+        char *hw = (entry->dict->data) ? g_strndup(entry->dict->data + node->h_off, node->h_len) : NULL;
         
         char *to_free = NULL;
         size_t def_len = 0;
         const char *def_ptr = dict_get_definition(entry->dict, node, &def_len, &to_free);
-        char *def = g_strndup(def_ptr, def_len);
+        char *def = def_ptr ? g_strndup(def_ptr, def_len) : NULL;
         
-        g_string_append_printf(hw_samples, " %s ", hw);
-        g_string_append_printf(def_samples, " %s ", def);
+        if (hw) g_string_append_printf(hw_samples, " %s ", hw);
+        if (def) g_string_append_printf(def_samples, " %s ", def);
         
         g_free(hw);
         g_free(def);

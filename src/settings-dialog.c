@@ -413,6 +413,442 @@ static void on_rescan_directories(GtkButton *btn, SettingsDialogData *data) {
     show_scan_dialog_for_dirs(data, dirs, n, TRUE);
 }
 
+/* ================================================================
+   FTS Index Builder dialog
+   ================================================================ */
+
+#include "dict-fts-index.h"
+#include "dict-mmap.h"
+#include "flat-index.h"
+#include "dict-loader.h"
+
+/* Rows between COMMIT cycles during indexing */
+#define FTS_BATCH_SIZE 500
+
+/* Declared in main.c — snapshot of currently loaded dicts for FTS building */
+extern GPtrArray* collect_fts_build_entries(void); /* GPtrArray<DictEntry*>, each ref'd */
+
+typedef struct {
+    SettingsDialogData *sdd;
+    AdwDialog          *dialog;
+    GtkListBox         *list;
+    GtkLabel           *status_label;
+    GtkWidget          *start_btn;
+    GtkWidget          *stop_btn;
+    GtkWidget          *close_btn;
+    volatile gint       cancel;    /* 0=run, 1=stop */
+    GThread            *worker;
+    GPtrArray          *to_index;  /* DictEntry* list (reffed by us) */
+    gint                closed;
+} FtsIndexCtx;
+
+typedef struct {
+    FtsIndexCtx *ctx;
+    char        *status;     /* newly allocated, main thread frees */
+    char        *path;       /* newly allocated */
+    gboolean     done;
+    gboolean     dict_done;
+    guint        entry_done;
+    guint        entry_total;
+} FtsIdleData;
+
+static gboolean fts_idle_update(gpointer user_data)
+{
+    FtsIdleData *d = user_data;
+    FtsIndexCtx *ctx = d->ctx;
+
+    if (!g_atomic_int_get(&ctx->closed)) {
+        if (ctx->status_label && d->status)
+            gtk_label_set_text(ctx->status_label, d->status);
+
+        /* Update per-row progress label */
+        if (d->path && ctx->list) {
+            GtkWidget *row = GTK_WIDGET(gtk_list_box_get_row_at_index(ctx->list, 0));
+            /* Walk rows to find matching path */
+            for (int i = 0; ; i++) {
+                GtkListBoxRow *lr = gtk_list_box_get_row_at_index(ctx->list, i);
+                if (!lr) break;
+                const char *rpath = g_object_get_data(G_OBJECT(lr), "dict-path");
+                if (g_strcmp0(rpath, d->path) == 0) {
+                    row = GTK_WIDGET(lr);
+                    break;
+                }
+            }
+            if (row) {
+                GtkWidget *prog = g_object_get_data(G_OBJECT(row), "prog-label");
+                GtkWidget *spin = g_object_get_data(G_OBJECT(row), "row-spin");
+                if (d->dict_done) {
+                    if (prog) gtk_label_set_text(GTK_LABEL(prog), "✓ Indexed");
+                    if (spin) {
+                        gtk_spinner_stop(GTK_SPINNER(spin));
+                        gtk_widget_set_visible(spin, FALSE);
+                    }
+                } else if (d->entry_total > 0) {
+                    char *txt = g_strdup_printf("%u / %u", d->entry_done, d->entry_total);
+                    if (prog) gtk_label_set_text(GTK_LABEL(prog), txt);
+                    g_free(txt);
+                    if (spin) {
+                        gtk_spinner_start(GTK_SPINNER(spin));
+                        gtk_widget_set_visible(spin, TRUE);
+                    }
+                }
+            }
+        }
+
+        if (d->done) {
+            if (ctx->stop_btn)  gtk_widget_set_sensitive(ctx->stop_btn, FALSE);
+            if (ctx->start_btn) gtk_widget_set_sensitive(ctx->start_btn, TRUE);
+            if (ctx->close_btn) {
+                gtk_widget_set_sensitive(ctx->close_btn, TRUE);
+                gtk_widget_add_css_class(ctx->close_btn, "suggested-action");
+            }
+        }
+    }
+
+    g_free(d->status);
+    g_free(d->path);
+    g_free(d);
+    return G_SOURCE_REMOVE;
+}
+
+static void fts_post(FtsIndexCtx *ctx, const char *status, const char *path,
+                     gboolean done, gboolean dict_done,
+                     guint edone, guint etotal)
+{
+    FtsIdleData *d = g_new0(FtsIdleData, 1);
+    d->ctx        = ctx;
+    d->status     = status ? g_strdup(status) : NULL;
+    d->path       = path   ? g_strdup(path)   : NULL;
+    d->done       = done;
+    d->dict_done  = dict_done;
+    d->entry_done = edone;
+    d->entry_total= etotal;
+    g_idle_add(fts_idle_update, d);
+}
+
+static gpointer fts_build_worker(gpointer user_data)
+{
+    FtsIndexCtx *ctx = user_data;
+    GPtrArray   *list = ctx->to_index;
+    guint        total = list ? list->len : 0;
+
+    for (guint di = 0; di < total; di++) {
+        if (g_atomic_int_get(&ctx->cancel)) break;
+
+        /* DictEntry* — we only need name, path, and dict (DictMmap) */
+        DictEntry *e = g_ptr_array_index(list, di);
+
+        const char *dpath = e->path;
+        const char *dname = e->name;
+
+        char *st = g_strdup_printf("Indexing %u of %u: %s", di + 1, total, dname ? dname : "?");
+        fts_post(ctx, st, dpath, FALSE, FALSE, 0, 0);
+        g_free(st);
+
+        /* Open builder */
+        GError *err = NULL;
+        DictFtsBuilder *builder = dict_fts_builder_new(dpath, &err);
+        if (!builder) {
+            fprintf(stderr, "[FTS Builder] %s\n", err ? err->message : "?");
+            g_clear_error(&err);
+            fts_post(ctx, NULL, dpath, FALSE, TRUE, 0, 0);
+            continue;
+        }
+
+        /* Access flat index via the DictMmap stored in DictEntry */
+        struct DictMmap *dmmap = e->dict;
+
+        if (!dmmap || !dmmap->data || !dmmap->index) {
+            dict_fts_builder_abort(builder);
+            fts_post(ctx, NULL, dpath, FALSE, TRUE, 0, 0);
+            continue;
+        }
+
+        size_t count = flat_index_count(dmmap->index);
+        guint batch = 0;
+
+        for (size_t i = 0; i < count; i++) {
+            if (g_atomic_int_get(&ctx->cancel)) break;
+
+            const FlatTreeEntry *ent = flat_index_get(dmmap->index, i);
+            if (!ent) continue;
+
+            const char *hw  = dmmap->data + ent->h_off;
+            gsize        hwl = ent->h_len;
+            const char *def = NULL;
+            gsize        dl  = 0;
+            char        *to_free = NULL;
+
+            if (ent->d_len > 0) {
+                extern const char* dict_get_definition(struct DictMmap*, const FlatTreeEntry*, size_t*, char**);
+                def = dict_get_definition(dmmap, ent, &dl, &to_free);
+            }
+
+            dict_fts_builder_add(builder, (guint)i, hw, hwl, def, dl);
+            g_free(to_free);
+
+            batch++;
+            if (batch >= FTS_BATCH_SIZE) {
+                dict_fts_builder_commit_batch(builder);
+                batch = 0;
+                if ((i & 0x3FF) == 0)
+                    fts_post(ctx, NULL, dpath, FALSE, FALSE, (guint)i, (guint)count);
+            }
+        }
+
+        if (g_atomic_int_get(&ctx->cancel)) {
+            dict_fts_builder_abort(builder);
+        } else {
+            gboolean ok = dict_fts_builder_finish(builder, &err);
+            if (!ok) {
+                fprintf(stderr, "[FTS Builder] finish: %s\n", err ? err->message : "?");
+                g_clear_error(&err);
+            }
+        }
+
+        fts_post(ctx, NULL, dpath, FALSE, TRUE, 0, 0);
+    }
+
+    char *final_st = g_atomic_int_get(&ctx->cancel)
+        ? g_strdup("Indexing stopped.")
+        : g_strdup_printf("Done — %u dictionar%s indexed.",
+                          total, total == 1 ? "y" : "ies");
+    fts_post(ctx, final_st, NULL, TRUE, FALSE, 0, 0);
+    g_free(final_st);
+
+    /* Unref all entries */
+    if (list) {
+        for (guint i = 0; i < list->len; i++) {
+            dict_entry_unref(g_ptr_array_index(list, i));
+        }
+        g_ptr_array_free(list, TRUE);
+        ctx->to_index = NULL;
+    }
+
+    return NULL;
+}
+
+static void on_fts_start_clicked(GtkButton *btn, FtsIndexCtx *ctx)
+{
+    (void)btn;
+    if (ctx->worker) return;
+
+    /* Collect checked rows */
+    GPtrArray *selected = g_ptr_array_new();
+    for (int i = 0; ; i++) {
+        GtkListBoxRow *lr = gtk_list_box_get_row_at_index(ctx->list, i);
+        if (!lr) break;
+        GtkWidget *cb = g_object_get_data(G_OBJECT(lr), "row-check");
+        if (cb && gtk_check_button_get_active(GTK_CHECK_BUTTON(cb))) {
+            const char *path = g_object_get_data(G_OBJECT(lr), "dict-path");
+            if (path) g_ptr_array_add(selected, (char *)path); /* borrowed */
+        }
+    }
+
+    /* Build to_index from loaded dicts matching selected paths */
+    GPtrArray *snapshot = collect_fts_build_entries(); /* each entry ref'd */
+    GPtrArray *to_index = g_ptr_array_new();
+    if (snapshot) {
+        for (guint i = 0; i < snapshot->len; i++) {
+            DictEntry *e = g_ptr_array_index(snapshot, i);
+            for (guint j = 0; j < selected->len; j++) {
+                if (g_strcmp0(e->path, g_ptr_array_index(selected, j)) == 0) {
+                    g_ptr_array_add(to_index, e); /* transfer ref */
+                    break;
+                }
+            }
+        }
+        /* Unref entries NOT added to to_index */
+        for (guint i = 0; i < snapshot->len; i++) {
+            void *e = g_ptr_array_index(snapshot, i);
+            gboolean found = FALSE;
+            for (guint j = 0; j < to_index->len; j++) {
+                if (g_ptr_array_index(to_index, j) == e) { found = TRUE; break; }
+            }
+            if (!found) {
+                dict_entry_unref(e);
+            }
+        }
+        g_ptr_array_free(snapshot, TRUE);
+    }
+    g_ptr_array_free(selected, TRUE);
+
+    if (to_index->len == 0) {
+        g_ptr_array_free(to_index, TRUE);
+        if (ctx->status_label)
+            gtk_label_set_text(ctx->status_label, "No dictionaries selected.");
+        return;
+    }
+
+    ctx->to_index = to_index;
+    g_atomic_int_set(&ctx->cancel, 0);
+    gtk_widget_set_sensitive(ctx->start_btn, FALSE);
+    gtk_widget_set_sensitive(ctx->stop_btn, TRUE);
+    if (ctx->close_btn) gtk_widget_set_sensitive(ctx->close_btn, FALSE);
+    if (ctx->status_label) gtk_label_set_text(ctx->status_label, "Starting…");
+    ctx->worker = g_thread_new("fts-builder", fts_build_worker, ctx);
+}
+
+static void on_fts_stop_clicked(GtkButton *btn, FtsIndexCtx *ctx)
+{
+    (void)btn;
+    g_atomic_int_set(&ctx->cancel, 1);
+    gtk_widget_set_sensitive(ctx->stop_btn, FALSE);
+}
+
+static void on_fts_dialog_closed(FtsIndexCtx *ctx)
+{
+    g_atomic_int_set(&ctx->cancel, 1);
+    g_atomic_int_set(&ctx->closed, 1);
+    if (ctx->worker) {
+        g_thread_join(ctx->worker);
+        ctx->worker = NULL;
+    }
+    if (ctx->to_index) {
+        for (guint i = 0; i < ctx->to_index->len; i++) {
+            dict_entry_unref(g_ptr_array_index(ctx->to_index, i));
+        }
+        g_ptr_array_free(ctx->to_index, TRUE);
+        ctx->to_index = NULL;
+    }
+    g_free(ctx);
+}
+
+static void show_fts_builder_dialog(SettingsDialogData *sdd, GtkWindow *parent)
+{
+    FtsIndexCtx *ctx = g_new0(FtsIndexCtx, 1);
+    ctx->sdd    = sdd;
+    ctx->cancel = 0;
+    ctx->closed = 0;
+
+    AdwDialog *dialog = ADW_DIALOG(adw_dialog_new());
+    adw_dialog_set_title(dialog, "Build Full Text Search Index");
+    adw_dialog_set_content_width(dialog, 520);
+    adw_dialog_set_content_height(dialog, 460);
+    ctx->dialog = dialog;
+
+    GtkWidget *outer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    adw_dialog_set_child(dialog, outer);
+
+    /* Header toolbar */
+    AdwHeaderBar *hb = ADW_HEADER_BAR(adw_header_bar_new());
+    gtk_box_append(GTK_BOX(outer), GTK_WIDGET(hb));
+
+    GtkWidget *body = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
+    gtk_widget_set_margin_start(body, 18);
+    gtk_widget_set_margin_end(body, 18);
+    gtk_widget_set_margin_top(body, 12);
+    gtk_widget_set_margin_bottom(body, 18);
+    gtk_box_append(GTK_BOX(outer), body);
+
+    GtkWidget *desc = gtk_label_new(
+        "Select dictionaries to build a persistent SQLite FTS index.\n"
+        "Already-indexed dictionaries are pre-deselected.");
+    gtk_label_set_wrap(GTK_LABEL(desc), TRUE);
+    gtk_label_set_xalign(GTK_LABEL(desc), 0.0f);
+    gtk_widget_add_css_class(desc, "dim-label");
+    gtk_box_append(GTK_BOX(body), desc);
+
+    /* Dict list */
+    GtkWidget *scroll = gtk_scrolled_window_new();
+    gtk_widget_set_vexpand(scroll, TRUE);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll),
+                                   GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    gtk_box_append(GTK_BOX(body), scroll);
+
+    GtkListBox *list = GTK_LIST_BOX(gtk_list_box_new());
+    gtk_list_box_set_selection_mode(list, GTK_SELECTION_NONE);
+    gtk_widget_add_css_class(GTK_WIDGET(list), "boxed-list");
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), GTK_WIDGET(list));
+    ctx->list = list;
+
+    /* Populate rows from settings dict list */
+    if (sdd && sdd->settings) {
+        for (guint i = 0; i < sdd->settings->dictionaries->len; i++) {
+            DictConfig *cfg = g_ptr_array_index(sdd->settings->dictionaries, i);
+            if (!cfg->enabled) continue;
+
+            gboolean already = dict_fts_index_exists(cfg->path);
+
+            GtkWidget *row = adw_action_row_new();
+            adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row),
+                                          cfg->name && *cfg->name ? cfg->name : cfg->path);
+            adw_action_row_set_subtitle(ADW_ACTION_ROW(row), cfg->path);
+            g_object_set_data_full(G_OBJECT(row), "dict-path", g_strdup(cfg->path), g_free);
+
+            /* Spinner (hidden initially) */
+            GtkWidget *spin = gtk_spinner_new();
+            gtk_widget_set_visible(spin, FALSE);
+            adw_action_row_add_suffix(ADW_ACTION_ROW(row), spin);
+            g_object_set_data(G_OBJECT(row), "row-spin", spin);
+
+            /* Progress/status label */
+            GtkWidget *prog = gtk_label_new(already ? "✓ Indexed" : "Not indexed");
+            gtk_widget_add_css_class(prog, "dim-label");
+            adw_action_row_add_suffix(ADW_ACTION_ROW(row), prog);
+            g_object_set_data(G_OBJECT(row), "prog-label", prog);
+
+            /* Checkbox — pre-checked only if not already indexed */
+            GtkWidget *cb = gtk_check_button_new();
+            gtk_check_button_set_active(GTK_CHECK_BUTTON(cb), !already);
+            adw_action_row_add_prefix(ADW_ACTION_ROW(row), cb);
+            adw_action_row_set_activatable_widget(ADW_ACTION_ROW(row), cb);
+            g_object_set_data(G_OBJECT(row), "row-check", cb);
+
+            gtk_list_box_append(list, row);
+        }
+    }
+
+    /* Status label */
+    ctx->status_label = GTK_LABEL(gtk_label_new("Select dictionaries and press Start Indexing."));
+    gtk_label_set_xalign(ctx->status_label, 0.0f);
+    gtk_label_set_wrap(GTK_LABEL(ctx->status_label), TRUE);
+    gtk_box_append(GTK_BOX(body), GTK_WIDGET(ctx->status_label));
+
+    /* Button row */
+    GtkWidget *btn_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_widget_set_halign(btn_box, GTK_ALIGN_END);
+    gtk_box_append(GTK_BOX(body), btn_box);
+
+    ctx->close_btn = gtk_button_new_with_label("Close");
+    g_signal_connect_swapped(ctx->close_btn, "clicked",
+                             G_CALLBACK(adw_dialog_force_close), dialog);
+    gtk_box_append(GTK_BOX(btn_box), ctx->close_btn);
+
+    ctx->stop_btn = gtk_button_new_with_label("Stop");
+    gtk_widget_add_css_class(ctx->stop_btn, "destructive-action");
+    gtk_widget_set_sensitive(ctx->stop_btn, FALSE);
+    g_signal_connect(ctx->stop_btn, "clicked", G_CALLBACK(on_fts_stop_clicked), ctx);
+    gtk_box_append(GTK_BOX(btn_box), ctx->stop_btn);
+
+    ctx->start_btn = gtk_button_new_with_label("Start Indexing");
+    gtk_widget_add_css_class(ctx->start_btn, "suggested-action");
+    g_signal_connect(ctx->start_btn, "clicked", G_CALLBACK(on_fts_start_clicked), ctx);
+    gtk_box_append(GTK_BOX(btn_box), ctx->start_btn);
+
+    g_signal_connect_swapped(dialog, "closed", G_CALLBACK(on_fts_dialog_closed), ctx);
+    adw_dialog_present(dialog, parent ? GTK_WIDGET(parent) : NULL);
+}
+
+static void on_fts_switch_toggled(GtkSwitch *sw, GParamSpec *pspec,
+                                  SettingsDialogData *data)
+{
+    (void)pspec;
+    gboolean active = gtk_switch_get_active(sw);
+    data->settings->fts_enabled = active;
+    settings_save(data->settings);
+
+    if (active) {
+        show_fts_builder_dialog(data, data->parent_window);
+    }
+}
+
+static void on_fts_manage_clicked(AdwButtonRow *row, SettingsDialogData *data)
+{
+    (void)row;
+    show_fts_builder_dialog(data, data->parent_window);
+}
+
 /* ---- Scanning dialog implementation ---- */
 
 typedef struct {
@@ -2345,6 +2781,35 @@ GtkWidget* settings_dialog_new(GtkWindow *parent, AppSettings *settings,
     adw_preferences_row_set_title(ADW_PREFERENCES_ROW(shortcut_btn_row), "Configure Global Shortcut");
     // Handled in main.c during portal initialization as there's no native bind UI here
     adw_preferences_group_add(shortcut_group, GTK_WIDGET(shortcut_row));
+
+    /* ============================================================
+       Search group — FTS persistent index
+       ============================================================ */
+    AdwPreferencesGroup *search_group = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
+    adw_preferences_group_set_title(search_group, "Search");
+    adw_preferences_group_set_description(search_group,
+        "Full text search indexes definitions on disk for fast content lookup");
+    adw_preferences_page_add(system_page, search_group);
+
+    AdwSwitchRow *fts_row = ADW_SWITCH_ROW(adw_switch_row_new());
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(fts_row),
+                                  "Enable Full Text Search Index");
+    adw_action_row_set_subtitle(ADW_ACTION_ROW(fts_row),
+        "Creates per-dictionary SQLite indexes in ~/.cache/diction/fts/");
+    adw_switch_row_set_active(fts_row, settings->fts_enabled);
+    GtkWidget *fts_switch = adw_action_row_get_activatable_widget(ADW_ACTION_ROW(fts_row));
+    g_signal_connect(fts_switch, "notify::active",
+                     G_CALLBACK(on_fts_switch_toggled), data);
+    adw_preferences_group_add(search_group, GTK_WIDGET(fts_row));
+
+    AdwButtonRow *fts_manage_row = ADW_BUTTON_ROW(adw_button_row_new());
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(fts_manage_row),
+                                  "Build / Manage Indexes…");
+    g_signal_connect(fts_manage_row, "activated",
+                     G_CALLBACK(on_fts_manage_clicked), data);
+    adw_preferences_group_add(search_group, GTK_WIDGET(fts_manage_row));
+    g_object_bind_property(fts_row, "active", fts_manage_row, "sensitive",
+                           G_BINDING_SYNC_CREATE);
 
     /* ============================================================
        TAB 2 — Dictionaries

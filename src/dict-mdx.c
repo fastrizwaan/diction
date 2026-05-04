@@ -1105,6 +1105,11 @@ DictMmap *parse_mdx_file(const char *path, volatile gint *cancel_flag, gint expe
             }
         }
 
+        if (dict_cache_is_compressed(dict->data, dict->size)) {
+            dict->is_compressed = TRUE;
+            dict->chunk_reader = dict_chunk_reader_new(dict->data, dict->size, (const DictCacheHeader*)dict->data);
+        }
+
         if (!(cancel_flag && g_atomic_int_get(cancel_flag) != expected)) {
             dict->resource_dir = mdx_prepare_resource_dir(path, is_v2, num_size, encoding_is_utf16, encrypted, cancel_flag, expected, &dict->resource_reader);
             mdx_detect_icon(dict, path);

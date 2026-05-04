@@ -78,4 +78,12 @@ DictMmap* dict_load_any(const char *path, DictFormat fmt,
  * If out_to_free is non-NULL, it will be set to the pointer that needs to be freed (or NULL).
  */
 const char* dict_get_definition(DictMmap *dict, const FlatTreeEntry *entry, size_t *out_len, char **out_to_free);
-size_t      dict_search_fts(DictMmap *dict, const char *query, GRegex *regex, size_t start_pos);
+
+/* Full-text search via persistent SQLite FTS5 index.
+ * Returns the first flat-index position >= start_pos whose definition
+ * matches both the FTS5 pre-filter and the regex verification.
+ * Returns (size_t)-1 if fts_enabled is FALSE, the index is missing,
+ * or no match is found.  No full-scan fallback. */
+size_t dict_search_fts(DictMmap *dict, const char *dict_path,
+                       const char *query, GRegex *regex,
+                       size_t start_pos, gboolean fts_enabled);

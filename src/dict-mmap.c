@@ -18,14 +18,12 @@
 #include "dict-cache.h"
 #include "settings.h"
 #include "dict-chunked.h"
-#include "dict-fts-index.h"
 
 void dict_mmap_close(DictMmap *dict) {
     if (dict) {
         flat_index_close(dict->index);
         resource_reader_close(dict->resource_reader);
         if (dict->chunk_reader) dict_chunk_reader_free(dict->chunk_reader);
-        dict_fts_index_free(dict->fts_index);
         if (dict->data) munmap((void*)dict->data, dict->size);
         if (dict->fd >= 0) close(dict->fd);
         if (dict->tmp_file) fclose(dict->tmp_file);

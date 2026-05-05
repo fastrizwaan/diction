@@ -50,6 +50,13 @@ static uint32_t read_u32be(const unsigned char *p) {
            ((uint32_t)p[2] << 8) | p[3];
 }
 
+static uint64_t read_u64be(const unsigned char *p) {
+    return ((uint64_t)p[0] << 56) | ((uint64_t)p[1] << 48) |
+           ((uint64_t)p[2] << 40) | ((uint64_t)p[3] << 32) |
+           ((uint64_t)p[4] << 24) | ((uint64_t)p[5] << 16) |
+           ((uint64_t)p[6] << 8) | p[7];
+}
+
 static gboolean ends_with_ci(const char *s, const char *suffix) {
     size_t sl = strlen(s), xl = strlen(suffix);
     if (sl < xl) return FALSE;
@@ -320,6 +327,7 @@ static gboolean append_stardict_article(GString *article,
 static int parse_ifo_metadata(const char *ifo_path,
                               uint32_t *wordcount,
                               uint32_t *idxfilesize,
+                              int *idxoffsetbits,
                               char *sametypesequence,
                               size_t sts_len,
                               char **bookname) {
@@ -329,6 +337,7 @@ static int parse_ifo_metadata(const char *ifo_path,
     char line[1024];
     *wordcount = 0;
     *idxfilesize = 0;
+    *idxoffsetbits = 32;
     sametypesequence[0] = '\0';
     if (bookname) *bookname = NULL;
 
@@ -355,6 +364,8 @@ static int parse_ifo_metadata(const char *ifo_path,
             g_strlcpy(sametypesequence, line + 17, sts_len);
         } else if (strncmp(line, "bookname=", 9) == 0 && bookname) {
             *bookname = g_strdup(line + 9);
+        } else if (strncmp(line, "idxoffsetbits=", 14) == 0) {
+            *idxoffsetbits = atoi(line + 14);
         }
     }
 
@@ -368,6 +379,7 @@ static gboolean build_stardict_cache(DictCacheBuilder *builder,
                                      const unsigned char *dict_raw,
                                      size_t dict_raw_len,
                                      const char *sametypesequence,
+                                     int idxoffsetbits,
                                      TreeEntry **entries_out,
                                      size_t *entry_count_out,
                                      const char *path, volatile gint *cancel_flag, gint expected) {
@@ -375,7 +387,70 @@ static gboolean build_stardict_cache(DictCacheBuilder *builder,
     const unsigned char *ie = idx_data + idx_size;
     size_t cap = 4096;
     size_t count = 0;
-    TreeEntry *entries = g_new0(TreeEntry, cap);
+    TreeEntry *entries = g_malloc(cap * sizeof(TreeEntry));
+
+    int offset_size = (idxoffsetbits == 64) ? 8 : 4;
+    int size_size = 4;
+    int entry_size = offset_size + size_size;
+    
+    /* Heuristic to detect entry size (8, 12, or 16 bytes) */
+    if (idxoffsetbits == 64) {
+        const unsigned char *p = idx_data;
+        while (p < ie && *p != '\0') p++;
+        if (p < ie) {
+            p++; /* Skip NULL */
+            /* Try to guess entry size by looking for the next word's NULL terminator.
+             * We check 12, 16, and 8 (though 8 is unlikely for 64-bit offset). */
+            int possible_sizes[] = { 16, 12, 8 };
+            for (int j = 0; j < 3; j++) {
+                int s = possible_sizes[j];
+                if (p + s < ie) {
+                    /* If we assume size 's', the next word starts at p + s.
+                     * Let's see if it looks like a valid word (NULL terminated soon). */
+                    const unsigned char *p2 = p + s;
+                    int k = 0;
+                    while (k < 100 && p2 + k < ie && p2[k] != '\0') k++;
+                    if (k < 100 && p2 + k < ie && p2[k] == '\0') {
+                        /* Found a NULL within 100 bytes! This is a strong signal. */
+                        entry_size = s;
+                        offset_size = (s == 8) ? 4 : 8;
+                        size_size = s - offset_size;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    
+    /* Some 64-bit StarDict files (like GCIDE) store 32-bit Big Endian values
+     * at the START of 8-byte slots. We detect this by checking the first few entries. */
+    gboolean offset_is_shifted = FALSE;
+    gboolean size_is_shifted = FALSE;
+    if (offset_size == 8 || size_size == 8) {
+        const unsigned char *p = idx_data;
+        for (int k = 0; k < 100 && p < ie; k++) {
+            while (p < ie && *p != '\0') p++;
+            if (p >= ie) break;
+            p++; /* word\0 */
+            if (p + entry_size > ie) break;
+            
+            if (offset_size == 8 && !offset_is_shifted) {
+                uint32_t high = read_u32be(p);
+                uint32_t low = read_u32be(p + 4);
+                if (high > 0 && low == 0 && high <= (uint32_t)dict_raw_len) {
+                    offset_is_shifted = TRUE;
+                }
+            }
+            if (size_size == 8 && !size_is_shifted) {
+                uint32_t high = read_u32be(p + offset_size);
+                uint32_t low = read_u32be(p + offset_size + 4);
+                if (high > 0 && low == 0 && high <= (uint32_t)dict_raw_len) {
+                    size_is_shifted = TRUE;
+                }
+            }
+            p += entry_size;
+        }
+    }
 
     size_t last_notified_idx = 0;
     size_t notify_interval = idx_size / 20;
@@ -400,15 +475,26 @@ static gboolean build_stardict_cache(DictCacheBuilder *builder,
         size_t hw_len = ip - hw_start;
         ip++;
 
-        if (ip + 8 > ie) {
+        if (ip + entry_size > ie) {
             break;
         }
 
-        uint32_t def_offset = read_u32be(ip);
-        uint32_t def_size = read_u32be(ip + 4);
-        ip += 8;
+        uint64_t def_offset;
+        if (offset_size == 8) {
+            def_offset = offset_is_shifted ? (uint64_t)read_u32be(ip) : read_u64be(ip);
+        } else {
+            def_offset = (uint64_t)read_u32be(ip);
+        }
+        
+        uint64_t def_size;
+        if (size_size == 8) {
+            def_size = size_is_shifted ? (uint64_t)read_u32be(ip + offset_size) : read_u64be(ip + offset_size);
+        } else {
+            def_size = (uint64_t)read_u32be(ip + offset_size);
+        }
+        ip += entry_size;
 
-        if (def_offset > dict_raw_len || def_size > dict_raw_len - def_offset) {
+        if (def_offset > (uint64_t)dict_raw_len || def_size > (uint64_t)dict_raw_len - def_offset) {
             continue;
         }
 
@@ -501,11 +587,13 @@ DictMmap* parse_stardict(const char *ifo_path, volatile gint *cancel_flag, gint 
     if (cancel_flag && g_atomic_int_get(cancel_flag) != expected) return NULL;
     fprintf(stderr, "[IFO] Loading StarDict: %s\n", ifo_path);
 
-    uint32_t wordcount = 0, idxfilesize = 0;
-    char sametypesequence[64] = {0};
+    uint32_t wordcount = 0;
+    uint32_t idxfilesize = 0;
+    int idxoffsetbits = 32;
+    char sametypesequence[32];
     char *bookname = NULL;
 
-    if (parse_ifo_metadata(ifo_path, &wordcount, &idxfilesize,
+    if (parse_ifo_metadata(ifo_path, &wordcount, &idxfilesize, &idxoffsetbits,
                            sametypesequence, sizeof(sametypesequence), &bookname) != 0) {
         fprintf(stderr, "[IFO] Failed to parse .ifo: %s\n", ifo_path);
         g_free(bookname);
@@ -564,9 +652,69 @@ DictMmap* parse_stardict(const char *ifo_path, volatile gint *cancel_flag, gint 
         g_free(cache_path);
         g_free(idx_path);
         g_free(dict_path);
-        g_free(dict_raw);
         g_free(idx_data);
         return NULL;
+    }
+
+    /* Heuristic to auto-detect entry size (8, 12, or 16 bytes) if it's missing or unreliable.
+     * Some dictionaries like GCIDE have 64-bit offsets and 64-bit sizes (16 bytes total)
+     * even without the idxoffsetbits=64 flag. */
+    if (idxfilesize > 0 && wordcount > 0) {
+        int sizes[] = { 16, 12, 8 };
+        int best_size = (idxoffsetbits == 64) ? 12 : 8;
+        int max_score = -1;
+
+        for (int j = 0; j < 3; j++) {
+            int s = sizes[j];
+            const unsigned char *p = idx_data;
+            int score = 0;
+            int entries_checked = 0;
+            
+            for (int k = 0; k < 20 && p < idx_data + idx_size; k++) {
+                while (p < idx_data + idx_size && *p != '\0') p++;
+                if (p >= idx_data + idx_size) break;
+                p++; /* word\0 */
+                if (p + s > idx_data + idx_size) break;
+                
+                /* After skip s bytes, we should be at the start of a word.
+                 * A word should be NULL terminated within a reasonable distance
+                 * and contain printable characters. */
+                const unsigned char *p2 = p + s;
+                int len = 0;
+                while (len < 200 && p2 + len < idx_data + idx_size && p2[len] != '\0') {
+                    if (!isprint(p2[len]) && (p2[len] < 0x80)) {
+                        /* Non-printable ASCII is a bad sign for a word. */
+                        score -= 10;
+                        break;
+                    }
+                    len++;
+                }
+                if (p2 + len < idx_data + idx_size && p2[len] == '\0') {
+                    score += 5;
+                    if (len > 0) score += 2; /* non-empty word is better */
+                } else {
+                    score -= 5;
+                }
+                p = p2;
+                entries_checked++;
+            }
+            if (entries_checked > 0 && score >= max_score) {
+                /* If scores are tied, prefer the larger size (16 > 12 > 8) */
+                max_score = score;
+                best_size = s;
+            }
+        }
+        
+        if (best_size == 16) {
+            printf("[IFO] Auto-detected 16-byte entries (64-bit offset + 64-bit size) for %s\n", ifo_path);
+            idxoffsetbits = 64;
+        } else if (best_size == 12) {
+            printf("[IFO] Auto-detected 12-byte entries (64-bit offset + 32-bit size) for %s\n", ifo_path);
+            idxoffsetbits = 64;
+        } else if (best_size == 8 && idxoffsetbits == 64) {
+            /* If it was supposed to be 64 but heuristic says 8, trust the heuristic. */
+            idxoffsetbits = 32;
+        }
     }
 
     if (!dict_cache_prepare_target_path(cache_path, (guint64)dict_raw_len + (guint64)idx_size)) {
@@ -595,7 +743,7 @@ DictMmap* parse_stardict(const char *ifo_path, volatile gint *cancel_flag, gint 
     size_t entry_count = 0;
     settings_scan_progress_notify(ifo_path, 30);
     gboolean built = build_stardict_cache(builder, idx_data, idx_size, dict_raw, dict_raw_len,
-                                          sametypesequence, &entries, &entry_count,
+                                          sametypesequence, idxoffsetbits, &entries, &entry_count,
                                           ifo_path, cancel_flag, expected);
 
     if (built && entry_count > 0 && entries) {

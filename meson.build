@@ -51,7 +51,12 @@ srcs = [
   'src/tray-icon.c',
   'src/langid.c',
   'src/langpair.c',
-  'src/json-theme.c'
+  'src/json-theme.c',
+  'src/dictzip.c',
+  'src/mdx-decompress.c',
+  'src/dict-dictd.c',
+  'src/dict-stardict-render.c',
+  'src/text-utils.c'
 ]
 
 executable('diction', srcs,

@@ -2305,6 +2305,17 @@ static void on_decide_policy(WebKitWebView *v, WebKitPolicyDecision *d, WebKitPo
             g_free(unescaped);
             webkit_policy_decision_ignore(d);
             return;
+        } else if (g_str_has_prefix(uri, "gdlookup://localhost/")) {
+            const char *word = uri + 21;
+            char *unescaped = g_uri_unescape_string(word, NULL);
+            char *clean_link = normalize_headword_for_search(unescaped ? unescaped : word, TRUE);
+            const char *final_word = clean_link ? clean_link : (unescaped ? unescaped : word);
+            gtk_editable_set_text(GTK_EDITABLE(user_data), final_word);
+            execute_search_now_for_query(final_word, TRUE);
+            g_free(clean_link);
+            g_free(unescaped);
+            webkit_policy_decision_ignore(d);
+            return;
         } else if (g_str_has_prefix(uri, "sound://")) {
             if (!audio_try_play_encoded_sound_uri(uri, resolve_audio_resource_from_dictionaries, NULL)) {
                 const char *sound_file = uri + 8; // Skip "sound://"
@@ -4607,6 +4618,8 @@ static void collect_dictionary_candidate_paths_with_find(const char *dirpath,
     g_ptr_array_add(argv_array, g_strdup("-iname")); g_ptr_array_add(argv_array, g_strdup("*.tgz"));
     g_ptr_array_add(argv_array, g_strdup("-o"));
     g_ptr_array_add(argv_array, g_strdup("-iname")); g_ptr_array_add(argv_array, g_strdup("*.zip"));
+    g_ptr_array_add(argv_array, g_strdup("-o"));
+    g_ptr_array_add(argv_array, g_strdup("-iname")); g_ptr_array_add(argv_array, g_strdup("*.index"));
     g_ptr_array_add(argv_array, g_strdup(")"));
     g_ptr_array_add(argv_array, g_strdup("-not")); g_ptr_array_add(argv_array, g_strdup("-path")); g_ptr_array_add(argv_array, g_strdup("*/node_modules/*"));
     g_ptr_array_add(argv_array, g_strdup("-not")); g_ptr_array_add(argv_array, g_strdup("-path")); g_ptr_array_add(argv_array, g_strdup("*/.git/*"));

@@ -12,6 +12,15 @@ struct DictZip {
     uint32_t *lens;  /* Compressed lengths */
     uint64_t *offs;  /* Compressed offsets */
     uint64_t first_block_off;
+    
+    /* Multi-block cache for speed */
+    struct {
+        uint32_t idx;
+        unsigned char *buf;
+        size_t len;
+        uint64_t last_used;
+    } cache[8];
+    uint64_t cache_clock;
 };
 
 static uint16_t ru16(const unsigned char *p) { return p[0] | (p[1] << 8); }
@@ -61,11 +70,10 @@ DictZip* dictzip_open(const char *path) {
             for (uint32_t i = 0; i < dz->chcnt; i++) {
                 dz->lens[i] = ru16(p + 4 + 6 + 2 * i);
             }
-            
-            uint64_t off = dz->first_block_off;
-            for (uint32_t i = 0; i < dz->chcnt; i++) {
-                dz->offs[i] = off;
-                off += dz->lens[i];
+            for (uint32_t i = 0; i < 8; i++) {
+                dz->cache[i].idx = (uint32_t)-1;
+                dz->cache[i].buf = NULL;
+                dz->cache[i].last_used = 0;
             }
             break;
         }
@@ -121,39 +129,84 @@ unsigned char* dictzip_read(DictZip *dz, uint64_t offset, uint32_t length, size_
     size_t decomp_ptr = 0;
 
     for (uint32_t i = start_block; i <= end_block; i++) {
-        if (fseek(dz->f, dz->offs[i], SEEK_SET) != 0) {
-            printf("[DZ ERROR] fseek failed for block %u at offset %lu\n", i, (unsigned long)dz->offs[i]);
-            free(full_decomp); return NULL;
-        }
-        unsigned char *comp = malloc(dz->lens[i]);
-        if (!comp) {
-            printf("[DZ ERROR] Could not allocate comp buffer (%u bytes)\n", dz->lens[i]);
-            free(full_decomp); return NULL;
-        }
-        if (fread(comp, 1, dz->lens[i], dz->f) != dz->lens[i]) {
-            printf("[DZ ERROR] fread failed for block %u\n", i);
-            free(comp); free(full_decomp); return NULL;
+        size_t block_decomp_len = 0;
+        unsigned char *block_data = NULL;
+
+        int cache_hit = -1;
+        for (int j = 0; j < 8; j++) {
+            if (dz->cache[j].idx == i && dz->cache[j].buf) {
+                cache_hit = j;
+                break;
+            }
         }
 
-        z_stream strm = {0};
-        strm.next_in = comp;
-        strm.avail_in = dz->lens[i];
-        strm.next_out = full_decomp + decomp_ptr;
-        strm.avail_out = dz->chlen;
+        if (cache_hit >= 0) {
+            block_data = dz->cache[cache_hit].buf;
+            block_decomp_len = dz->cache[cache_hit].len;
+            dz->cache[cache_hit].last_used = ++dz->cache_clock;
+        } else {
+            if (fseek(dz->f, dz->offs[i], SEEK_SET) != 0) {
+                free(full_decomp); return NULL;
+            }
+            unsigned char *comp = malloc(dz->lens[i]);
+            if (!comp) {
+                free(full_decomp); return NULL;
+            }
+            if (fread(comp, 1, dz->lens[i], dz->f) != dz->lens[i]) {
+                free(comp); free(full_decomp); return NULL;
+            }
 
-        if (inflateInit2(&strm, -15) != Z_OK) {
-            printf("[DZ ERROR] inflateInit2 failed\n");
-            free(comp); free(full_decomp); return NULL;
-        }
-        int ret = inflate(&strm, Z_FINISH);
-        inflateEnd(&strm);
-        free(comp);
+            z_stream strm = {0};
+            strm.next_in = comp;
+            strm.avail_in = dz->lens[i];
+            
+            size_t block_buf_size = dz->chlen + 4096;
+            unsigned char *block_buf = malloc(block_buf_size);
+            if (!block_buf) {
+                free(comp); free(full_decomp); return NULL;
+            }
+            
+            strm.next_out = block_buf;
+            strm.avail_out = block_buf_size;
 
-        if (ret != Z_STREAM_END && ret != Z_OK) {
-            printf("[DZ ERROR] inflate failed with ret %d for block %u\n", ret, i);
-            free(full_decomp); return NULL;
+            if (inflateInit2(&strm, -15) != Z_OK) {
+                free(block_buf); free(comp); free(full_decomp); return NULL;
+            }
+            
+            int ret = inflate(&strm, Z_SYNC_FLUSH);
+            block_decomp_len = block_buf_size - strm.avail_out;
+            inflateEnd(&strm);
+            free(comp);
+
+            if (ret != Z_STREAM_END && ret != Z_OK) {
+                free(block_buf); free(full_decomp); return NULL;
+            }
+
+            /* LRU replacement */
+            int target = 0;
+            uint64_t oldest = dz->cache[0].last_used;
+            for (int j = 1; j < 8; j++) {
+                if (dz->cache[j].last_used < oldest) {
+                    oldest = dz->cache[j].last_used;
+                    target = j;
+                }
+            }
+            
+            free(dz->cache[target].buf);
+            dz->cache[target].buf = block_buf;
+            dz->cache[target].idx = i;
+            dz->cache[target].len = block_decomp_len;
+            dz->cache[target].last_used = ++dz->cache_clock;
+            block_data = block_buf;
         }
-        decomp_ptr += (dz->chlen - strm.avail_out);
+        
+        if (decomp_ptr + block_decomp_len > total_buf_size) {
+            total_buf_size = decomp_ptr + block_decomp_len + dz->chlen;
+            full_decomp = realloc(full_decomp, total_buf_size);
+        }
+        
+        memcpy(full_decomp + decomp_ptr, block_data, block_decomp_len);
+        decomp_ptr += block_decomp_len;
     }
 
     uint32_t in_block_off = (uint32_t)(offset % dz->chlen);
@@ -176,6 +229,7 @@ void dictzip_close(DictZip *dz) {
     if (dz->f) fclose(dz->f);
     free(dz->lens);
     free(dz->offs);
+    for (int i = 0; i < 8; i++) free(dz->cache[i].buf);
     free(dz);
 }
 

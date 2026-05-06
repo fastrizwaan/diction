@@ -2147,6 +2147,55 @@ void dict_render_get_theme_palette(const char *theme_name, int dark_mode, dsl_th
         out->pos = out->accent;
     }
 }
+
+static void transform_dictd_markup(GString *out, const char *text, size_t len) {
+    if (len == 0) return;
+    g_string_append(out, "<div class=\"dictd_article\">");
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)text[i];
+        if (c == '\\') {
+            size_t end = i + 1;
+            while (end < len && text[end] != '\\' && text[end] != '\n') end++;
+            if (end < len && text[end] == '\\') {
+                g_string_append(out, "<span class=\"dictd_phonetic\">");
+                char *phonetic = g_strndup(text + i + 1, end - i - 1);
+                char *escaped = g_markup_escape_text(phonetic, -1);
+                g_string_append(out, escaped);
+                g_free(escaped);
+                g_free(phonetic);
+                g_string_append(out, "</span>");
+                i = end;
+                continue;
+            }
+        } else if (c == '{') {
+            size_t end = i + 1;
+            while (end < len && text[end] != '}' && text[end] != '\n') end++;
+            if (end < len && text[end] == '}') {
+                char *link = g_strndup(text + i + 1, end - i - 1);
+                char *escaped_link = g_uri_escape_string(link, NULL, FALSE);
+                g_string_append_printf(out, "<a href=\"gdlookup://localhost/%s\">", escaped_link);
+                char *escaped = g_markup_escape_text(link, -1);
+                g_string_append(out, escaped);
+                g_free(escaped);
+                g_string_append(out, "</a>");
+                g_free(escaped_link);
+                g_free(link);
+                i = end;
+                continue;
+            }
+        }
+        switch (c) {
+            case '<': g_string_append(out, "&lt;"); break;
+            case '>': g_string_append(out, "&gt;"); break;
+            case '&': g_string_append(out, "&amp;"); break;
+            case '"': g_string_append(out, "&quot;"); break;
+            case '\n': g_string_append(out, "<br/>"); break;
+            case '\r': break;
+            default: g_string_append_c(out, c); break;
+        }
+    }
+    g_string_append(out, "</div>");
+}
 char* dsl_render_to_html(const char *dsl_text,
                          size_t length,
                          const char *headword,
@@ -2170,6 +2219,7 @@ char* dsl_render_to_html(const char *dsl_text,
     gboolean slate_style = g_strcmp0(render_style, "slate-card") == 0;
     gboolean paper_style = g_strcmp0(render_style, "paper") == 0;
     gboolean diction_style = !python_style && !goldendict_style && !slate_style && !paper_style;
+    gboolean is_kyw = FALSE;
 
     /* Build font CSS value from user settings, with sensible fallback */
     const char *ff = (font_family && *font_family) ? font_family : "system-ui,sans-serif";
@@ -2490,6 +2540,7 @@ char* dsl_render_to_html(const char *dsl_text,
 
     /* MDX thesaurus expand/collapse support (Cambridge SMART Thesaurus, etc.) */
     if (format == DICT_FORMAT_MDX) {
+        is_kyw = (g_strstr_len(dsl_text, length, "eol") != NULL || g_strstr_len(dsl_text, length, "ypu") != NULL);
         /* Derive pill background from link_color */
         char pill_bg[64];
         char pill_hover[64];
@@ -2570,7 +2621,6 @@ char* dsl_render_to_html(const char *dsl_text,
             link_color);
         buf_append_str(&b, "img.gph:hover{opacity:1;}");
         buf_append_str(&b, ".ypu{display:none;margin:0.4em 0 0.2em 0.5em;}");
-        buf_append_str(&b, ".iqz{margin:0.3em 0;font-size:0.9em;border-left:2px solid ");
         buf_append_str(&b, border_color);
         buf_append_str(&b, ";padding-left:0.5em;}");
 
@@ -2596,44 +2646,46 @@ char* dsl_render_to_html(const char *dsl_text,
 
         buf_append_str(&b, "</style>");
 
-        buf_append_str(&b,
-            "<script>"
-            "function cacd_openShutManager(el,id){"
-            "  if(typeof event!=='undefined'&&event&&event.preventDefault)event.preventDefault();"
-            "  var box=document.getElementById(id);"
-            "  if(!box)return false;"
-            "  var open=box.style.display!=='none'&&box.style.display!=='';"
-            "  box.style.display=open?'none':'block';"
-            "  el.classList.toggle('open',!open);"
-            "  return false;"
-            "}"
-            /* kyw — Wiktionary toggle handlers */
-            "var kyw={"
-            /* kyw.s(img): toggle next-sibling section (Etymology .eol) */
-            "  s:function(img){"
-            "    if(typeof event!=='undefined'&&event&&event.preventDefault)event.preventDefault();"
-            "    var h=img.parentElement;"
-            "    var box=h?h.nextElementSibling:null;"
-            "    while(box&&box.nodeType===1&&(box.tagName==='SCRIPT'||box.tagName==='BR'))box=box.nextElementSibling;"
-            "    if(!box||box.nodeType!==1)return false;"
-            "    var open=box.style.display!=='none';"
-            "    box.style.display=open?'none':'';"
-            "    img.style.transform=open?'rotate(180deg)':'';"
-            "    return false;"
-            "  },"
-            /* kyw.q(img): toggle immediately-following sibling div (quotations .ypu) */
-            "  q:function(img){"
-            "    if(typeof event!=='undefined'&&event&&event.preventDefault)event.preventDefault();"
-            "    var box=img.nextSibling;"
-            "    while(box&&box.nodeType!==1)box=box.nextSibling;"
-            "    if(!box)return false;"
-            "    var open=box.style.display!=='none'&&box.style.display!=='';"
-            "    box.style.display=open?'none':'block';"
-            "    img.classList.toggle('open',!open);"
-            "    return false;"
-            "  }"
-            "};"
-            "</script>");
+        if (is_kyw) {
+            buf_append_str(&b,
+                "<script>"
+                "function cacd_openShutManager(el,id){"
+                "  if(typeof event!=='undefined'&&event&&event.preventDefault)event.preventDefault();"
+                "  var box=document.getElementById(id);"
+                "  if(!box)return false;"
+                "  var open=box.style.display!=='none'&&box.style.display!=='';"
+                "  box.style.display=open?'none':'block';"
+                "  el.classList.toggle('open',!open);"
+                "  return false;"
+                "}"
+                /* kyw — Wiktionary toggle handlers */
+                "var kyw={"
+                /* kyw.s(img): toggle next-sibling section (Etymology .eol) */
+                "  s:function(img){"
+                "    if(typeof event!=='undefined'&&event&&event.preventDefault)event.preventDefault();"
+                "    var h=img.parentElement;"
+                "    var box=h?h.nextElementSibling:null;"
+                "    while(box&&box.nodeType===1&&(box.tagName==='SCRIPT'||box.tagName==='BR'))box=box.nextElementSibling;"
+                "    if(!box||box.nodeType!==1)return false;"
+                "    var open=box.style.display!=='none';"
+                "    box.style.display=open?'none':'';"
+                "    img.style.transform=open?'rotate(180deg)':'';"
+                "    return false;"
+                "  },"
+                /* kyw.q(img): toggle immediately-following sibling div (quotations .ypu) */
+                "  q:function(img){"
+                "    if(typeof event!=='undefined'&&event&&event.preventDefault)event.preventDefault();"
+                "    var box=img.nextSibling;"
+                "    while(box&&box.nodeType!==1)box=box.nextSibling;"
+                "    if(!box)return false;"
+                "    var open=box.style.display!=='none'&&box.style.display!=='';"
+                "    box.style.display=open?'none':'block';"
+                "    img.classList.toggle('open',!open);"
+                "    return false;"
+                "  }"
+                "};"
+                "</script>");
+        }
     }
 
     if (python_style) {
@@ -2658,8 +2710,23 @@ char* dsl_render_to_html(const char *dsl_text,
         buf_append_str(&b, "<div class='rendered-entry-body'>");
     }
 
-    if (format == DICT_FORMAT_MDX || format == DICT_FORMAT_STARDICT || format == DICT_FORMAT_BGL || format == DICT_FORMAT_SLOB || format == DICT_FORMAT_XDXF) {
-        gboolean treat_as_html = (format == DICT_FORMAT_MDX || format == DICT_FORMAT_STARDICT || format == DICT_FORMAT_BGL || format == DICT_FORMAT_SLOB || looks_like_html(dsl_text, length));
+    if (format == DICT_FORMAT_DICTD) {
+        GString *dictd_res = g_string_new("");
+        transform_dictd_markup(dictd_res, dsl_text, length);
+        buf_append_str(&b, dictd_res->str);
+        g_string_free(dictd_res, TRUE);
+        buf_append_str(&b, "</div></div>");
+        g_free(normalized_plain_text);
+        g_free(styled_text);
+        g_free(display_headword);
+        return finalize_placeholder_dict_links(b.str);
+    }
+
+    if (format == DICT_FORMAT_MDX || format == DICT_FORMAT_STARDICT || format == DICT_FORMAT_BGL || 
+        format == DICT_FORMAT_SLOB || format == DICT_FORMAT_XDXF) {
+        gboolean treat_as_html = (format == DICT_FORMAT_MDX || format == DICT_FORMAT_STARDICT || 
+                                  format == DICT_FORMAT_BGL || format == DICT_FORMAT_SLOB || 
+                                  looks_like_html(dsl_text, length));
         gboolean treat_as_tagged_plain = (!treat_as_html && looks_like_tagged_plain_markup(dsl_text, length));
 
         if (!treat_as_html && !treat_as_tagged_plain) {

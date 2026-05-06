@@ -11,8 +11,12 @@
 #include "dict-mmap.h"
 #include "dict-loader.h"
 #include "dict-render.h"
+#include "global-shortcut.h"
 #include "settings.h"
+#include "audio-playback.h"
 #include "scan-popup.h"
+#include "search-utils.h"
+#include "startup-splash.h"
 #include "tray-icon.h"
 
 static DictEntry *all_dicts = NULL;
@@ -101,29 +105,9 @@ static WebKitUserContentManager *font_ucm = NULL;       /* shared across web vie
 static WebKitUserStyleSheet *font_user_stylesheet = NULL; /* current injected font CSS */
 static GtkWindow *main_window = NULL;
 static void app_show_window(void);
-static GtkWindow *startup_splash_window = NULL;
-static GtkLabel *startup_splash_status_label = NULL;
-static GtkLabel *startup_splash_count_label = NULL;
-static GtkProgressBar *startup_splash_progress = NULL;
-static guint startup_splash_pulse_id = 0;
-static gboolean startup_loading_active = FALSE;
 static gboolean dictionary_loading_in_progress = FALSE;
 static gint64 rescan_suppress_until = 0;
 static gboolean startup_random_word_pending = FALSE;
-
-#define GLOBAL_SHORTCUT_ID "diction-scan-shortcut"
-#define GLOBAL_SHORTCUT_TRIGGER "Super+Alt+L"
-
-typedef enum {
-    PORTAL_REQUEST_CREATE_SHORTCUT_SESSION = 1,
-    PORTAL_REQUEST_BIND_SHORTCUTS = 2
-} PortalRequestKind;
-
-static GDBusConnection *global_shortcut_conn = NULL;
-static char *global_shortcut_session_handle = NULL;
-static guint global_shortcut_signal_sub_id = 0;
-static guint global_shortcut_create_response_sub_id = 0;
-static guint global_shortcut_bind_response_sub_id = 0;
 
 typedef enum {
     SIDEBAR_ROW_HINT = 0,
@@ -154,96 +138,6 @@ static SidebarListView favorites_sidebar = {0};
 
 static GtkCssProvider *dynamic_theme_provider = NULL;
 
-static gboolean pulse_startup_splash(gpointer user_data) {
-    (void)user_data;
-    if (!startup_loading_active || !startup_splash_progress) {
-        startup_splash_pulse_id = 0;
-        return G_SOURCE_REMOVE;
-    }
-
-    gtk_progress_bar_pulse(startup_splash_progress);
-    return G_SOURCE_CONTINUE;
-}
-
-static void ensure_startup_splash_pulsing(void) {
-    if (startup_splash_pulse_id != 0) {
-        return;
-    }
-
-    if (!startup_splash_progress) {
-        return;
-    }
-
-    gtk_progress_bar_set_pulse_step(startup_splash_progress, 0.08);
-    startup_splash_pulse_id = g_timeout_add(80, pulse_startup_splash, NULL);
-}
-
-static void stop_startup_splash_pulsing(void) {
-    if (startup_splash_pulse_id != 0) {
-        g_source_remove(startup_splash_pulse_id);
-        startup_splash_pulse_id = 0;
-    }
-}
-
-static void update_startup_splash_progress(guint completed, guint total, const char *status_text) {
-    if (!startup_splash_window) {
-        return;
-    }
-
-    if (startup_splash_status_label) {
-        if (status_text && *status_text) {
-            gtk_label_set_text(startup_splash_status_label, status_text);
-        } else if (total > 0) {
-            char *fallback = g_strdup_printf("Loading dictionaries... %u/%u", completed, total);
-            gtk_label_set_text(startup_splash_status_label, fallback);
-            g_free(fallback);
-        } else {
-            gtk_label_set_text(startup_splash_status_label, "Preparing dictionary library...");
-        }
-    }
-
-    if (!startup_splash_progress) {
-        return;
-    }
-
-    if (total > 0) {
-        if (startup_splash_count_label) {
-            char *count = g_strdup_printf("%u of %u", completed, total);
-            gtk_label_set_text(startup_splash_count_label, count);
-            g_free(count);
-        }
-        stop_startup_splash_pulsing();
-        gtk_progress_bar_set_fraction(startup_splash_progress,
-            CLAMP((gdouble)completed / (gdouble)MAX(total, 1), 0.0, 1.0));
-    } else {
-        if (startup_splash_count_label) {
-            gtk_label_set_text(startup_splash_count_label, "Scanning...");
-        }
-        gtk_progress_bar_set_fraction(startup_splash_progress, 0.0);
-        ensure_startup_splash_pulsing();
-    }
-}
-
-static GtkWidget *create_startup_splash_logo(void) {
-    char *cwd = g_get_current_dir();
-    char *icon_path = g_build_filename(cwd,
-                                       "data", "icons",
-                                       "io.github.fastrizwaan.diction.svg",
-                                       NULL);
-    GtkWidget *image = NULL;
-
-    if (g_file_test(icon_path, G_FILE_TEST_EXISTS)) {
-        image = gtk_image_new_from_file(icon_path);
-    } else {
-        image = gtk_image_new_from_icon_name("io.github.fastrizwaan.diction");
-    }
-
-    gtk_image_set_pixel_size(GTK_IMAGE(image), 48);
-    g_free(cwd);
-    g_free(icon_path);
-    return image;
-}
-
 /* Request cancellation of the current loader generation (called from UI). */
 void request_loader_cancel(void) {
     g_atomic_int_inc(&loader_generation);
@@ -252,184 +146,6 @@ void request_loader_cancel(void) {
         g_cancellable_cancel(loader_cancellable);
     }
     g_mutex_unlock(&loader_cancel_mutex);
-}
-
-static void ensure_startup_splash_css(void) {
-    static GtkCssProvider *provider = NULL;
-    if (provider) {
-        return;
-    }
-
-    provider = gtk_css_provider_new();
-    gtk_css_provider_load_from_string(provider,
-        "window.startup-splash {"
-        "  background: transparent;"
-        "}"
-        ".startup-shell {"
-        "  margin: 18px;"
-        "  border-radius: 28px;"
-        "  padding: 32px 36px;"
-        "  border: 1px solid alpha(@accent_bg_color, 0.2);"
-        "  background: linear-gradient(135deg, alpha(@accent_bg_color, 0.12), @window_bg_color);"
-        "  box-shadow: 0 16px 48px rgba(0,0,0,0.22);"
-        "}"
-        ".startup-logo-wrap {"
-        "  min-width: 88px;"
-        "  min-height: 88px;"
-        "  border-radius: 24px;"
-        "  background: alpha(@accent_bg_color, 0.16);"
-        "  box-shadow: inset 0 2px 4px rgba(255,255,255,0.1);"
-        "}"
-        ".startup-title {"
-        "  font-size: 1.85rem;"
-        "  font-weight: 800;"
-        "  letter-spacing: -0.03em;"
-        "  color: @accent_color;"
-        "}"
-        ".startup-subtitle {"
-        "  opacity: 0.75;"
-        "  font-size: 1.0rem;"
-        "  line-height: 1.4;"
-        "}"
-        ".startup-meta {"
-        "  min-height: 24px;"
-        "  margin-top: 20px;"
-        "}"
-        ".startup-status {"
-        "  opacity: 0.85;"
-        "  font-size: 0.94rem;"
-        "  font-weight: 500;"
-        "}"
-        ".startup-count {"
-        "  opacity: 0.65;"
-        "  font-size: 0.88rem;"
-        "  font-variant-numeric: tabular-nums;"
-        "}"
-        ".startup-progress trough {"
-        "  background: alpha(@accent_bg_color, 0.1);"
-        "  border: none;"
-        "}"
-        ".startup-progress progress {"
-        "  background: @accent_bg_color;"
-        "  border: none;"
-        "  min-height: 8px;"
-        "  border-radius: 999px;"
-        "}"
-        ".startup-stop-btn {"
-        "  margin-left: 16px;"
-        "  padding: 8px;"
-        "  border-radius: 12px;"
-        "  transition: all 0.2s ease;"
-        "}"
-        ".startup-stop-btn:hover {"
-        "  background: alpha(@error_bg_color, 0.15);"
-        "  color: @error_color;"
-        "}");
-
-    gtk_style_context_add_provider_for_display(gdk_display_get_default(),
-        GTK_STYLE_PROVIDER(provider),
-        GTK_STYLE_PROVIDER_PRIORITY_APPLICATION + 1);
-}
-
-static void show_startup_splash(GtkApplication *app) {
-    if (startup_splash_window) {
-        return;
-    }
-
-    ensure_startup_splash_css();
-
-    GtkWindow *window = GTK_WINDOW(gtk_window_new());
-    gtk_window_set_application(window, app);
-    gtk_window_set_title(window, "Diction");
-    gtk_window_set_default_size(window, 520, 200);
-    gtk_window_set_resizable(window, FALSE);
-    gtk_window_set_decorated(window, FALSE);
-    gtk_window_set_modal(window, FALSE);
-    gtk_window_set_hide_on_close(window, TRUE);
-    gtk_window_set_icon_name(window, "io.github.fastrizwaan.diction");
-    if (main_window) {
-        gtk_window_set_transient_for(window, main_window);
-    }
-    gtk_widget_add_css_class(GTK_WIDGET(window), "startup-splash");
-
-    GtkWidget *outer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_widget_add_css_class(outer, "startup-shell");
-    gtk_window_set_child(window, outer);
-
-    GtkWidget *header = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 16);
-    gtk_box_append(GTK_BOX(outer), header);
-
-    GtkWidget *logo_wrap = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_widget_add_css_class(logo_wrap, "startup-logo-wrap");
-    gtk_widget_set_halign(logo_wrap, GTK_ALIGN_CENTER);
-    gtk_widget_set_valign(logo_wrap, GTK_ALIGN_CENTER);
-    gtk_box_append(GTK_BOX(header), logo_wrap);
-    gtk_box_append(GTK_BOX(logo_wrap), create_startup_splash_logo());
-
-    GtkWidget *copy = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
-    gtk_widget_set_hexpand(copy, TRUE);
-    gtk_widget_set_valign(copy, GTK_ALIGN_CENTER);
-    gtk_box_append(GTK_BOX(header), copy);
-
-    GtkWidget *title = gtk_label_new("Diction");
-    gtk_widget_add_css_class(title, "startup-title");
-    gtk_label_set_xalign(GTK_LABEL(title), 0.0f);
-    gtk_box_append(GTK_BOX(copy), title);
-
-    GtkWidget *stop_btn = gtk_button_new_from_icon_name("media-playback-stop-symbolic");
-    gtk_widget_add_css_class(stop_btn, "flat");
-    gtk_widget_add_css_class(stop_btn, "startup-stop-btn");
-    gtk_widget_set_valign(stop_btn, GTK_ALIGN_CENTER);
-    gtk_widget_set_tooltip_text(stop_btn, "Stop and Load App");
-    g_signal_connect(stop_btn, "clicked", G_CALLBACK(request_loader_cancel), NULL);
-    gtk_box_append(GTK_BOX(header), stop_btn);
-
-    GtkWidget *subtitle = gtk_label_new("A fast and lightweight dictionary application");
-    gtk_widget_add_css_class(subtitle, "startup-subtitle");
-    gtk_label_set_xalign(GTK_LABEL(subtitle), 0.0f);
-    gtk_label_set_wrap(GTK_LABEL(subtitle), TRUE);
-    gtk_box_append(GTK_BOX(copy), subtitle);
-
-    GtkWidget *meta = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
-    gtk_widget_add_css_class(meta, "startup-meta");
-    gtk_widget_set_margin_top(meta, 14);
-    gtk_box_append(GTK_BOX(outer), meta);
-
-    startup_splash_status_label = GTK_LABEL(gtk_label_new("Preparing dictionary library..."));
-    gtk_widget_add_css_class(GTK_WIDGET(startup_splash_status_label), "startup-status");
-    gtk_label_set_xalign(startup_splash_status_label, 0.0f);
-    gtk_label_set_ellipsize(startup_splash_status_label, PANGO_ELLIPSIZE_END);
-    gtk_widget_set_hexpand(GTK_WIDGET(startup_splash_status_label), TRUE);
-    gtk_box_append(GTK_BOX(meta), GTK_WIDGET(startup_splash_status_label));
-
-    startup_splash_count_label = GTK_LABEL(gtk_label_new("Scanning..."));
-    gtk_widget_add_css_class(GTK_WIDGET(startup_splash_count_label), "startup-count");
-    gtk_label_set_xalign(startup_splash_count_label, 1.0f);
-    gtk_box_append(GTK_BOX(meta), GTK_WIDGET(startup_splash_count_label));
-
-    startup_splash_progress = GTK_PROGRESS_BAR(gtk_progress_bar_new());
-    gtk_widget_add_css_class(GTK_WIDGET(startup_splash_progress), "startup-progress");
-    gtk_widget_set_margin_top(GTK_WIDGET(startup_splash_progress), 12);
-    gtk_box_append(GTK_BOX(outer), GTK_WIDGET(startup_splash_progress));
-
-    startup_splash_window = window;
-    startup_loading_active = TRUE;
-    update_startup_splash_progress(0, 0, "Preparing dictionary library...");
-    gtk_window_present(window);
-}
-
-static void close_startup_splash(void) {
-    stop_startup_splash_pulsing();
-    startup_loading_active = FALSE;
-
-    if (startup_splash_window) {
-        gtk_window_destroy(startup_splash_window);
-    }
-
-    startup_splash_window = NULL;
-    startup_splash_status_label = NULL;
-    startup_splash_count_label = NULL;
-    startup_splash_progress = NULL;
 }
 
 /* Safely produce a markup-escaped UTF-8 string from possibly-binary input.
@@ -559,455 +275,6 @@ typedef struct {
     double fuzzy_score;
 } RelatedRowPayload;
 
-static gboolean spawn_audio_argv(const char *const *argv, const char *label) {
-    GError *error = NULL;
-    gboolean ok = g_spawn_async(NULL,
-                                (char **)argv,
-                                NULL,
-                                G_SPAWN_SEARCH_PATH |
-                                G_SPAWN_STDOUT_TO_DEV_NULL |
-                                G_SPAWN_STDERR_TO_DEV_NULL,
-                                NULL,
-                                NULL,
-                                NULL,
-                                &error);
-    if (ok) {
-        fprintf(stderr, "[AUDIO PLAY] Playing with '%s'...\n", label);
-        return TRUE;
-    }
-
-    g_clear_error(&error);
-    return FALSE;
-}
-
-static gboolean spawn_audio_shell_command(const char *command, const char *label) {
-    const char *argv[] = { "/bin/sh", "-c", command, NULL };
-    return spawn_audio_argv(argv, label);
-}
-
-static gboolean path_has_extension(const char *path, const char *ext) {
-    const char *dot = strrchr(path, '.');
-    return dot && g_ascii_strcasecmp(dot, ext) == 0;
-}
-
-static gboolean looks_like_url(const char *path) {
-    return path && (g_str_has_prefix(path, "http://") || g_str_has_prefix(path, "https://"));
-}
-
-static gboolean play_audio_via_pcm_pipeline(const char *audio_path) {
-    if (!g_find_program_in_path("ffmpeg")) {
-        return FALSE;
-    }
-
-    char *quoted = g_shell_quote(audio_path);
-    gboolean ok = FALSE;
-
-    if (g_find_program_in_path("pw-play")) {
-        char *cmd = g_strdup_printf(
-            "ffmpeg -nostdin -loglevel error -i %s -f s16le -acodec pcm_s16le -ac 2 -ar 48000 - | "
-            "pw-play --raw --format s16 --channels 2 --rate 48000 -",
-            quoted);
-        ok = spawn_audio_shell_command(cmd, "ffmpeg | pw-play");
-        g_free(cmd);
-    } else if (g_find_program_in_path("aplay")) {
-        char *cmd = g_strdup_printf(
-            "ffmpeg -nostdin -loglevel error -i %s -f s16le -acodec pcm_s16le -ac 2 -ar 48000 - | "
-            "aplay -q -f S16_LE -c 2 -r 48000 -",
-            quoted);
-        ok = spawn_audio_shell_command(cmd, "ffmpeg | aplay");
-        g_free(cmd);
-    }
-
-    g_free(quoted);
-    return ok;
-}
-
-static gboolean play_audio_via_gstreamer(const char *audio_path, gboolean is_spx) {
-    if (!g_find_program_in_path("gst-launch-1.0")) {
-        return FALSE;
-    }
-
-    gboolean ok = FALSE;
-    char *uri = NULL;
-    GError *error = NULL;
-
-    if (looks_like_url(audio_path)) {
-        uri = g_strdup(audio_path);
-    } else {
-        uri = g_filename_to_uri(audio_path, NULL, &error);
-        if (!uri) {
-            g_clear_error(&error);
-            return FALSE;
-        }
-    }
-
-    const guint buffer_size = is_spx ? 262144 : 65536;
-    char *quoted_uri = g_shell_quote(uri);
-    char *cmd = g_strdup_printf(
-        "gst-launch-1.0 -q playbin uri=%s audio-sink='queue max-size-bytes=%u ! autoaudiosink'",
-        quoted_uri, buffer_size);
-
-    ok = spawn_audio_shell_command(cmd, "gst-playbin");
-
-    g_free(cmd);
-    g_free(quoted_uri);
-    g_free(uri);
-    return ok;
-}
-
-static void play_audio_file(const char *audio_path) {
-    fprintf(stderr, "[AUDIO PLAY] Attempting to play: %s\n", audio_path);
-
-    /* Prefer GStreamer-based playback which handles many formats
-     * and allows configuring a larger internal queue for `.spx` files
-     * to reduce stuttering. Fall back to ffmpeg->pw-play/aplay if needed. */
-    if (play_audio_via_gstreamer(audio_path, path_has_extension(audio_path, ".spx"))) {
-        return;
-    }
-
-    if (!looks_like_url(audio_path) &&
-        (path_has_extension(audio_path, ".spx") ||
-         path_has_extension(audio_path, ".ogg") ||
-         path_has_extension(audio_path, ".oga"))) {
-        if (play_audio_via_pcm_pipeline(audio_path)) {
-            return;
-        }
-    }
-
-    if (g_find_program_in_path("ffplay")) {
-        const char *argv[] = { "ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", audio_path, NULL };
-        if (spawn_audio_argv(argv, "ffplay")) {
-            return;
-        }
-    }
-
-    if (g_find_program_in_path("mpg123")) {
-        const char *argv[] = { "mpg123", "-q", audio_path, NULL };
-        if (spawn_audio_argv(argv, "mpg123")) {
-            return;
-        }
-    }
-
-    if (g_find_program_in_path("play")) {
-        const char *argv[] = { "play", "-q", audio_path, NULL };
-        if (spawn_audio_argv(argv, "play")) {
-            return;
-        }
-    }
-
-    if (g_find_program_in_path("paplay")) {
-        const char *argv[] = { "paplay", audio_path, NULL };
-        if (spawn_audio_argv(argv, "paplay")) {
-            return;
-        }
-    }
-
-    fprintf(stderr, "[AUDIO ERROR] No usable audio player found\n");
-}
-
-static char *query_param_dup(const char *query, const char *key) {
-    if (!query || !key) {
-        return NULL;
-    }
-
-    char **pairs = g_strsplit(query, "&", -1);
-    char *value = NULL;
-
-    for (int i = 0; pairs[i]; i++) {
-        char *eq = strchr(pairs[i], '=');
-        if (!eq) {
-            continue;
-        }
-
-        *eq = '\0';
-        if (strcmp(pairs[i], key) == 0) {
-            value = g_uri_unescape_string(eq + 1, NULL);
-            *eq = '=';
-            break;
-        }
-        *eq = '=';
-    }
-
-    g_strfreev(pairs);
-    return value;
-}
-
-static gboolean try_play_encoded_sound_uri(const char *uri) {
-    const char *query = strchr(uri, '?');
-    if (!query) {
-        return FALSE;
-    }
-
-    char *audio_url = query_param_dup(query + 1, "url");
-    char *audio_path_param = query_param_dup(query + 1, "path");
-    char *resource_dir = query_param_dup(query + 1, "dir");
-    char *sound_file = query_param_dup(query + 1, "file");
-
-    if (audio_url && *audio_url) {
-        fprintf(stderr, "[AUDIO CLICKED] URL: %s\n", audio_url);
-        play_audio_file(audio_url);
-        g_free(audio_url);
-        g_free(audio_path_param);
-        g_free(resource_dir);
-        g_free(sound_file);
-        return TRUE;
-    }
-
-    g_free(audio_url);
-
-    if (audio_path_param && *audio_path_param) {
-        fprintf(stderr, "[AUDIO CLICKED] Path: %s\n", audio_path_param);
-        if (g_file_test(audio_path_param, G_FILE_TEST_EXISTS)) {
-            play_audio_file(audio_path_param);
-        } else {
-            fprintf(stderr, "[AUDIO ERROR] File not found: %s\n", audio_path_param);
-        }
-        g_free(audio_path_param);
-        g_free(resource_dir);
-        g_free(sound_file);
-        return TRUE;
-    }
-
-    g_free(audio_path_param);
-
-    if (!resource_dir || !sound_file) {
-        g_free(resource_dir);
-        g_free(sound_file);
-        return FALSE;
-    }
-
-    fprintf(stderr, "[AUDIO CLICKED] Resource dir: %s\n", resource_dir);
-    fprintf(stderr, "[AUDIO CLICKED] File: %s\n", sound_file);
-
-    char *audio_path = NULL;
-    g_mutex_lock(&dict_loader_mutex);
-    DictEntry *e = all_dicts;
-    while (e) {
-        dict_entry_ref(e);
-        g_mutex_unlock(&dict_loader_mutex);
-
-        if (e->dict && e->dict->resource_dir && g_strcmp0(e->dict->resource_dir, resource_dir) == 0) {
-            if (e->dict->resource_reader) {
-                fprintf(stderr, "[AUDIO DEBUG] Searching ResourceReader for '%s'\n", sound_file);
-                audio_path = resource_reader_get(e->dict->resource_reader, sound_file);
-                if (audio_path) {
-                    dict_entry_unref(e);
-                    break;
-                }
-            }
-        }
-        
-        g_mutex_lock(&dict_loader_mutex);
-        DictEntry *next = e->next;
-        dict_entry_unref(e);
-        e = next;
-    }
-    g_mutex_unlock(&dict_loader_mutex);
-
-    if (!audio_path) {
-        audio_path = g_build_filename(resource_dir, sound_file, NULL);
-    }
-
-    if (audio_path && g_file_test(audio_path, G_FILE_TEST_EXISTS)) {
-        play_audio_file(audio_path);
-    } else {
-        fprintf(stderr, "[AUDIO ERROR] File not found: %s\n", audio_path ? audio_path : sound_file);
-    }
-
-    g_free(audio_path);
-    g_free(resource_dir);
-    g_free(sound_file);
-    return TRUE;
-}
-
-static char *sanitize_user_word(const char *value) {
-    if (!value) {
-        return NULL;
-    }
-
-    char *valid = g_utf8_make_valid(value, -1);
-    char *text = g_strdup(valid);
-    g_free(valid);
-    g_strstrip(text);
-    for (char *p = text; *p; p++) {
-        if (*p == '\r' || *p == '\n' || *p == '\t') {
-            *p = ' ';
-        }
-    }
-    g_strstrip(text);
-
-    if (!*text || strlen(text) > 256) {
-        g_free(text);
-        return NULL;
-    }
-
-    GString *clean = g_string_new("");
-    for (const char *p = text; *p; p++) {
-        if (g_ascii_isprint(*p) || g_ascii_isspace(*p) || ((unsigned char)*p >= 0x80)) {
-            g_string_append_c(clean, *p);
-        }
-    }
-    g_free(text);
-    g_strstrip(clean->str);
-    if (!*clean->str) {
-        g_string_free(clean, TRUE);
-        return NULL;
-    }
-    return g_string_free(clean, FALSE);
-}
-
-static gboolean text_has_replacement_char(const char *text) {
-    return text && strstr(text, "\xEF\xBF\xBD") != NULL;
-}
-
-static gboolean dsl_headword_is_escapable_char(char c) {
-    return c != '\0' && strchr(" {}~\\@#()[]<>;", c) != NULL;
-}
-
-static size_t dsl_headword_brace_tag_len(const char *text) {
-    static const char *patterns[] = {
-        "{*}",
-        "{·}",
-        "{ˈ}",
-        "{ˌ}",
-        "{[']}",
-        "{[/']}"
-    };
-
-    if (!text || text[0] != '{') {
-        return 0;
-    }
-
-    for (guint i = 0; i < G_N_ELEMENTS(patterns); i++) {
-        if (g_str_has_prefix(text, patterns[i])) {
-            return strlen(patterns[i]);
-        }
-    }
-
-    return 0;
-}
-
-static gboolean search_query_needs_literal_prefilter_bypass(const char *query) {
-    if (!query) {
-        return FALSE;
-    }
-
-    for (const char *p = query; *p; p = g_utf8_next_char(p)) {
-        gunichar ch = g_utf8_get_char(p);
-        if (g_unichar_isspace(ch) || g_unichar_isalnum(ch)) {
-            continue;
-        }
-        return TRUE;
-    }
-
-    return FALSE;
-}
-
-static char *normalize_headword_for_search(const char *value, gboolean unescape_dsl) {
-    if (!value) {
-        return NULL;
-    }
-
-    char *valid = g_utf8_make_valid(value, -1);
-    GString *out = g_string_new("");
-    const char *p = valid;
-
-    while (*p) {
-        if (*p == '{') {
-            size_t brace_tag_len = dsl_headword_brace_tag_len(p);
-            if (brace_tag_len > 0) {
-                p += brace_tag_len;
-                continue;
-            }
-            if (unescape_dsl) {
-                p++;
-                continue;
-            }
-        }
-
-        /* Raw DSL markers that should be ignored even outside of braces */
-        if (*p == '*') { p++; continue; }
-
-        /* UTF-8 middle dot (C2 B7) */
-        if ((unsigned char)p[0] == 0xC2 && (unsigned char)p[1] == 0xB7) {
-            p += 2;
-            continue;
-        }
-
-        /* UTF-8 Stress marks (IPA CB 88, CB 8C) */
-        if ((unsigned char)p[0] == 0xCB && ((unsigned char)p[1] == 0x88 || (unsigned char)p[1] == 0x8C)) {
-            p += 2;
-            continue;
-        }
-
-        /* DSL-specific square bracket tags in headwords (rare handles formatting) */
-        if (g_str_has_prefix(p, "[']")) { p += 3; continue; }
-        if (g_str_has_prefix(p, "[/']")) { p += 4; continue; }
-
-        /* Strip actual Unicode combining acute accent (U+0301) for search */
-        if (g_str_has_prefix(p, "\xCC\x81")) { p += 2; continue; }
-
-        if (*p == '}' && unescape_dsl) {
-            p++;
-            continue;
-        }
-
-
-
-        if (*p == '\\' && p[1] != '\0') {
-            if (unescape_dsl) {
-                /* Only unescape DSL control escapes; preserve literal leet/backslash patterns. */
-                if (dsl_headword_is_escapable_char(p[1])) {
-                    const char *next = p + 1;
-                    const char *next_end = g_utf8_next_char(next);
-                    g_string_append_len(out, next, next_end - next);
-                    p = next_end;
-                } else {
-                    /* Not special, keep the backslash */
-                    g_string_append_c(out, '\\');
-                    p++;
-                }
-            } else {
-                /* Literal mode: keep everything as-is (e.g. from user search box) */
-                g_string_append_c(out, '\\');
-                p++;
-            }
-            continue;
-        }
-
-        if (g_ascii_isspace(*p)) {
-            g_string_append_c(out, ' ');
-            while (g_ascii_isspace(*p)) p++;
-            continue;
-        }
-
-        const char *next = g_utf8_next_char(p);
-        g_string_append_len(out, p, next - p);
-        p = next;
-    }
-
-    char *normalized = g_string_free(out, FALSE);
-    g_free(valid);
-
-    char *trimmed = g_strstrip(normalized);
-    if (!trimmed || *trimmed == '\0') {
-        g_free(normalized);
-        return NULL;
-    }
-    char *final = g_strdup(trimmed);
-    g_free(normalized);
-    return final;
-}
-
-typedef enum {
-    SEARCH_BUCKET_EXACT = 0,
-    SEARCH_BUCKET_SUFFIX,
-    SEARCH_BUCKET_PREFIX,
-    SEARCH_BUCKET_PHRASE,
-    SEARCH_BUCKET_SUBSTRING,
-    SEARCH_BUCKET_FUZZY
-} SearchBucket;
-
 static void related_row_payload_free(RelatedRowPayload *payload) {
     if (!payload) {
         return;
@@ -1030,294 +297,6 @@ static void sidebar_row_payload_free(SidebarRowPayload *payload) {
     }
     g_free(payload);
 }
-
-static guint utf8_length_or_bytes(const char *text) {
-    if (!text || !*text) {
-        return 0;
-    }
-    return (guint)g_utf8_strlen(text, -1);
-}
-
-static guint gestalt_longest_match(const gunichar *a, guint a_start, guint a_end,
-                                   const gunichar *b, guint b_start, guint b_end,
-                                   guint *out_a, guint *out_b) {
-    guint max_len = 0;
-    guint best_a = a_start;
-    guint best_b = b_start;
-
-    for (guint i = a_start; i < a_end; i++) {
-        for (guint j = b_start; j < b_end; j++) {
-            if (a[i] == b[j]) {
-                guint len = 1;
-                while (i + len < a_end && j + len < b_end && a[i + len] == b[j + len]) {
-                    len++;
-                }
-                if (len > max_len) {
-                    max_len = len;
-                    best_a = i;
-                    best_b = j;
-                }
-            }
-        }
-    }
-    *out_a = best_a;
-    *out_b = best_b;
-    return max_len;
-}
-
-static guint gestalt_matches(const gunichar *a, guint a_start, guint a_end,
-                             const gunichar *b, guint b_start, guint b_end) {
-    if (a_start >= a_end || b_start >= b_end) {
-        return 0;
-    }
-    guint out_a, out_b;
-    guint match_len = gestalt_longest_match(a, a_start, a_end, b, b_start, b_end, &out_a, &out_b);
-    if (match_len == 0) {
-        return 0;
-    }
-    guint matches = match_len;
-    matches += gestalt_matches(a, a_start, out_a, b, b_start, out_b);
-    matches += gestalt_matches(a, out_a + match_len, a_end, b, out_b + match_len, b_end);
-    return matches;
-}
-
-static double sequence_matcher_ratio(const char *str_a, const char *str_b) {
-    if (!str_a || !str_b) return 0.0;
-    
-    glong len_a_chars = 0, len_b_chars = 0;
-    gunichar *a = g_utf8_to_ucs4_fast(str_a, -1, &len_a_chars);
-    gunichar *b = g_utf8_to_ucs4_fast(str_b, -1, &len_b_chars);
-    
-    if (!a || !b) {
-        g_free(a);
-        g_free(b);
-        return 0.0;
-    }
-    
-    if (len_a_chars == 0 && len_b_chars == 0) {
-        g_free(a); g_free(b);
-        return 1.0;
-    }
-    if (len_a_chars == 0 || len_b_chars == 0) {
-        g_free(a); g_free(b);
-        return 0.0;
-    }
-    
-    guint matches = gestalt_matches(a, 0, len_a_chars, b, 0, len_b_chars);
-    g_free(a);
-    g_free(b);
-    return (2.0 * matches) / (double)(len_a_chars + len_b_chars);
-}
-
-static const char *candidate_key_without_definite_article(const char *candidate_key) {
-    if (!candidate_key) {
-        return NULL;
-    }
-
-    if (g_str_has_prefix(candidate_key, "the ")) {
-        return candidate_key + 4;
-    }
-
-    return NULL;
-}
-
-static int search_bucket_rank(SearchBucket bucket) {
-    return (int)bucket;
-}
-
-static char *collapse_search_separators(const char *text) {
-    if (!text) {
-        return NULL;
-    }
-
-    GString *out = g_string_sized_new(strlen(text));
-    gboolean changed = FALSE;
-
-    for (const char *p = text; *p; p = g_utf8_next_char(p)) {
-        gunichar ch = g_utf8_get_char(p);
-        if (g_unichar_isspace(ch) || ch == '-' || ch == '_' || ch == '/' || ch == '.' || ch == 0x00B7) {
-            changed = TRUE;
-            continue;
-        }
-
-        const char *next = g_utf8_next_char(p);
-        g_string_append_len(out, p, next - p);
-    }
-
-    if (!changed) {
-        g_string_free(out, TRUE);
-        return NULL;
-    }
-
-    return g_string_free(out, FALSE);
-}
-
-static gboolean classify_search_candidate(const char *query_key,
-                                          guint query_len,
-                                          const char *candidate_key,
-                                          SearchBucket *bucket_out,
-                                          double *fuzzy_score_out) {
-    if (!query_key || !candidate_key || !*candidate_key) {
-        if (candidate_key && *candidate_key && query_key && !*query_key) {
-            if (bucket_out) *bucket_out = SEARCH_BUCKET_PREFIX;
-            if (fuzzy_score_out) *fuzzy_score_out = 0.0;
-            return TRUE;
-        }
-        return FALSE;
-    }
-
-    /* 1. EXACT */
-    if (g_strcmp0(candidate_key, query_key) == 0) {
-        if (bucket_out) *bucket_out = SEARCH_BUCKET_EXACT;
-        if (fuzzy_score_out) *fuzzy_score_out = 1.0;
-        return TRUE;
-    }
-
-    /* 2. SUFFIX */
-    if (g_str_has_suffix(candidate_key, query_key)) {
-        if (bucket_out) *bucket_out = SEARCH_BUCKET_SUFFIX;
-        if (fuzzy_score_out) *fuzzy_score_out = 0.0;
-        return TRUE;
-    }
-
-    /* 3. PREFIX */
-    if (g_str_has_prefix(candidate_key, query_key)) {
-        if (bucket_out) *bucket_out = SEARCH_BUCKET_PREFIX;
-        if (fuzzy_score_out) *fuzzy_score_out = 0.0;
-        return TRUE;
-    }
-
-    /* 4. PHRASE / 5. SUBSTRING */
-    const char *match = strstr(candidate_key, query_key);
-    gboolean is_phrase = FALSE;
-    gboolean is_substring = FALSE;
-
-    if (match != NULL) {
-        is_substring = TRUE;
-        gsize qlen = strlen(query_key);
-        const char *m = match;
-        
-        while (m != NULL) {
-            char before = (m > candidate_key) ? *(m - 1) : '\0';
-            char after = *(m + qlen);
-            
-            gboolean valid_before = (before == '\0' || before == ' ' || before == '-' || before == '_' || before == '/');
-            gboolean valid_after = (after == '\0' || after == ' ' || after == '-' || after == '_' || after == '/');
-            
-            if (valid_before && valid_after) {
-                is_phrase = TRUE;
-                break;
-            }
-            m = strstr(m + 1, query_key);
-        }
-        
-        if (is_phrase) {
-            if (bucket_out) *bucket_out = SEARCH_BUCKET_PHRASE;
-            if (fuzzy_score_out) *fuzzy_score_out = 0.0;
-            return TRUE;
-        }
-    }
-
-    /* 5. SUBSTRING */
-    if (is_substring) {
-        if (bucket_out) *bucket_out = SEARCH_BUCKET_SUBSTRING;
-        if (fuzzy_score_out) *fuzzy_score_out = 0.0;
-        return TRUE;
-    }
-
-    /* 6. FUZZY */
-    if (query_len < 3) {
-        return FALSE;
-    }
-
-    if (query_len >= 3 && strlen(candidate_key) > 32) {
-        return FALSE; // skip expensive fuzzy early
-    }
-
-    guint candidate_len = utf8_length_or_bytes(candidate_key);
-    guint length_delta = candidate_len > query_len ? candidate_len - query_len : query_len - candidate_len;
-    if (length_delta > MAX(6U, query_len)) {
-        return FALSE;
-    }
-
-    double ratio = sequence_matcher_ratio(query_key, candidate_key);
-    double min_ratio = query_len >= 5 ? 0.74 : 0.78;
-    if (ratio < min_ratio) {
-        return FALSE;
-    }
-
-    if (bucket_out) *bucket_out = SEARCH_BUCKET_FUZZY;
-    if (fuzzy_score_out) *fuzzy_score_out = ratio;
-    return TRUE;
-}
-
-static gboolean classify_search_candidate_flexible(const char *query_key,
-                                                   guint query_len,
-                                                   const char *query_compact_key,
-                                                   guint query_compact_len,
-                                                   const char *candidate_key,
-                                                   SearchBucket *bucket_out,
-                                                   double *fuzzy_score_out) {
-    SearchBucket best_bucket = SEARCH_BUCKET_FUZZY;
-    double best_score = 0.0;
-    gboolean found = classify_search_candidate(query_key, query_len, candidate_key, &best_bucket, &best_score);
-
-    const char *articleless = candidate_key_without_definite_article(candidate_key);
-    if (articleless && *articleless) {
-        SearchBucket alt_bucket = SEARCH_BUCKET_FUZZY;
-        double alt_score = 0.0;
-        gboolean alt_found = classify_search_candidate(query_key, query_len, articleless, &alt_bucket, &alt_score);
-        if (alt_found &&
-            (!found ||
-             search_bucket_rank(alt_bucket) < search_bucket_rank(best_bucket) ||
-             (search_bucket_rank(alt_bucket) == search_bucket_rank(best_bucket) && alt_score > best_score))) {
-            best_bucket = alt_bucket;
-            best_score = alt_score;
-            found = TRUE;
-        }
-    }
-
-    if (query_compact_key && *query_compact_key) {
-        char *compact_candidate = collapse_search_separators(candidate_key);
-        if (compact_candidate && *compact_candidate) {
-            SearchBucket alt_bucket = SEARCH_BUCKET_FUZZY;
-            double alt_score = 0.0;
-            gboolean alt_found = classify_search_candidate(query_compact_key, query_compact_len, compact_candidate, &alt_bucket, &alt_score);
-            if (alt_found &&
-                (!found ||
-                 search_bucket_rank(alt_bucket) < search_bucket_rank(best_bucket) ||
-                 (search_bucket_rank(alt_bucket) == search_bucket_rank(best_bucket) && alt_score > best_score))) {
-                best_bucket = alt_bucket;
-                best_score = alt_score;
-                found = TRUE;
-            }
-
-            const char *compact_articleless = candidate_key_without_definite_article(compact_candidate);
-            if (compact_articleless && *compact_articleless) {
-                alt_bucket = SEARCH_BUCKET_FUZZY;
-                alt_score = 0.0;
-                alt_found = classify_search_candidate(query_compact_key, query_compact_len, compact_articleless, &alt_bucket, &alt_score);
-                if (alt_found &&
-                    (!found ||
-                     search_bucket_rank(alt_bucket) < search_bucket_rank(best_bucket) ||
-                     (search_bucket_rank(alt_bucket) == search_bucket_rank(best_bucket) && alt_score > best_score))) {
-                    best_bucket = alt_bucket;
-                    best_score = alt_score;
-                    found = TRUE;
-                }
-            }
-        }
-        g_free(compact_candidate);
-    }
-
-    if (found) {
-        if (bucket_out) *bucket_out = best_bucket;
-        if (fuzzy_score_out) *fuzzy_score_out = best_score;
-    }
-
-    return found;
-}
-
 
 static char *get_app_config_file_path(const char *filename) {
     char *dir = g_build_filename(g_get_user_config_dir(), "diction", NULL);
@@ -1515,6 +494,36 @@ static void append_related_rows(GPtrArray *labels, GPtrArray *payloads) {
         g_ptr_array_add(related_row_payloads, g_ptr_array_index(payloads, i));
     }
     g_ptr_array_set_size(payloads, 0);
+}
+
+static gboolean related_payload_matches_word(RelatedRowPayload *payload, const char *word) {
+    if (!payload || payload->type != RELATED_ROW_CANDIDATE || !payload->word || !word) {
+        return FALSE;
+    }
+
+    char *payload_word = normalize_headword_for_search(payload->word, TRUE);
+    char *target_word = normalize_headword_for_search(word, TRUE);
+    gboolean matches = payload_word && target_word &&
+        g_ascii_strcasecmp(payload_word, target_word) == 0;
+    g_free(payload_word);
+    g_free(target_word);
+    return matches;
+}
+
+static gboolean select_related_word(const char *word) {
+    if (!related_selection_model || !related_row_payloads || !word) {
+        return FALSE;
+    }
+
+    for (guint i = 0; i < related_row_payloads->len; i++) {
+        RelatedRowPayload *payload = g_ptr_array_index(related_row_payloads, i);
+        if (related_payload_matches_word(payload, word)) {
+            gtk_single_selection_set_selected(related_selection_model, i);
+            return TRUE;
+        }
+    }
+
+    return FALSE;
 }
 
 static void clear_sidebar_list(SidebarListView *sidebar) {
@@ -3221,6 +2230,39 @@ static gboolean is_media_url(const char *uri) {
     return is_media;
 }
 
+static char *resolve_audio_resource_from_dictionaries(const char *resource_dir,
+                                                      const char *sound_file,
+                                                      gpointer user_data) {
+    (void)user_data;
+    char *audio_path = NULL;
+
+    g_mutex_lock(&dict_loader_mutex);
+    DictEntry *e = all_dicts;
+    while (e) {
+        dict_entry_ref(e);
+        g_mutex_unlock(&dict_loader_mutex);
+
+        if (e->dict && e->dict->resource_dir && g_strcmp0(e->dict->resource_dir, resource_dir) == 0) {
+            if (e->dict->resource_reader) {
+                fprintf(stderr, "[AUDIO DEBUG] Searching ResourceReader for '%s'\n", sound_file);
+                audio_path = resource_reader_get(e->dict->resource_reader, sound_file);
+                if (audio_path) {
+                    dict_entry_unref(e);
+                    break;
+                }
+            }
+        }
+
+        g_mutex_lock(&dict_loader_mutex);
+        DictEntry *next = e->next;
+        dict_entry_unref(e);
+        e = next;
+    }
+    g_mutex_unlock(&dict_loader_mutex);
+
+    return audio_path;
+}
+
 static void on_decide_policy(WebKitWebView *v, WebKitPolicyDecision *d, WebKitPolicyDecisionType t, gpointer user_data) {
     (void)v;
     /* target="_new"/"_blank" links fire NEW_WINDOW_ACTION — open them externally */
@@ -3264,7 +2306,7 @@ static void on_decide_policy(WebKitWebView *v, WebKitPolicyDecision *d, WebKitPo
             webkit_policy_decision_ignore(d);
             return;
         } else if (g_str_has_prefix(uri, "sound://")) {
-            if (!try_play_encoded_sound_uri(uri)) {
+            if (!audio_try_play_encoded_sound_uri(uri, resolve_audio_resource_from_dictionaries, NULL)) {
                 const char *sound_file = uri + 8; // Skip "sound://"
                 fprintf(stderr, "[AUDIO CLICKED] Clicked: %s\n", sound_file);
                 
@@ -3282,7 +2324,7 @@ static void on_decide_policy(WebKitWebView *v, WebKitPolicyDecision *d, WebKitPo
                     }
 
                     if (audio_path && g_file_test(audio_path, G_FILE_TEST_EXISTS)) {
-                        play_audio_file(audio_path);
+                        audio_play_file(audio_path);
                     } else {
                         fprintf(stderr, "[AUDIO ERROR] File not found: %s\n", audio_path ? audio_path : sound_file);
                     }
@@ -3295,7 +2337,7 @@ static void on_decide_policy(WebKitWebView *v, WebKitPolicyDecision *d, WebKitPo
             webkit_policy_decision_ignore(d);
             return;
         } else if (is_media_url(uri) && (g_str_has_prefix(uri, "http://") || g_str_has_prefix(uri, "https://"))) {
-            play_audio_file(uri);
+            audio_play_file(uri);
             webkit_policy_decision_ignore(d);
             return;
         } else if (g_str_has_prefix(uri, "http://") || g_str_has_prefix(uri, "https://")) {
@@ -3619,10 +2661,10 @@ static void on_related_item_activated(GtkListView *view, guint position, gpointe
     }
 
     fprintf(stderr, "[Result Clicked]: '%s'\n", payload->word);
-    append_rendered_word_html(payload->word);
     if (related_selection_model) {
         gtk_single_selection_set_selected(related_selection_model, position);
     }
+    append_rendered_word_html(payload->word);
 }
 
 static void on_favorites_item_activated(GtkListView *view, guint position, gpointer user_data) {
@@ -4297,6 +3339,8 @@ static void append_rendered_word_html_impl(const char *raw_word, gboolean push_h
         return;
     }
 
+    select_related_word(query);
+
     char *display_title = normalize_headword_for_render(raw_word, raw_word ? strlen(raw_word) : 0, TRUE);
 
     GString *html_res = g_string_new("");
@@ -4758,6 +3802,17 @@ static void update_theme_colors(void) {
         g_snprintf(sidebar_hover, sizeof(sidebar_hover), "rgba(%u,%u,%u,0.12)", ar, ag, ab);
     }
 
+    char sidebar_selected_bg[64];
+    char sidebar_selected_fg[32];
+    if (dark_mode) {
+        g_strlcpy(sidebar_selected_bg, "rgba(255, 255, 255, 0.14)", sizeof(sidebar_selected_bg));
+        g_strlcpy(sidebar_selected_fg, "#ffffff", sizeof(sidebar_selected_fg));
+    } else {
+        g_strlcpy(sidebar_selected_bg, is_default_theme ? "#ffffff" : "rgba(0, 0, 0, 0.07)",
+                  sizeof(sidebar_selected_bg));
+        g_strlcpy(sidebar_selected_fg, "#202124", sizeof(sidebar_selected_fg));
+    }
+
     char *css = g_strdup_printf(
         "@define-color window_bg_color %s;\n"
         "@define-color window_fg_color %s;\n"
@@ -4806,23 +3861,30 @@ static void update_theme_colors(void) {
         "row, listitem {\n"
         "  color: inherit;\n"
         "}\n"
-        "row:selected, listitem:selected, row:selected:focus, listitem:selected:focus, row:selected:focus-within, listitem:selected:focus-within {\n"
-        "  background-color: @accent_bg_color !important;\n"
-        "  color: #ffffff !important;\n"
+        "row:selected, row:selected:hover, row:selected:focus, row:selected:focus-within, row:selected:backdrop,\n"
+        "listitem:selected, listitem:selected:hover, listitem:selected:focus, listitem:selected:focus-within, listitem:selected:backdrop,\n"
+        "listview listitem:selected, listview listitem:selected:hover, listview listitem:selected:backdrop {\n"
+        "  background-color: %s;\n"
+        "  color: %s;\n"
         "  outline: none;\n"
         "  transition: none;\n"
         "}\n"
-        "/* Ensure selected items remain highlighted even when focus is lost */\n"
-        "listview listitem:selected:backdrop, listview listitem:selected {\n"
-        "  background-color: @accent_bg_color !important;\n"
-        "  color: #ffffff !important;\n"
+        "listitem:selected .sidebar-row, listitem:selected:hover .sidebar-row, listitem:selected:backdrop .sidebar-row,\n"
+        "row:selected .sidebar-row, row:selected:hover .sidebar-row, row:selected:backdrop .sidebar-row {\n"
+        "  background-color: transparent;\n"
+        "  color: %s;\n"
         "}\n"
         "/* Explicitly set webview backgrounds */\n"
         "webkitwebview, webview {\n"
         "  background-color: @view_bg_color;\n"
         "}\n"
-        "row:hover:not(:selected), listitem:hover:not(:selected) {\n"
-        "  background-color: %s !important;\n"
+        "row:hover:not(:selected), listitem:hover:not(:selected), listview listitem:hover:not(:selected) {\n"
+        "  background-color: %s;\n"
+        "  color: inherit;\n"
+        "}\n"
+        "listitem:hover:not(:selected) .sidebar-row, row:hover:not(:selected) .sidebar-row {\n"
+        "  background-color: transparent;\n"
+        "  color: inherit;\n"
         "}\n"
         "popover, popovermenu {\n"
         "  background-color: transparent;\n"
@@ -4878,6 +3940,8 @@ static void update_theme_colors(void) {
         sidebar_bg, w_fg, popover_bg, w_fg, accent,
         /* sidebar border (1) */
         palette.border,
+        /* selected item colors (3) */
+        sidebar_selected_bg, sidebar_selected_fg, sidebar_selected_fg,
         /* row:hover (1) */
         sidebar_hover,
         /* popover row hover (1) */
@@ -5092,9 +4156,7 @@ static void reload_dictionaries_from_settings(void *user_data) {
     populate_favorites_sidebar();
 
     populate_search_sidebar(gtk_editable_get_text(GTK_EDITABLE(search_entry)));
-    startup_loading_active = TRUE;
     if (!start_async_dict_loading(discover_from_dirs)) {
-        startup_loading_active = FALSE;
         finalize_dictionary_loading(FALSE, discover_from_dirs);
     }
 }
@@ -5121,8 +4183,8 @@ static void finalize_dictionary_loading(gboolean allow_random_word, gboolean syn
     populate_search_sidebar(gtk_editable_get_text(GTK_EDITABLE(search_entry)));
     refresh_search_results();
 
-    if (startup_loading_active) {
-        close_startup_splash();
+    if (startup_splash_is_active()) {
+        startup_splash_close();
         if (main_window) {
             gtk_window_present(main_window);
         }
@@ -5833,7 +4895,7 @@ static gboolean on_dict_loaded_idle(gpointer user_data) {
         return G_SOURCE_REMOVE;
     }
 
-    update_startup_splash_progress(ld->completed, ld->total, ld->status_text);
+    startup_splash_update_progress(ld->completed, ld->total, ld->status_text);
 
     if (ld->kind == LOAD_IDLE_ENTRY && ld->entry) {
         DictEntry *e = ld->entry;
@@ -5958,7 +5020,7 @@ static gboolean on_dict_loaded_idle(gpointer user_data) {
         }
 
         /* Throttled UI update: only rebuild sidebar every 50 files to avoid UI hammering */
-        if (!startup_loading_active && (ld->completed % 50 == 0)) {
+        if (!startup_splash_is_active() && (ld->completed % 50 == 0)) {
             populate_dict_sidebar();
         }
 
@@ -6274,6 +5336,13 @@ static void on_zoom_to_restore_clicked(GtkButton *btn, gpointer user_data) {
 
 static char *pending_activation_token = NULL;
 
+static void on_global_shortcut_activated(const char *activation_token, gpointer user_data) {
+    (void)user_data;
+    g_free(pending_activation_token);
+    pending_activation_token = activation_token ? g_strdup(activation_token) : NULL;
+    scan_popup_trigger_manual();
+}
+
 static void scan_word_callback(const char *word) {
     if (!word || !*word || !main_window || !search_entry) return;
     
@@ -6309,327 +5378,6 @@ static gboolean on_window_close_request(GtkWindow *window, gpointer user_data) {
     return FALSE;
 }
 
-static void dbus_global_shortcut_activated(GDBusConnection *connection,
-                                           const gchar *sender_name,
-                                           const gchar *object_path,
-                                           const gchar *interface_name,
-                                           const gchar *signal_name,
-                                           GVariant *parameters,
-                                           gpointer user_data) {
-    (void)connection; (void)sender_name; (void)object_path; (void)interface_name; (void)signal_name; (void)user_data;
-
-    const char *session_handle = NULL;
-    const char *shortcut_id = NULL;
-    guint64 timestamp = 0;
-    GVariant *options = NULL;
-    g_variant_get(parameters, "(&o&st@a{sv})", &session_handle, &shortcut_id, &timestamp, &options);
-    (void)timestamp;
-
-    if (g_strcmp0(session_handle, global_shortcut_session_handle) == 0 &&
-        g_strcmp0(shortcut_id, GLOBAL_SHORTCUT_ID) == 0) {
-        
-        if (options) {
-            const char *token = NULL;
-            if (g_variant_lookup(options, "activation_token", "&s", &token) && token) {
-                g_free(pending_activation_token);
-                pending_activation_token = g_strdup(token);
-                fprintf(stderr, "[Shortcut] Got token: %s\n", token);
-            }
-        }
-        
-        fprintf(stderr, "[Shortcut] Triggering scan popup manual fetch!\n");
-        scan_popup_trigger_manual();
-    } else {
-        fprintf(stderr, "[Shortcut] Ignoring unmatched ID: %s\n", shortcut_id ? shortcut_id : "null");
-    }
-
-    if (options) {
-        g_variant_unref(options);
-    }
-}
-
-static char *portal_sender_path_component(GDBusConnection *conn) {
-    const char *unique_name = g_dbus_connection_get_unique_name(conn);
-    if (!unique_name) {
-        return NULL;
-    }
-
-    char *component = g_strdup(unique_name[0] == ':' ? unique_name + 1 : unique_name);
-    g_strdelimit(component, ".", '_');
-    return component;
-}
-
-static char *portal_token(const char *prefix) {
-    return g_strdup_printf("diction_%s_%u", prefix, g_random_int());
-}
-
-static char *portal_request_path_for_token(GDBusConnection *conn, const char *token) {
-    char *sender = portal_sender_path_component(conn);
-    if (!sender) {
-        return NULL;
-    }
-
-    char *path = g_strdup_printf("/org/freedesktop/portal/desktop/request/%s/%s", sender, token);
-    g_free(sender);
-    return path;
-}
-
-static char *portal_session_path_for_token(GDBusConnection *conn, const char *token) {
-    char *sender = portal_sender_path_component(conn);
-    if (!sender) {
-        return NULL;
-    }
-
-    char *path = g_strdup_printf("/org/freedesktop/portal/desktop/session/%s/%s", sender, token);
-    g_free(sender);
-    return path;
-}
-
-static void global_shortcut_request_response(GDBusConnection *connection,
-                                             const gchar *sender_name,
-                                             const gchar *object_path,
-                                             const gchar *interface_name,
-                                             const gchar *signal_name,
-                                             GVariant *parameters,
-                                             gpointer user_data);
-
-static void global_shortcut_call_done(GObject *source_object, GAsyncResult *res, gpointer user_data) {
-    const char *method = user_data;
-    GError *err = NULL;
-    GVariant *reply = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source_object), res, &err);
-    if (err) {
-        g_warning("Global shortcut portal %s call failed: %s", method ? method : "unknown", err->message);
-        g_error_free(err);
-        return;
-    }
-
-    if (reply) {
-        g_variant_unref(reply);
-    }
-}
-
-static void bind_global_shortcut(void) {
-    if (!global_shortcut_conn || !global_shortcut_session_handle) {
-        return;
-    }
-
-    char *request_token = portal_token("bind");
-    char *request_path = portal_request_path_for_token(global_shortcut_conn, request_token);
-    if (!request_path) {
-        g_free(request_token);
-        return;
-    }
-
-    if (global_shortcut_bind_response_sub_id != 0) {
-        g_dbus_connection_signal_unsubscribe(global_shortcut_conn, global_shortcut_bind_response_sub_id);
-        global_shortcut_bind_response_sub_id = 0;
-    }
-    global_shortcut_bind_response_sub_id =
-        g_dbus_connection_signal_subscribe(global_shortcut_conn,
-                                           "org.freedesktop.portal.Desktop",
-                                           "org.freedesktop.portal.Request",
-                                           "Response",
-                                           request_path,
-                                           NULL,
-                                           G_DBUS_SIGNAL_FLAGS_NONE,
-                                           global_shortcut_request_response,
-                                           GINT_TO_POINTER(PORTAL_REQUEST_BIND_SHORTCUTS),
-                                           NULL);
-
-    GVariantBuilder shortcut_props;
-    g_variant_builder_init(&shortcut_props, G_VARIANT_TYPE("a{sv}"));
-    g_variant_builder_add(&shortcut_props, "{sv}", "description",
-                          g_variant_new_string("Scan selected text with Diction"));
-    g_variant_builder_add(&shortcut_props, "{sv}", "preferred_trigger",
-                          g_variant_new_string(GLOBAL_SHORTCUT_TRIGGER));
-
-    GVariantBuilder shortcuts;
-    g_variant_builder_init(&shortcuts, G_VARIANT_TYPE("a(sa{sv})"));
-    g_variant_builder_add(&shortcuts, "(sa{sv})", GLOBAL_SHORTCUT_ID, &shortcut_props);
-
-    GVariantBuilder options;
-    g_variant_builder_init(&options, G_VARIANT_TYPE("a{sv}"));
-    g_variant_builder_add(&options, "{sv}", "handle_token", g_variant_new_string(request_token));
-
-    g_dbus_connection_call(global_shortcut_conn,
-                           "org.freedesktop.portal.Desktop",
-                           "/org/freedesktop/portal/desktop",
-                           "org.freedesktop.portal.GlobalShortcuts",
-                           "BindShortcuts",
-                           g_variant_new("(oa(sa{sv})sa{sv})",
-                                         global_shortcut_session_handle,
-                                         &shortcuts,
-                                         "",
-                                         &options),
-                           G_VARIANT_TYPE("(o)"),
-                           G_DBUS_CALL_FLAGS_NONE,
-                           -1,
-                           NULL,
-                           global_shortcut_call_done,
-                           "BindShortcuts");
-
-    g_free(request_path);
-    g_free(request_token);
-}
-
-static void global_shortcut_request_response(GDBusConnection *connection,
-                                             const gchar *sender_name,
-                                             const gchar *object_path,
-                                             const gchar *interface_name,
-                                             const gchar *signal_name,
-                                             GVariant *parameters,
-                                             gpointer user_data) {
-    (void)sender_name; (void)object_path; (void)interface_name; (void)signal_name;
-
-    PortalRequestKind kind = GPOINTER_TO_INT(user_data);
-    guint response = 2;
-    GVariant *results = NULL;
-    g_variant_get(parameters, "(u@a{sv})", &response, &results);
-
-    if (kind == PORTAL_REQUEST_CREATE_SHORTCUT_SESSION &&
-        global_shortcut_create_response_sub_id != 0) {
-        g_dbus_connection_signal_unsubscribe(connection, global_shortcut_create_response_sub_id);
-        global_shortcut_create_response_sub_id = 0;
-    } else if (kind == PORTAL_REQUEST_BIND_SHORTCUTS &&
-               global_shortcut_bind_response_sub_id != 0) {
-        g_dbus_connection_signal_unsubscribe(connection, global_shortcut_bind_response_sub_id);
-        global_shortcut_bind_response_sub_id = 0;
-    }
-
-    if (response != 0) {
-        g_warning("Global shortcut portal request failed or was cancelled (response %u)", response);
-        if (results) {
-            g_variant_unref(results);
-        }
-        return;
-    }
-
-    if (kind == PORTAL_REQUEST_CREATE_SHORTCUT_SESSION) {
-        const char *session_handle = NULL;
-        if (!results || !g_variant_lookup(results, "session_handle", "&s", &session_handle)) {
-            g_warning("Global shortcut portal did not return a session_handle");
-        } else {
-            g_free(global_shortcut_session_handle);
-            global_shortcut_session_handle = g_strdup(session_handle);
-
-            if (global_shortcut_signal_sub_id == 0) {
-                global_shortcut_signal_sub_id =
-                    g_dbus_connection_signal_subscribe(global_shortcut_conn,
-                                                       "org.freedesktop.portal.Desktop",
-                                                       "org.freedesktop.portal.GlobalShortcuts",
-                                                       "Activated",
-                                                       "/org/freedesktop/portal/desktop",
-                                                       global_shortcut_session_handle,
-                                                       G_DBUS_SIGNAL_FLAGS_NONE,
-                                                       dbus_global_shortcut_activated,
-                                                       NULL,
-                                                       NULL);
-            }
-
-            bind_global_shortcut();
-        }
-    }
-
-    if (results) {
-        g_variant_unref(results);
-    }
-}
-
-static void setup_global_shortcut(void) {
-    if (global_shortcut_conn) {
-        return;
-    }
-
-    global_shortcut_conn = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, NULL);
-    if (!global_shortcut_conn) {
-        return;
-    }
-
-    char *request_token = portal_token("create");
-    char *session_token = portal_token("session");
-    char *request_path = portal_request_path_for_token(global_shortcut_conn, request_token);
-    char *session_path = portal_session_path_for_token(global_shortcut_conn, session_token);
-    if (!request_path || !session_path) {
-        g_free(request_path);
-        g_free(session_path);
-        g_free(request_token);
-        g_free(session_token);
-        return;
-    }
-
-    global_shortcut_create_response_sub_id =
-        g_dbus_connection_signal_subscribe(global_shortcut_conn,
-                                           "org.freedesktop.portal.Desktop",
-                                           "org.freedesktop.portal.Request",
-                                           "Response",
-                                           request_path,
-                                           NULL,
-                                           G_DBUS_SIGNAL_FLAGS_NONE,
-                                           global_shortcut_request_response,
-                                           GINT_TO_POINTER(PORTAL_REQUEST_CREATE_SHORTCUT_SESSION),
-                                           NULL);
-
-    GVariantBuilder options;
-    g_variant_builder_init(&options, G_VARIANT_TYPE("a{sv}"));
-    g_variant_builder_add(&options, "{sv}", "handle_token", g_variant_new_string(request_token));
-    g_variant_builder_add(&options, "{sv}", "session_handle_token", g_variant_new_string(session_token));
-
-    g_dbus_connection_call(global_shortcut_conn,
-                           "org.freedesktop.portal.Desktop",
-                           "/org/freedesktop/portal/desktop",
-                           "org.freedesktop.portal.GlobalShortcuts",
-                           "CreateSession",
-                           g_variant_new("(a{sv})", &options),
-                           G_VARIANT_TYPE("(o)"),
-                           G_DBUS_CALL_FLAGS_NONE,
-                           -1,
-                           NULL,
-                           global_shortcut_call_done,
-                           "CreateSession");
-
-    g_free(request_path);
-    g_free(session_path);
-    g_free(request_token);
-    g_free(session_token);
-}
-
-static void destroy_global_shortcut(void) {
-    if (!global_shortcut_conn) {
-        g_clear_pointer(&global_shortcut_session_handle, g_free);
-        return;
-    }
-
-    if (global_shortcut_create_response_sub_id != 0) {
-        g_dbus_connection_signal_unsubscribe(global_shortcut_conn, global_shortcut_create_response_sub_id);
-        global_shortcut_create_response_sub_id = 0;
-    }
-    if (global_shortcut_bind_response_sub_id != 0) {
-        g_dbus_connection_signal_unsubscribe(global_shortcut_conn, global_shortcut_bind_response_sub_id);
-        global_shortcut_bind_response_sub_id = 0;
-    }
-    if (global_shortcut_signal_sub_id != 0) {
-        g_dbus_connection_signal_unsubscribe(global_shortcut_conn, global_shortcut_signal_sub_id);
-        global_shortcut_signal_sub_id = 0;
-    }
-
-    if (global_shortcut_session_handle) {
-        g_dbus_connection_call(global_shortcut_conn,
-                               "org.freedesktop.portal.Desktop",
-                               global_shortcut_session_handle,
-                               "org.freedesktop.portal.Session",
-                               "Close",
-                               NULL,
-                               NULL,
-                               G_DBUS_CALL_FLAGS_NONE,
-                               -1,
-                               NULL,
-                               NULL,
-                               NULL);
-    }
-
-    g_clear_pointer(&global_shortcut_session_handle, g_free);
-    g_clear_object(&global_shortcut_conn);
-}
 static void on_new_tab_clicked(GtkButton *btn, gpointer user_data) {
     (void)btn; (void)user_data;
     AdwTabPage *page = create_new_tab("Search", TRUE);
@@ -7208,17 +5956,15 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
 
     // Start async loading if we have settings-based dirs
     if (!all_dicts || had_cached_entries) {
-        startup_loading_active = TRUE;
         startup_random_word_pending = (!search_entry ||
                                        strlen(gtk_editable_get_text(GTK_EDITABLE(search_entry))) == 0);
         if (start_async_dict_loading(discover_from_dirs)) {
             if (had_cached_entries && !discover_from_dirs) {
                 gtk_window_present(GTK_WINDOW(window));
             } else {
-                show_startup_splash(app);
+                startup_splash_show(app, main_window, G_CALLBACK(request_loader_cancel));
             }
         } else {
-            startup_loading_active = FALSE;
             startup_random_word_pending = FALSE;
             finalize_dictionary_loading(TRUE, discover_from_dirs);
             gtk_window_present(GTK_WINDOW(window));
@@ -7243,7 +5989,7 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
         show_settings_dialog(NULL, NULL, app);
     }
 
-    setup_global_shortcut();
+    global_shortcut_setup(on_global_shortcut_activated, NULL);
 }
 
 
@@ -7366,7 +6112,7 @@ int main(int argc, char *argv[]) {
     }
     scan_popup_destroy();
     tray_icon_destroy();
-    destroy_global_shortcut();
+    global_shortcut_destroy();
     if (search_execute_source_id != 0) {
         g_source_remove(search_execute_source_id);
     }

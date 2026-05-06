@@ -24,6 +24,7 @@ sqlite3_dep = dependency('sqlite3')
 
 srcs = [
   'src/main.c',
+  'src/audio-playback.c',
   'src/splay-tree.c',
   'src/flat-index.c',
   'src/dict-cache.c',
@@ -41,9 +42,12 @@ srcs = [
   'src/dict-xdxf.c',
   'src/dict-render.c',
   'src/ripemd128.c',
+  'src/global-shortcut.c',
+  'src/search-utils.c',
   'src/settings.c',
   'src/settings-dialog.c',
   'src/scan-popup.c',
+  'src/startup-splash.c',
   'src/tray-icon.c',
   'src/langid.c',
   'src/langpair.c',
@@ -51,6 +55,7 @@ srcs = [
 ]
 
 executable('diction', srcs,
+  include_directories: include_directories('src'),
   dependencies: [ gtk_dep, adw_dep, webkit_dep, zlib_dep, json_dep, archive_dep, zstd_dep, lzma_dep, bz2_dep, lzo_dep, xml_dep, sqlite3_dep ],
   install: true,
 )

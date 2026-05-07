@@ -183,12 +183,21 @@ static void process_xml_xdxf(xmlTextReaderPtr reader, XdxfParserState *state, co
                     state->dict_name = g_strdup((const char*)full_name_attr);
                     xmlFree(full_name_attr);
                 }
-            } else if (xmlStrEqual(name, (const xmlChar*)"full_name") || 
-                       xmlStrEqual(name, (const xmlChar*)"title") ||
+            } else if (xmlStrEqual(name, (const xmlChar*)"full_title") ||
+                       xmlStrEqual(name, (const xmlChar*)"full_name")) {
+                xmlChar *val = xmlTextReaderReadString(reader);
+                if (val) {
+                    if (state->dict_name) g_free(state->dict_name);
+                    state->dict_name = g_strdup((const char*)val);
+                    xmlFree(val);
+                }
+            } else if (xmlStrEqual(name, (const xmlChar*)"title") ||
                        xmlStrEqual(name, (const xmlChar*)"description")) {
                 xmlChar *val = xmlTextReaderReadString(reader);
-                if (val && !state->dict_name) {
-                    state->dict_name = g_strdup((const char*)val);
+                if (val) {
+                    if (!state->dict_name) {
+                        state->dict_name = g_strdup((const char*)val);
+                    }
                     xmlFree(val);
                 }
             }
@@ -198,6 +207,7 @@ static void process_xml_xdxf(xmlTextReaderPtr reader, XdxfParserState *state, co
                 // Wrap the article in a semantic container
                 GString *def_str = g_string_new("<div class=\"dictionary-entry xdxf-ar\">");
                 int list_depth = 0;
+                int def_nesting = 0;
 
                 while (xmlTextReaderRead(reader) == 1 && xmlTextReaderDepth(reader) > ar_depth) {
                     const xmlChar *inner_name = xmlTextReaderConstLocalName(reader);
@@ -209,13 +219,15 @@ static void process_xml_xdxf(xmlTextReaderPtr reader, XdxfParserState *state, co
                         if (!is_empty && (xmlStrEqual(inner_name, (const xmlChar*)"ol") ||
                                           xmlStrEqual(inner_name, (const xmlChar*)"ul") ||
                                           xmlStrEqual(inner_name, (const xmlChar*)"table") ||
-                                          xmlStrEqual(inner_name, (const xmlChar*)"tr") ||
                                           xmlStrEqual(inner_name, (const xmlChar*)"tbody") ||
                                           xmlStrEqual(inner_name, (const xmlChar*)"thead"))) {
                             list_depth++;
                         }
                         
-                        if (xmlStrEqual(inner_name, (const xmlChar*)"k")) {
+                        if (xmlStrEqual(inner_name, (const xmlChar*)"def")) {
+                            def_nesting++;
+                            g_string_append_printf(def_str, "<div class=\"xdxf-def xdxf-def-lvl-%d\">", def_nesting);
+                        } else if (xmlStrEqual(inner_name, (const xmlChar*)"k")) {
                             int k_depth = cur_depth;
                             while (xmlTextReaderRead(reader) == 1 && xmlTextReaderDepth(reader) > k_depth) {
                                 if (xmlTextReaderNodeType(reader) == XML_READER_TYPE_TEXT ||
@@ -246,10 +258,6 @@ static void process_xml_xdxf(xmlTextReaderPtr reader, XdxfParserState *state, co
                                    xmlStrEqual(inner_name, (const xmlChar*)"p") ||
                                    xmlStrEqual(inner_name, (const xmlChar*)"div") ||
                                    xmlStrEqual(inner_name, (const xmlChar*)"span") ||
-                                   xmlStrEqual(inner_name, (const xmlChar*)"table") ||
-                                   xmlStrEqual(inner_name, (const xmlChar*)"tr") ||
-                                   xmlStrEqual(inner_name, (const xmlChar*)"td") ||
-                                   xmlStrEqual(inner_name, (const xmlChar*)"th") ||
                                    xmlStrEqual(inner_name, (const xmlChar*)"br") ||
                                    xmlStrEqual(inner_name, (const xmlChar*)"hr") ||
                                    xmlStrEqual(inner_name, (const xmlChar*)"blockquote")) {
@@ -293,20 +301,26 @@ static void process_xml_xdxf(xmlTextReaderPtr reader, XdxfParserState *state, co
                             }
                             
                         } else if (xmlStrEqual(inner_name, (const xmlChar*)"def")) {
-                            // Definition blocks become inline to allow explicit \n breaks
-                            g_string_append(def_str, "<span class=\"xdxf-def\">");
+                            g_string_append(def_str, "<div class=\"xdxf-def\">");
                             
-                        } else if (xmlStrEqual(inner_name, (const xmlChar*)"img")) {
-                            xmlChar *src = xmlTextReaderGetAttribute(reader, (const xmlChar*)"src");
-                            if (src) {
-                                g_string_append_printf(def_str, "<img class=\"xdxf-img\" src=\"%s\" />", (const char*)src);
-                                xmlFree(src);
+                        } else if (xmlStrEqual(inner_name, (const xmlChar*)"iref")) {
+                            xmlChar *href = xmlTextReaderGetAttribute(reader, (const xmlChar*)"href");
+                            if (href) {
+                                g_string_append_printf(def_str, "<a class=\"xdxf-iref\" href=\"%s\">", (const char*)href);
+                                xmlFree(href);
+                            } else {
+                                g_string_append(def_str, "<a class=\"xdxf-iref\">");
                             }
-                        } else if (xmlStrEqual(inner_name, (const xmlChar*)"snd")) {
-                            xmlChar *src = xmlTextReaderGetAttribute(reader, (const xmlChar*)"src");
-                            if (src) {
-                                g_string_append_printf(def_str, "<a class=\"xdxf-snd\" href=\"sound://%s\">🔊</a>", (const char*)src);
-                                xmlFree(src);
+                        } else if (xmlStrEqual(inner_name, (const xmlChar*)"rref")) {
+                            xmlChar *lctn = xmlTextReaderGetAttribute(reader, (const xmlChar*)"lctn");
+                            if (lctn) {
+                                const char *l = (const char*)lctn;
+                                if (g_str_has_suffix(l, ".ogg") || g_str_has_suffix(l, ".wav") || g_str_has_suffix(l, ".mp3") || g_str_has_suffix(l, ".opus")) {
+                                    g_string_append_printf(def_str, "<a class=\"xdxf-rref xdxf-snd\" href=\"sound://%s\">🔊</a>", l);
+                                } else {
+                                    g_string_append_printf(def_str, "<img class=\"xdxf-rref xdxf-img\" src=\"%s\" />", l);
+                                }
+                                xmlFree(lctn);
                             }
                         } else {
                             // Everything else (dtrn, ex, co, abr, tr) maps dynamically to semantic span elements
@@ -316,7 +330,6 @@ static void process_xml_xdxf(xmlTextReaderPtr reader, XdxfParserState *state, co
                         if (xmlStrEqual(inner_name, (const xmlChar*)"ol") ||
                             xmlStrEqual(inner_name, (const xmlChar*)"ul") ||
                             xmlStrEqual(inner_name, (const xmlChar*)"table") ||
-                            xmlStrEqual(inner_name, (const xmlChar*)"tr") ||
                             xmlStrEqual(inner_name, (const xmlChar*)"tbody") ||
                             xmlStrEqual(inner_name, (const xmlChar*)"thead")) {
                             if (list_depth > 0) list_depth--;
@@ -335,71 +348,38 @@ static void process_xml_xdxf(xmlTextReaderPtr reader, XdxfParserState *state, co
                                    xmlStrEqual(inner_name, (const xmlChar*)"p") ||
                                    xmlStrEqual(inner_name, (const xmlChar*)"div") ||
                                    xmlStrEqual(inner_name, (const xmlChar*)"span") ||
-                                   xmlStrEqual(inner_name, (const xmlChar*)"table") ||
-                                   xmlStrEqual(inner_name, (const xmlChar*)"tr") ||
-                                   xmlStrEqual(inner_name, (const xmlChar*)"td") ||
-                                   xmlStrEqual(inner_name, (const xmlChar*)"th") ||
                                    xmlStrEqual(inner_name, (const xmlChar*)"br") ||
                                    xmlStrEqual(inner_name, (const xmlChar*)"hr") ||
                                    xmlStrEqual(inner_name, (const xmlChar*)"blockquote")) {
                             g_string_append_printf(def_str, "</%s>", (const char*)inner_name);
-                        } else if (xmlStrEqual(inner_name, (const xmlChar*)"kref") || xmlStrEqual(inner_name, (const xmlChar*)"a")) {
+                        } else if (xmlStrEqual(inner_name, (const xmlChar*)"kref") || 
+                                   xmlStrEqual(inner_name, (const xmlChar*)"a") ||
+                                   xmlStrEqual(inner_name, (const xmlChar*)"iref") ||
+                                   xmlStrEqual(inner_name, (const xmlChar*)"rref")) {
                             g_string_append(def_str, "</a>");
                         } else if (xmlStrEqual(inner_name, (const xmlChar*)"def")) {
-                            g_string_append(def_str, "</span>");
+                            g_string_append(def_str, "</div>");
+                            if (def_nesting > 0) def_nesting--;
                         } else {
                             g_string_append(def_str, "</span>");
                         }
                     } else if (inner_type == XML_READER_TYPE_TEXT ||
-                               inner_type == XML_READER_TYPE_CDATA ||
-                               inner_type == XML_READER_TYPE_WHITESPACE ||
-                               inner_type == XML_READER_TYPE_SIGNIFICANT_WHITESPACE) {
+                               inner_type == XML_READER_TYPE_CDATA) {
                         const xmlChar *value = xmlTextReaderConstValue(reader);
                         if (value) {
-                            const char *ptr = (const char*)value;
-                            const char *start = ptr;
-                            gboolean is_line_start = TRUE;
-                            
-                            while (*ptr) {
-                                if (*ptr == '\n' || *ptr == '\t' || *ptr == ' ') {
-                                    if (ptr > start) {
-                                        char *esc = g_markup_escape_text(start, (gssize)(ptr - start));
-                                        g_string_append(def_str, esc);
-                                        g_free(esc);
-                                        is_line_start = FALSE;
-                                    }
-                                    
-                                    if (*ptr == '\n') {
-                                        if (list_depth == 0) {
-                                            g_string_append(def_str, "<br/>");
-                                        } else {
-                                            g_string_append_c(def_str, '\n');
-                                        }
-                                        is_line_start = TRUE;
-                                    } else if (*ptr == '\t') {
-                                        g_string_append(def_str, "&nbsp;&nbsp;&nbsp;&nbsp;");
-                                        is_line_start = FALSE;
-                                    } else if (*ptr == ' ') {
-                                        if (is_line_start) {
-                                            g_string_append(def_str, "&nbsp;");
-                                        } else {
-                                            g_string_append_c(def_str, ' ');
-                                        }
-                                    }
-                                    
-                                    ptr++;
-                                    start = ptr;
-                                } else {
-                                    ptr = g_utf8_next_char(ptr);
-                                }
+                            char *val_dup = g_strdup((const char*)value);
+                            for (char *p = val_dup; *p; p++) {
+                                if (*p == '\n' || *p == '\r') *p = ' ';
                             }
-                            
-                            if (ptr > start) {
-                                char *esc = g_markup_escape_text(start, (gssize)(ptr - start));
-                                g_string_append(def_str, esc);
-                                g_free(esc);
-                            }
+                            char *esc = g_markup_escape_text(val_dup, -1);
+                            g_string_append(def_str, esc);
+                            g_free(esc);
+                            g_free(val_dup);
                         }
+                    } else if (inner_type == XML_READER_TYPE_WHITESPACE ||
+                               inner_type == XML_READER_TYPE_SIGNIFICANT_WHITESPACE) {
+                        // Ignore pure formatting whitespace
+                        continue;
                     }
                 }
                 

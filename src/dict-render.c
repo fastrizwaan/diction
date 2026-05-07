@@ -2330,6 +2330,64 @@ char* dsl_render_to_html(const char *dsl_text,
     buf_append_str(&b, link_color);
     buf_append_str(&b, " !important;text-decoration:none;cursor:pointer;}");
     buf_append_str(&b, "a:hover, .dict-link:hover, kref:hover, ref:hover, .xdxf-kref:hover{text-decoration:underline !important;}");
+    
+    buf_append_str(&b, ".xdxf-tr { color: ");
+    buf_append_str(&b, trn_color);
+    buf_append_str(&b, "; display: inline-block !important; margin: 0; padding: 0; vertical-align: baseline; }\n");
+    buf_append_str(&b, ".xdxf-tr::before { content: \"[\"; }\n");
+    buf_append_str(&b, ".xdxf-tr::after { content: \"]\"; }\n");
+    buf_append_str(&b, ".xdxf-abbr { border-bottom: 1px dotted currentColor; color: ");
+    buf_append_str(&b, pos_color);
+    buf_append_str(&b, "; display: inline; margin: 0; }\n");
+    buf_append_str(&b, ".xdxf-def { display: block; padding: 1px 0; margin: 1px 0; }\n");
+    buf_append_str(&b, ".xdxf-ar { counter-reset: xdxf-lvl1; }\n");
+    buf_append_str(&b, ".xdxf-def-lvl-2 { counter-reset: xdxf-lvl2; padding: 4px; color: inherit; }\n");
+    buf_append_str(&b, ".xdxf-def-lvl-3 { counter-reset: xdxf-lvl3; padding-left: 1.2em; }\n");
+    buf_append_str(&b, ".xdxf-def-lvl-4 { counter-reset: xdxf-lvl4; padding-left: 1.2em; }\n");
+
+    /* Level 1 (lvl-2) Numbering */
+    buf_append_str(&b, ".xdxf-def-lvl-2::before { display: inline-block; min-width: 1.2em; counter-increment: xdxf-lvl1; content: counter(xdxf-lvl1, decimal) \". \"; font-weight: bold; color: ");
+    buf_append_str(&b, dark_mode ? "#ff6b6b" : "#d32f2f");
+    buf_append_str(&b, "; }\n");
+    /* Switch to Roman if depth >= 3 */
+    buf_append_str(&b, ".xdxf-ar:has(.xdxf-def-lvl-4) .xdxf-def-lvl-2::before { content: counter(xdxf-lvl1, upper-roman) \". \"; }\n");
+
+    /* Level 2 (lvl-3) Numbering */
+    buf_append_str(&b, ".xdxf-def-lvl-3::before { display: inline-block; min-width: 1.2em; counter-increment: xdxf-lvl2; content: counter(xdxf-lvl2, decimal) \") \"; font-weight: bold; color: ");
+    buf_append_str(&b, dark_mode ? "#ff6b6b" : "#d32f2f");
+    buf_append_str(&b, "; }\n");
+    /* Switch to 1. if depth >= 3 */
+    buf_append_str(&b, ".xdxf-ar:has(.xdxf-def-lvl-4) .xdxf-def-lvl-3::before { content: counter(xdxf-lvl2, decimal) \". \"; }\n");
+
+    /* Level 3 (lvl-4) Numbering */
+    buf_append_str(&b, ".xdxf-def-lvl-4::before { display: inline-block; min-width: 1.2em; counter-increment: xdxf-lvl3; content: counter(xdxf-lvl3, decimal) \") \"; font-weight: bold; color: ");
+    buf_append_str(&b, dark_mode ? "#ff6b6b" : "#d32f2f");
+    buf_append_str(&b, "; }\n");
+    buf_append_str(&b, ".xdxf-gr { display: inline-block !important; color: ");
+    buf_append_str(&b, pos_color);
+    buf_append_str(&b, "; font-style: italic; margin: 0; padding: 0; vertical-align: baseline; }\n");
+    buf_append_str(&b, ".xdxf-co { display: inline; color: inherit; font-style: italic; opacity: 0.8; margin-left: 0.4em; }\n");
+    buf_append_str(&b, ".xdxf-co::before, .xdxf-co::after { content: \"\" !important; }\n");
+    buf_append_str(&b, ".xdxf-dtrn { display: inline; font-weight: bold; color: ");
+    buf_append_str(&b, dark_mode ? "#ff9800" : "#e65100");
+    buf_append_str(&b, "; }\n");
+    buf_append_str(&b, ".xdxf-deftext { display: inline; }\n");
+    buf_append_str(&b, ".xdxf-ex { display: block; padding-left: 1em; margin: 0.2em 0; }\n");
+    buf_append_str(&b, ".xdxf-ex_orig { display: block; color: ");
+    buf_append_str(&b, dark_mode ? "#b39ddb" : "#673ab7");
+    buf_append_str(&b, "; }\n");
+    buf_append_str(&b, ".xdxf-ex_tran { display: block; color: ");
+    buf_append_str(&b, dark_mode ? "#9e9e9e" : "#757575");
+    buf_append_str(&b, "; }\n");
+    buf_append_str(&b, ".xdxf-iref { color: ");
+    buf_append_str(&b, link_color);
+    buf_append_str(&b, "; text-decoration: underline; margin-left: 0.4em; }\n");
+    buf_append_str(&b, ".xdxf-rref { display: inline-block; vertical-align: middle; margin-left: 0.4em; }\n");
+    buf_append_str(&b, ".xdxf-rref.xdxf-snd { text-decoration: none; font-size: 1.2em; cursor: pointer; }\n");
+    buf_append_str(&b, ".xdxf-etm { display: block; margin-top: 4px; font-style: italic; opacity: 0.8; }\n");
+    buf_append_str(&b, ".xdxf-mrkd { background-color: ");
+    buf_append_str(&b, dark_mode ? "#424242" : "#e0e0e0");
+    buf_append_str(&b, "; padding: 0 2px; border-radius: 2px; }\n");
     /* Normalize h1/h2/h3 sizes inside entry bodies — MDX dicts often use h1 for headwords */
     buf_append_str(&b, ".rendered-entry-body h1,.rendered-entry h1,.wic h1"
         "{font-size:1.15em;font-weight:bold;margin:0.25em 0 0.15em 0;line-height:1.3;}");

@@ -119,6 +119,7 @@ static char *bgl_decode_string(const char *data, size_t len, const char *charset
 static char *format_bgl_definition(const unsigned char *def_data, size_t def_len, const char *target_charset, size_t *out_len) {
     if (def_len == 0) { *out_len = 0; return g_strdup(""); }
     
+    gboolean def_body_ended = FALSE;
     GString *raw_str = g_string_sized_new(def_len + 64);
     for (size_t i = 0; i < def_len; i++) {
         unsigned char c = def_data[i];
@@ -133,7 +134,7 @@ static char *format_bgl_definition(const unsigned char *def_data, size_t def_len
         } else if (c == 0x18) {
             unsigned int len = def_data[i+1];
             if (len <= def_len - i - 2) i += len + 1;
-        } else if (c == 0x28 && (def_len - i) >= 3) {
+        } else if (c == 0x28 && def_body_ended && (def_len - i) >= 3) {
             // we should technically check if Previous Body Ended but simplicity rules
             unsigned int len = (def_data[i+1] << 8) | def_data[i+2];
             if (len <= def_len - i - 3) i += len + 2;
@@ -155,6 +156,7 @@ static char *format_bgl_definition(const unsigned char *def_data, size_t def_len
                 // POS
                 i += 2;
             } else if (c == 0x14) {
+                def_body_ended = TRUE;
             } else if (c == 0x1A) {
                 unsigned int len = def_data[i+1];
                 if (len <= 10 && len <= def_len - i - 2) {

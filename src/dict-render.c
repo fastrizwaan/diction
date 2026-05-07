@@ -421,6 +421,14 @@ static char *rewrite_style_for_theme(const char *style, gboolean dark_mode) {
         g_strstrip(prop);
         g_strstrip(val);
 
+        gboolean has_important = FALSE;
+        size_t val_len = strlen(val);
+        if (val_len > 10 && g_ascii_strcasecmp(val + val_len - 10, "!important") == 0) {
+            has_important = TRUE;
+            val[val_len - 10] = '\0';
+            g_strstrip(val);
+        }
+
         char *themed_val = NULL;
         if (g_ascii_strcasecmp(prop, "font-size") == 0 ||
             g_ascii_strcasecmp(prop, "font-family") == 0 ||
@@ -510,6 +518,12 @@ static char *rewrite_style_for_theme(const char *style, gboolean dark_mode) {
                 g_free(themed_val);
                 themed_val = g_strdup("rgb(0, 0, 0)");
             }
+        }
+
+        if (has_important) {
+            char *with_important = g_strdup_printf("%s !important", themed_val);
+            g_free(themed_val);
+            themed_val = with_important;
         }
 
         g_string_append_printf(out, "%s: %s", prop, themed_val);

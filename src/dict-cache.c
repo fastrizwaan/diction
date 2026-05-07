@@ -38,7 +38,7 @@ gboolean dict_cache_is_valid(const char *cache_path, const char *original_path) 
     if (stat(original_path, &orig_st) != 0) {
         return FALSE;
     }
-    gboolean valid = (cache_st.st_mtime >= orig_st.st_mtime);
+    gboolean valid = (cache_st.st_size > 0 && cache_st.st_mtime >= orig_st.st_mtime);
     if (!valid) {
         fprintf(stderr, "[CACHE] MISS (outdated): %s (cache=%ld, orig=%ld)\n", original_path, (long)cache_st.st_mtime, (long)orig_st.st_mtime);
     } else {

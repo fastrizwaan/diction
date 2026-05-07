@@ -56,7 +56,8 @@ srcs = [
   'src/mdx-decompress.c',
   'src/dict-dictd.c',
   'src/dict-stardict-render.c',
-  'src/text-utils.c'
+  'src/text-utils.c',
+  'src/dict-sdict.c'
 ]
 
 executable('diction', srcs,

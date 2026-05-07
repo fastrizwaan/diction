@@ -181,6 +181,8 @@ DictFormat dict_detect_format(const char *path) {
         return DICT_FORMAT_XDXF;
     if (ends_with_ci(path, ".index"))
         return DICT_FORMAT_DICTD;
+    if (ends_with_ci(path, ".dct"))
+        return DICT_FORMAT_SDICT;
     if (ends_with_ci(path, ".tar.bz2") || ends_with_ci(path, ".tar.gz") || ends_with_ci(path, ".tar.xz") || ends_with_ci(path, ".tgz") || ends_with_ci(path, "xdxf.zip")) {
         return DICT_FORMAT_XDXF;
     }
@@ -195,6 +197,7 @@ extern DictMmap* parse_mdx_file(const char *path, volatile gint *cancel_flag, gi
 extern DictMmap* parse_stardict(const char *ifo_path, volatile gint *cancel_flag, gint expected);
 extern DictMmap* parse_slob_file(const char *path, volatile gint *cancel_flag, gint expected);
 extern DictMmap* parse_dictd_file(const char *index_path, volatile gint *cancel_flag, gint expected);
+extern DictMmap* parse_sdict_file(const char *path, volatile gint *cancel_flag, gint expected);
 
 DictMmap* dict_load_any(const char *path, DictFormat fmt, volatile gint *cancel_flag, gint expected_generation) {
     DictMmap *dict = NULL;
@@ -222,6 +225,9 @@ DictMmap* dict_load_any(const char *path, DictFormat fmt, volatile gint *cancel_
             break;
         case DICT_FORMAT_DICTD:
             dict = parse_dictd_file(path, cancel_flag, expected_generation);
+            break;
+        case DICT_FORMAT_SDICT:
+            dict = parse_sdict_file(path, cancel_flag, expected_generation);
             break;
 
         default:

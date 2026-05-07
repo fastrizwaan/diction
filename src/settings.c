@@ -55,6 +55,9 @@ char* settings_resolve_dictionary_name(const char *path) {
         case DICT_FORMAT_SLOB:
             dict = parse_slob_file(path, NULL, 0);
             break;
+        case DICT_FORMAT_SDICT:
+            dict = parse_sdict_file(path, NULL, 0);
+            break;
         default:
             break;
     }

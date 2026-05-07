@@ -1861,6 +1861,8 @@ static void on_add_dictionary_file(GtkButton *btn, SettingsDialogData *data) {
     gtk_file_filter_add_pattern(filter, "*.xdxf");
     gtk_file_filter_add_pattern(filter, "*.xdxf.dz");
     gtk_file_filter_add_pattern(filter, "*.zip");
+    gtk_file_filter_add_pattern(filter, "*.dct");
+    gtk_file_filter_add_pattern(filter, "*.index");
 
     g_list_store_append(filters, filter);
     gtk_file_dialog_set_filters(chooser, G_LIST_MODEL(filters));
@@ -1910,6 +1912,8 @@ static void on_import_dictionary_files(GtkButton *btn, SettingsDialogData *data)
     gtk_file_filter_add_pattern(filter, "*.xdxf");
     gtk_file_filter_add_pattern(filter, "*.xdxf.dz");
     gtk_file_filter_add_pattern(filter, "*.zip");
+    gtk_file_filter_add_pattern(filter, "*.dct");
+    gtk_file_filter_add_pattern(filter, "*.index");
 
     g_list_store_append(filters, filter);
     gtk_file_dialog_set_filters(chooser, G_LIST_MODEL(filters));

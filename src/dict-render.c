@@ -2333,7 +2333,7 @@ char* dsl_render_to_html(const char *dsl_text,
     
     buf_append_str(&b, ".xdxf-tr { color: ");
     buf_append_str(&b, trn_color);
-    buf_append_str(&b, "; display: inline-block !important; margin: 0; padding: 0; vertical-align: baseline; }\n");
+    buf_append_str(&b, "; display: block !important; margin: 0 0 0.12em 0; padding: 0; vertical-align: baseline; }\n");
     buf_append_str(&b, ".xdxf-tr::before { content: \"[\"; }\n");
     buf_append_str(&b, ".xdxf-tr::after { content: \"]\"; }\n");
     buf_append_str(&b, ".xdxf-abbr { border-bottom: 1px dotted currentColor; color: ");
@@ -2365,8 +2365,8 @@ char* dsl_render_to_html(const char *dsl_text,
     buf_append_str(&b, "; }\n");
     buf_append_str(&b, ".xdxf-gr { display: inline-block !important; color: ");
     buf_append_str(&b, pos_color);
-    buf_append_str(&b, "; font-style: italic; margin: 0; padding: 0; vertical-align: baseline; }\n");
-    buf_append_str(&b, ".xdxf-co { display: inline; color: inherit; font-style: italic; opacity: 0.8; margin-left: 0.4em; }\n");
+    buf_append_str(&b, "; font-style: italic; margin: 0 0.35em 0 0; padding: 0; vertical-align: baseline; white-space: nowrap; }\n");
+    buf_append_str(&b, ".xdxf-co { display: inline; color: inherit; font-style: italic; opacity: 0.8; margin-left: 0; }\n");
     buf_append_str(&b, ".xdxf-co::before, .xdxf-co::after { content: \"\" !important; }\n");
     buf_append_str(&b, ".xdxf-dtrn { display: inline; font-weight: bold; color: ");
     buf_append_str(&b, dark_mode ? "#ff9800" : "#e65100");
@@ -2382,7 +2382,8 @@ char* dsl_render_to_html(const char *dsl_text,
     buf_append_str(&b, ".xdxf-iref { color: ");
     buf_append_str(&b, link_color);
     buf_append_str(&b, "; text-decoration: underline; margin-left: 0.4em; }\n");
-    buf_append_str(&b, ".xdxf-rref { display: inline-block; vertical-align: middle; margin-left: 0.4em; }\n");
+    buf_append_str(&b, ".xdxf-categ, .xdxf-sr { display: block; margin-top: 0.2em; }\n");
+    buf_append_str(&b, ".xdxf-rref { display: inline-block; vertical-align: middle; margin-left: 0; margin-right: 0; }\n");
     buf_append_str(&b, ".xdxf-rref.xdxf-snd { text-decoration: none; font-size: 1.2em; cursor: pointer; }\n");
     buf_append_str(&b, ".xdxf-etm { display: block; margin-top: 4px; font-style: italic; opacity: 0.8; }\n");
     buf_append_str(&b, ".xdxf-mrkd { background-color: ");
@@ -2578,6 +2579,7 @@ char* dsl_render_to_html(const char *dsl_text,
     buf_append_str(&b, ";font-size:1.32em;font-weight:700;color:");
     buf_append_str(&b, heading_color);
     buf_append_str(&b, ";}");
+    buf_append_str(&b, ".diction-lemma,.lemma,.py-lemma,.gold-entry-headword,.slate-lemma,.paper-lemma{white-space:pre-line;}");
     buf_append_str(&b, ".paper-dict{font-size:0.82em;letter-spacing:0.03em;text-transform:uppercase;white-space:nowrap;color:");
     buf_append_str(&b, com_color);
     buf_append_str(&b, ";}");

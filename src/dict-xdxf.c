@@ -140,7 +140,86 @@ typedef struct {
     char *source_lang;
     char *target_lang;
     char *resource_dir;
+    int xdxf_standard;
+    int default_lousy_format;
 } XdxfParserState;
+
+enum {
+    XDXF_STANDARD_STRICT = 0,
+    XDXF_STANDARD_LOUSY = 1
+};
+
+enum {
+    XDXF_LOUSY_FORMAT_UNKNOWN = 0,
+    XDXF_LOUSY_FORMAT_LOGICAL = 1,
+    XDXF_LOUSY_FORMAT_VISUAL = 2
+};
+
+static int xdxf_detect_standard_from_file(const char *xml_path) {
+    if (!xml_path) return XDXF_STANDARD_STRICT;
+
+    FILE *fp = fopen(xml_path, "rb");
+    if (!fp) return XDXF_STANDARD_STRICT;
+
+    char sniff[8193];
+    size_t n = fread(sniff, 1, sizeof(sniff) - 1, fp);
+    fclose(fp);
+    sniff[n] = '\0';
+
+    if (g_strstr_len(sniff, (gssize)n, "xdxf_lousy.dtd") != NULL) {
+        return XDXF_STANDARD_LOUSY;
+    }
+    return XDXF_STANDARD_STRICT;
+}
+
+static const char *xdxf_profile_class(int standard) {
+    return (standard == XDXF_STANDARD_LOUSY) ? "xdxf-profile-lousy" : "xdxf-profile-strict";
+}
+
+static const char *xdxf_lousy_format_class(int format_kind) {
+    if (format_kind == XDXF_LOUSY_FORMAT_VISUAL) return "xdxf-format-visual";
+    if (format_kind == XDXF_LOUSY_FORMAT_LOGICAL) return "xdxf-format-logical";
+    return "xdxf-format-unknown";
+}
+
+static gboolean buffer_contains_literal(const char *buf, size_t len, const char *needle) {
+    if (!buf || !needle) return FALSE;
+    size_t needle_len = strlen(needle);
+    if (needle_len == 0 || len < needle_len) return FALSE;
+    for (size_t i = 0; i + needle_len <= len; i++) {
+        if (memcmp(buf + i, needle, needle_len) == 0) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static gboolean xdxf_is_number_marker_text(const char *text) {
+    if (!text) return FALSE;
+    const char *p = text;
+    while (*p && g_ascii_isspace(*p)) p++;
+    if (!g_ascii_isdigit(*p)) return FALSE;
+    while (*p && g_ascii_isdigit(*p)) p++;
+    return (*p == '.');
+}
+
+static gboolean xdxf_is_roman_marker_text(const char *text) {
+    if (!text) return FALSE;
+    const char *p = text;
+    while (*p && g_ascii_isspace(*p)) p++;
+    if (!*p) return FALSE;
+    const char *start = p;
+    while (*p) {
+        char ch = g_ascii_toupper(*p);
+        if (!(ch == 'I' || ch == 'V' || ch == 'X' || ch == 'L' || ch == 'C' || ch == 'D' || ch == 'M')) {
+            break;
+        }
+        p++;
+    }
+    if (p == start) return FALSE;
+    while (*p && g_ascii_isspace(*p)) p++;
+    return (*p == '\0');
+}
 
 static char *xdxf_collapse_whitespace(const char *text, gboolean trim_edges) {
     if (!text) return g_strdup("");
@@ -250,6 +329,18 @@ static void process_xml_xdxf(xmlTextReaderPtr reader, XdxfParserState *state, co
 
         if (type == XML_READER_TYPE_ELEMENT) {
             if (xmlStrEqual(name, (const xmlChar*)"xdxf")) {
+                xmlChar *root_format = xmlTextReaderGetAttribute(reader, (const xmlChar*)"format");
+                if (state->xdxf_standard == XDXF_STANDARD_LOUSY && root_format) {
+                    if (g_ascii_strcasecmp((const char*)root_format, "visual") == 0) {
+                        state->default_lousy_format = XDXF_LOUSY_FORMAT_VISUAL;
+                    } else if (g_ascii_strcasecmp((const char*)root_format, "logical") == 0) {
+                        state->default_lousy_format = XDXF_LOUSY_FORMAT_LOGICAL;
+                    }
+                }
+                if (root_format) {
+                    xmlFree(root_format);
+                }
+
                 xmlChar *lang_from = xmlTextReaderGetAttribute(reader, (const xmlChar*)"lang_from");
                 if (lang_from) {
                     state->source_lang = g_strdup((const char*)lang_from);
@@ -286,11 +377,28 @@ static void process_xml_xdxf(xmlTextReaderPtr reader, XdxfParserState *state, co
  else if (xmlStrEqual(name, (const xmlChar*)"ar")) {
                 int ar_depth = xmlTextReaderDepth(reader);
                 GString *hw_str  = g_string_new("");
-                // Wrap the article in a semantic container
-                GString *def_str = g_string_new("<div class=\"dictionary-entry xdxf-ar\">");
+                int ar_lousy_format = state->default_lousy_format;
+                xmlChar *ar_format = xmlTextReaderGetAttribute(reader, (const xmlChar*)"f");
+                if (state->xdxf_standard == XDXF_STANDARD_LOUSY && ar_format) {
+                    if (((const char*)ar_format)[0] == 'v' || ((const char*)ar_format)[0] == 'V') {
+                        ar_lousy_format = XDXF_LOUSY_FORMAT_VISUAL;
+                    } else if (((const char*)ar_format)[0] == 'l' || ((const char*)ar_format)[0] == 'L') {
+                        ar_lousy_format = XDXF_LOUSY_FORMAT_LOGICAL;
+                    }
+                }
+                if (ar_format) {
+                    xmlFree(ar_format);
+                }
+
+                // Wrap the article with profile/format classes for CSS routing.
+                GString *def_str = g_string_new("");
+                g_string_append_printf(def_str, "<div class=\"dictionary-entry xdxf-ar %s %s\">",
+                                       xdxf_profile_class(state->xdxf_standard),
+                                       xdxf_lousy_format_class(ar_lousy_format));
                 int def_nesting = 0;
                 gboolean pending_space = FALSE;
                 gboolean has_inline_content = FALSE;
+                gboolean seen_roman_section = FALSE;
 
                 while (xmlTextReaderRead(reader) == 1 && xmlTextReaderDepth(reader) > ar_depth) {
                     const xmlChar *inner_name = xmlTextReaderConstLocalName(reader);
@@ -353,7 +461,45 @@ static void process_xml_xdxf(xmlTextReaderPtr reader, XdxfParserState *state, co
                             // Map explicit color definitions
                             xmlChar *c_attr = xmlTextReaderGetAttribute(reader, (const xmlChar*)"c");
                             if (c_attr) {
-                                g_string_append_printf(def_str, "<span class=\"xdxf-c\" style=\"color: %s;\">", (const char*)c_attr);
+                                const char *c_attr_str = (const char*)c_attr;
+                                gboolean is_blue = (g_ascii_strcasecmp(c_attr_str, "blue") == 0);
+                                gboolean is_numeric_marker = FALSE;
+                                if (is_blue) {
+                                    xmlNodePtr c_node = xmlTextReaderExpand(reader);
+                                    if (c_node) {
+                                        xmlChar *c_val = xmlNodeGetContent(c_node);
+                                        if (c_val) {
+                                            is_numeric_marker = xdxf_is_number_marker_text((const char*)c_val);
+                                            xmlFree(c_val);
+                                        }
+                                    }
+                                }
+                                gboolean is_roman_marker = FALSE;
+                                if (is_blue && !is_numeric_marker) {
+                                    xmlNodePtr c_node = xmlTextReaderExpand(reader);
+                                    if (c_node) {
+                                        xmlChar *c_val = xmlNodeGetContent(c_node);
+                                        if (c_val) {
+                                            is_roman_marker = xdxf_is_roman_marker_text((const char*)c_val);
+                                            xmlFree(c_val);
+                                        }
+                                    }
+                                }
+
+                                if (is_numeric_marker) {
+                                    g_string_append_printf(def_str, "<span class=\"xdxf-c xdxf-c-blue-num\" style=\"color: %s;\">", c_attr_str);
+                                } else if (is_roman_marker &&
+                                           state->xdxf_standard == XDXF_STANDARD_LOUSY &&
+                                           ar_lousy_format == XDXF_LOUSY_FORMAT_VISUAL) {
+                                    if (seen_roman_section) {
+                                        g_string_append_printf(def_str, "<span class=\"xdxf-c xdxf-c-blue-roman xdxf-c-blue-roman-break\" style=\"color: %s;\">", c_attr_str);
+                                    } else {
+                                        g_string_append_printf(def_str, "<span class=\"xdxf-c xdxf-c-blue-roman\" style=\"color: %s;\">", c_attr_str);
+                                    }
+                                    seen_roman_section = TRUE;
+                                } else {
+                                    g_string_append_printf(def_str, "<span class=\"xdxf-c\" style=\"color: %s;\">", c_attr_str);
+                                }
                                 xmlFree(c_attr);
                             } else {
                                 g_string_append(def_str, "<span class=\"xdxf-c\">");
@@ -534,6 +680,15 @@ DictMmap* parse_xdxf_file(const char *path, volatile gint *cancel_flag, gint exp
             size_t size = st.st_size;
             const char *data = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
             if (data != MAP_FAILED) {
+                if (!buffer_contains_literal(data, size, "xdxf-profile-")) {
+                    /* Cached payload predates XDXF profile classes; rebuild cache. */
+                    munmap((void*)data, size);
+                    close(fd);
+                    unlink(cache_path);
+                    fd = -1;
+                    goto rebuild_xdxf_cache;
+                }
+
                 DictMmap *dict = g_new0(DictMmap, 1);
                 dict->fd = fd;
                 dict->data = data;
@@ -588,6 +743,7 @@ DictMmap* parse_xdxf_file(const char *path, volatile gint *cancel_flag, gint exp
         }
     }
 
+rebuild_xdxf_cache:
     // Need to build cache
     char *res_dir = g_strdup_printf("%s.res", cache_path);
     char *xml_path = NULL;
@@ -658,6 +814,8 @@ DictMmap* parse_xdxf_file(const char *path, volatile gint *cancel_flag, gint exp
     state.builder = builder;
     state.entries = g_array_new(FALSE, TRUE, sizeof(TreeEntry));
     state.resource_dir = res_dir;
+    state.xdxf_standard = xdxf_detect_standard_from_file(xml_path);
+    state.default_lousy_format = XDXF_LOUSY_FORMAT_UNKNOWN;
 
     process_xml_xdxf(reader, &state, path, cancel_flag, expected);
 

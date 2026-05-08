@@ -9,6 +9,14 @@
 #include "dict-mmap.h"
 #include "dict-cache.h"
 
+/* Parsers used by settings_resolve_dictionary_name() */
+extern DictMmap* parse_stardict(const char *ifo_path, volatile gint *cancel_flag, gint expected);
+extern DictMmap* parse_mdx_file(const char *path, volatile gint *cancel_flag, gint expected);
+extern DictMmap* parse_bgl_file(const char *path, volatile gint *cancel_flag, gint expected);
+extern DictMmap* parse_slob_file(const char *path, volatile gint *cancel_flag, gint expected);
+extern DictMmap* parse_sdict_file(const char *path, volatile gint *cancel_flag, gint expected);
+extern DictMmap* parse_lsd_file(const char *path, volatile gint *cancel_flag, gint expected);
+
 static GPtrArray *settings_collect_mdx_companion_paths(const char *mdx_path);
 static gboolean ends_with_ci(const char *text, const char *suffix);
 
@@ -57,6 +65,9 @@ char* settings_resolve_dictionary_name(const char *path) {
             break;
         case DICT_FORMAT_SDICT:
             dict = parse_sdict_file(path, NULL, 0);
+            break;
+        case DICT_FORMAT_LSD:
+            dict = parse_lsd_file(path, NULL, 0);
             break;
         default:
             break;

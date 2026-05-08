@@ -4748,6 +4748,8 @@ static void collect_dictionary_candidate_paths_with_find(const char *dirpath,
     g_ptr_array_add(argv_array, g_strdup("-o"));
     g_ptr_array_add(argv_array, g_strdup("-iname")); g_ptr_array_add(argv_array, g_strdup("*.slob"));
     g_ptr_array_add(argv_array, g_strdup("-o"));
+    g_ptr_array_add(argv_array, g_strdup("-iname")); g_ptr_array_add(argv_array, g_strdup("*.lsd"));
+    g_ptr_array_add(argv_array, g_strdup("-o"));
     g_ptr_array_add(argv_array, g_strdup("-iname")); g_ptr_array_add(argv_array, g_strdup("*.xdxf"));
     g_ptr_array_add(argv_array, g_strdup("-o"));
     g_ptr_array_add(argv_array, g_strdup("-iname")); g_ptr_array_add(argv_array, g_strdup("*.xdxf.dz"));

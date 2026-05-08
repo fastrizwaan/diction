@@ -177,6 +177,8 @@ DictFormat dict_detect_format(const char *path) {
         return DICT_FORMAT_BGL;
     if (ends_with_ci(path, ".slob"))
         return DICT_FORMAT_SLOB;
+    if (ends_with_ci(path, ".lsd"))
+        return DICT_FORMAT_LSD;
     if (ends_with_ci(path, ".xdxf") || ends_with_ci(path, ".xdxf.dz"))
         return DICT_FORMAT_XDXF;
     if (ends_with_ci(path, ".index"))
@@ -198,6 +200,7 @@ extern DictMmap* parse_stardict(const char *ifo_path, volatile gint *cancel_flag
 extern DictMmap* parse_slob_file(const char *path, volatile gint *cancel_flag, gint expected);
 extern DictMmap* parse_dictd_file(const char *index_path, volatile gint *cancel_flag, gint expected);
 extern DictMmap* parse_sdict_file(const char *path, volatile gint *cancel_flag, gint expected);
+extern DictMmap* parse_lsd_file(const char *path, volatile gint *cancel_flag, gint expected);
 
 DictMmap* dict_load_any(const char *path, DictFormat fmt, volatile gint *cancel_flag, gint expected_generation) {
     DictMmap *dict = NULL;
@@ -228,6 +231,9 @@ DictMmap* dict_load_any(const char *path, DictFormat fmt, volatile gint *cancel_
             break;
         case DICT_FORMAT_SDICT:
             dict = parse_sdict_file(path, cancel_flag, expected_generation);
+            break;
+        case DICT_FORMAT_LSD:
+            dict = parse_lsd_file(path, cancel_flag, expected_generation);
             break;
 
         default:

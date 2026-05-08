@@ -1854,6 +1854,7 @@ static void on_add_dictionary_file(GtkButton *btn, SettingsDialogData *data) {
     gtk_file_filter_add_pattern(filter, "*.mdx");
     gtk_file_filter_add_pattern(filter, "*.bgl");
     gtk_file_filter_add_pattern(filter, "*.slob");
+    gtk_file_filter_add_pattern(filter, "*.lsd");
     gtk_file_filter_add_pattern(filter, "*.tar.bz2");
     gtk_file_filter_add_pattern(filter, "*.tar.gz");
     gtk_file_filter_add_pattern(filter, "*.tar.xz");
@@ -1905,6 +1906,7 @@ static void on_import_dictionary_files(GtkButton *btn, SettingsDialogData *data)
     gtk_file_filter_add_pattern(filter, "*.mdx");
     gtk_file_filter_add_pattern(filter, "*.bgl");
     gtk_file_filter_add_pattern(filter, "*.slob");
+    gtk_file_filter_add_pattern(filter, "*.lsd");
     gtk_file_filter_add_pattern(filter, "*.tar.bz2");
     gtk_file_filter_add_pattern(filter, "*.tar.gz");
     gtk_file_filter_add_pattern(filter, "*.tar.xz");

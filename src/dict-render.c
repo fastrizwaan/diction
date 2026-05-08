@@ -2838,7 +2838,7 @@ char* dsl_render_to_html(const char *dsl_text,
         buf_append_str(&b, "<div class='rendered-entry gold-entry-rendered'><div class='rendered-entry-body'>");
     } else {
         buf_append_str(&b, "<div class='rendered-entry diction-entry-rendered'>");
-        if (format == DICT_FORMAT_DSL || format == DICT_FORMAT_SDICT || format == DICT_FORMAT_DICTD) {
+        if (format == DICT_FORMAT_DSL || format == DICT_FORMAT_LSD || format == DICT_FORMAT_SDICT || format == DICT_FORMAT_DICTD) {
             buf_append_str(&b, "<h2 style='color:");
             buf_append_str(&b, heading_color);
             buf_append_str(&b, "; margin-bottom: 0.5em;'>");

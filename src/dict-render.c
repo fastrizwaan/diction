@@ -2340,7 +2340,7 @@ char* dsl_render_to_html(const char *dsl_text,
     buf_append_str(&b, pos_color);
     buf_append_str(&b, "; display: inline; margin: 0; }\n");
     buf_append_str(&b, ".xdxf-profile-strict .xdxf-def { display: block; padding: 1px 0; margin: 1px 0; }\n");
-    buf_append_str(&b, ".xdxf-profile-strict .xdxf-ar { counter-reset: xdxf-lvl1; }\n");
+    buf_append_str(&b, ".xdxf-profile-strict.xdxf-ar { counter-reset: xdxf-lvl1; }\n");
     buf_append_str(&b, ".xdxf-profile-strict .xdxf-def-lvl-2 { counter-reset: xdxf-lvl2; padding: 4px; color: inherit; }\n");
     buf_append_str(&b, ".xdxf-profile-strict .xdxf-def-lvl-3 { counter-reset: xdxf-lvl3; padding-left: 1.2em; }\n");
     buf_append_str(&b, ".xdxf-profile-strict .xdxf-def-lvl-4 { counter-reset: xdxf-lvl4; padding-left: 1.2em; }\n");

@@ -462,42 +462,49 @@ static void process_xml_xdxf(xmlTextReaderPtr reader, XdxfParserState *state, co
                             xmlChar *c_attr = xmlTextReaderGetAttribute(reader, (const xmlChar*)"c");
                             if (c_attr) {
                                 const char *c_attr_str = (const char*)c_attr;
-                                gboolean is_blue = (g_ascii_strcasecmp(c_attr_str, "blue") == 0);
-                                gboolean is_numeric_marker = FALSE;
-                                if (is_blue) {
-                                    xmlNodePtr c_node = xmlTextReaderExpand(reader);
-                                    if (c_node) {
-                                        xmlChar *c_val = xmlNodeGetContent(c_node);
-                                        if (c_val) {
-                                            is_numeric_marker = xdxf_is_number_marker_text((const char*)c_val);
-                                            xmlFree(c_val);
+                                gboolean apply_special_formatting = (
+                                    state->xdxf_standard == XDXF_STANDARD_LOUSY &&
+                                    ar_lousy_format == XDXF_LOUSY_FORMAT_VISUAL
+                                );
+                                if (apply_special_formatting) {
+                                    gboolean is_blue = (g_ascii_strcasecmp(c_attr_str, "blue") == 0);
+                                    gboolean is_numeric_marker = FALSE;
+                                    if (is_blue) {
+                                        xmlNodePtr c_node = xmlTextReaderExpand(reader);
+                                        if (c_node) {
+                                            xmlChar *c_val = xmlNodeGetContent(c_node);
+                                            if (c_val) {
+                                                is_numeric_marker = xdxf_is_number_marker_text((const char*)c_val);
+                                                xmlFree(c_val);
+                                            }
                                         }
                                     }
-                                }
-                                gboolean is_roman_marker = FALSE;
-                                if (is_blue && !is_numeric_marker) {
-                                    xmlNodePtr c_node = xmlTextReaderExpand(reader);
-                                    if (c_node) {
-                                        xmlChar *c_val = xmlNodeGetContent(c_node);
-                                        if (c_val) {
-                                            is_roman_marker = xdxf_is_roman_marker_text((const char*)c_val);
-                                            xmlFree(c_val);
+                                    gboolean is_roman_marker = FALSE;
+                                    if (is_blue && !is_numeric_marker) {
+                                        xmlNodePtr c_node = xmlTextReaderExpand(reader);
+                                        if (c_node) {
+                                            xmlChar *c_val = xmlNodeGetContent(c_node);
+                                            if (c_val) {
+                                                is_roman_marker = xdxf_is_roman_marker_text((const char*)c_val);
+                                                xmlFree(c_val);
+                                            }
                                         }
                                     }
-                                }
 
-                                if (is_numeric_marker) {
-                                    g_string_append_printf(def_str, "<span class=\"xdxf-c xdxf-c-blue-num\" style=\"color: %s;\">", c_attr_str);
-                                } else if (is_roman_marker &&
-                                           state->xdxf_standard == XDXF_STANDARD_LOUSY &&
-                                           ar_lousy_format == XDXF_LOUSY_FORMAT_VISUAL) {
-                                    if (seen_roman_section) {
-                                        g_string_append_printf(def_str, "<span class=\"xdxf-c xdxf-c-blue-roman xdxf-c-blue-roman-break\" style=\"color: %s;\">", c_attr_str);
+                                    if (is_numeric_marker) {
+                                        g_string_append_printf(def_str, "<span class=\"xdxf-c xdxf-c-blue-num\" style=\"color: %s;\">", c_attr_str);
+                                    } else if (is_roman_marker) {
+                                        if (seen_roman_section) {
+                                            g_string_append_printf(def_str, "<span class=\"xdxf-c xdxf-c-blue-roman xdxf-c-blue-roman-break\" style=\"color: %s;\">", c_attr_str);
+                                        } else {
+                                            g_string_append_printf(def_str, "<span class=\"xdxf-c xdxf-c-blue-roman\" style=\"color: %s;\">", c_attr_str);
+                                        }
+                                        seen_roman_section = TRUE;
                                     } else {
-                                        g_string_append_printf(def_str, "<span class=\"xdxf-c xdxf-c-blue-roman\" style=\"color: %s;\">", c_attr_str);
+                                        g_string_append_printf(def_str, "<span class=\"xdxf-c\" style=\"color: %s;\">", c_attr_str);
                                     }
-                                    seen_roman_section = TRUE;
                                 } else {
+                                    // Strict XDXF and lousy logical: simple color span (matches 1356a58)
                                     g_string_append_printf(def_str, "<span class=\"xdxf-c\" style=\"color: %s;\">", c_attr_str);
                                 }
                                 xmlFree(c_attr);

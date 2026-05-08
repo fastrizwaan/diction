@@ -97,9 +97,33 @@ static int compare_dsl_agnostic(const char *raw, size_t raw_len, const char *cle
     return (r == raw_len) ? -1 : 1;
 }
 
+static int compare_prefix_raw_segment(const char *raw, size_t raw_len,
+                                      const char *prefix, size_t plen);
+static gboolean raw_headword_matches_alias_segment(const char *raw, size_t raw_len,
+                                                   const char *query, size_t qlen,
+                                                   gboolean prefix_mode);
+
 int compare_headword(const char *data, const FlatTreeEntry *entry,
                      const char *query, size_t qlen) {
     return compare_dsl_agnostic(data + entry->h_off, entry->h_len, query, qlen);
+}
+
+bool flat_index_entry_matches_query(const char *data, const FlatTreeEntry *entry,
+                                    const char *query, size_t qlen) {
+    if (!data || !entry || !query) return false;
+    if (compare_dsl_agnostic(data + entry->h_off, entry->h_len, query, qlen) == 0) {
+        return true;
+    }
+    return raw_headword_matches_alias_segment(data + entry->h_off, entry->h_len, query, qlen, FALSE);
+}
+
+bool flat_index_entry_matches_prefix(const char *data, const FlatTreeEntry *entry,
+                                     const char *prefix, size_t plen) {
+    if (!data || !entry || !prefix) return false;
+    if (compare_prefix_raw_segment(data + entry->h_off, entry->h_len, prefix, plen) == 0) {
+        return true;
+    }
+    return raw_headword_matches_alias_segment(data + entry->h_off, entry->h_len, prefix, plen, TRUE);
 }
 
 static int compare_prefix(const char *data, const FlatTreeEntry *entry,
@@ -128,6 +152,75 @@ static int compare_prefix(const char *data, const FlatTreeEntry *entry,
     }
     if (c == plen) return 0;
     return -1;
+}
+
+static int compare_prefix_raw_segment(const char *raw, size_t raw_len,
+                                      const char *prefix, size_t plen) {
+    size_t r = 0, c = 0;
+    size_t skip;
+
+    while (r < raw_len && c < plen) {
+        while (r < raw_len && (skip = get_dsl_ignored_len_ext(raw + r, raw_len - r, true)) > 0) r += skip;
+        while (c < plen && (skip = get_dsl_ignored_len_ext(prefix + c, plen - c, false)) > 0) c += skip;
+
+        if (r == raw_len || c == plen) break;
+
+        char char_r, char_c;
+        if (raw[r] == '\\' && r + 1 < raw_len && dsl_headword_is_escapable_char(raw[r + 1])) {
+            r++; char_r = raw[r++];
+        } else {
+            char_r = raw[r++];
+        }
+        char_c = prefix[c++];
+
+        int diff = g_ascii_tolower(char_r) - g_ascii_tolower(char_c);
+        if (diff != 0) return diff;
+    }
+
+    if (c == plen) return 0;
+    return -1;
+}
+
+static gboolean raw_headword_has_alias_separator(const char *raw, size_t raw_len) {
+    if (!raw) return FALSE;
+
+    for (size_t i = 0; i < raw_len; i++) {
+        if (raw[i] == ';' && (i == 0 || raw[i - 1] != '\\')) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static gboolean raw_headword_matches_alias_segment(const char *raw, size_t raw_len,
+                                                   const char *query, size_t qlen,
+                                                   gboolean prefix_mode) {
+    if (!raw || !query || qlen == 0 || !raw_headword_has_alias_separator(raw, raw_len)) {
+        return FALSE;
+    }
+
+    size_t seg_start = 0;
+    for (size_t i = 0; i <= raw_len; i++) {
+        gboolean at_end = (i == raw_len);
+        gboolean at_sep = (!at_end && raw[i] == ';' && (i == 0 || raw[i - 1] != '\\'));
+        if (!at_end && !at_sep) {
+            continue;
+        }
+
+        size_t seg_len = i - seg_start;
+        if (seg_len > 0) {
+            gboolean matched = prefix_mode
+                ? (compare_prefix_raw_segment(raw + seg_start, seg_len, query, qlen) == 0)
+                : (compare_dsl_agnostic(raw + seg_start, seg_len, query, qlen) == 0);
+            if (matched) {
+                return TRUE;
+            }
+        }
+
+        seg_start = i + 1;
+    }
+
+    return FALSE;
 }
 
 /* Comparator for qsort during cache building */
@@ -258,6 +351,16 @@ size_t flat_index_search(const FlatIndex *idx, const char *query) {
         }
     }
 
+    if (result == (size_t)-1) {
+        for (size_t i = 0; i < idx->count; i++) {
+            if (raw_headword_matches_alias_segment(idx->mmap_data + idx->entries[i].h_off,
+                                                   idx->entries[i].h_len,
+                                                   query, qlen, FALSE)) {
+                return i;
+            }
+        }
+    }
+
     return result;
 }
 
@@ -281,6 +384,16 @@ size_t flat_index_search_prefix(const FlatIndex *idx, const char *prefix) {
         } else {
             result = mid;
             hi = mid; /* find first match */
+        }
+    }
+
+    if (result == (size_t)-1) {
+        for (size_t i = 0; i < idx->count; i++) {
+            if (raw_headword_matches_alias_segment(idx->mmap_data + idx->entries[i].h_off,
+                                                   idx->entries[i].h_len,
+                                                   prefix, plen, TRUE)) {
+                return i;
+            }
         }
     }
 

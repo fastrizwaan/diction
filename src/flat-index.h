@@ -67,3 +67,10 @@ void flat_index_sort_entries(FlatTreeEntry *entries, size_t count,
  * Exposed for iterating group matches in main.c. */
 int compare_headword(const char *data, const FlatTreeEntry *entry,
                      const char *query, size_t qlen);
+
+/* Alias-aware helpers for entries whose stored headword may contain
+ * semicolon-separated variants (e.g. XDXF <k> lists). */
+bool flat_index_entry_matches_query(const char *data, const FlatTreeEntry *entry,
+                                    const char *query, size_t qlen);
+bool flat_index_entry_matches_prefix(const char *data, const FlatTreeEntry *entry,
+                                     const char *prefix, size_t plen);

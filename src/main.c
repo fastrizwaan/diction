@@ -57,6 +57,8 @@ static void populate_search_sidebar_with_mode(const char *query, gboolean force_
 
 static AdwTabPage *create_new_tab(const char *title, gboolean select_it);
 static void on_tab_selected(AdwTabView *view, GParamSpec *pspec, gpointer user_data);
+static char *format_sidebar_headword_label(const char *headword);
+static GPtrArray *split_headword_variants(const char *headword);
 static GtkButton *search_button = NULL;
 static GtkLabel *search_button_label = NULL;
 static GtkImage *search_mode_icon = NULL;
@@ -347,17 +349,46 @@ static void sidebar_search_state_free(SidebarSearchState *state) {
     g_free(state);
 }
 
-static gboolean word_list_contains_ci(GPtrArray *list, const char *word) {
-    if (!list || !word) {
+static gboolean headword_variants_overlap_ci(const char *left, const char *right) {
+    if (!left || !right) {
         return FALSE;
+    }
+
+    GPtrArray *left_variants = split_headword_variants(left);
+    GPtrArray *right_variants = split_headword_variants(right);
+    gboolean found = FALSE;
+
+    for (guint i = 0; i < left_variants->len && !found; i++) {
+        const char *l = g_ptr_array_index(left_variants, i);
+        for (guint j = 0; j < right_variants->len; j++) {
+            const char *r = g_ptr_array_index(right_variants, j);
+            if (g_ascii_strcasecmp(l, r) == 0) {
+                found = TRUE;
+                break;
+            }
+        }
+    }
+
+    g_ptr_array_free(left_variants, TRUE);
+    g_ptr_array_free(right_variants, TRUE);
+    return found;
+}
+
+static gint word_list_find_ci(GPtrArray *list, const char *word) {
+    if (!list || !word) {
+        return -1;
     }
     for (guint i = 0; i < list->len; i++) {
         const char *item = g_ptr_array_index(list, i);
-        if (g_ascii_strcasecmp(item, word) == 0) {
-            return TRUE;
+        if (headword_variants_overlap_ci(item, word)) {
+            return (gint)i;
         }
     }
-    return FALSE;
+    return -1;
+}
+
+static gboolean word_list_contains_ci(GPtrArray *list, const char *word) {
+    return word_list_find_ci(list, word) >= 0;
 }
 
 static GPtrArray *load_word_list(const char *filename, guint limit) {
@@ -387,11 +418,19 @@ static GPtrArray *load_word_list(const char *filename, guint limit) {
             if (!word) {
                 continue;
             }
-            if (word_list_contains_ci(words, word)) {
-                g_free(word);
-                continue;
+            GPtrArray *variants = split_headword_variants(word);
+            for (guint j = 0; j < variants->len; j++) {
+                const char *variant = g_ptr_array_index(variants, j);
+                if (word_list_contains_ci(words, variant)) {
+                    continue;
+                }
+                g_ptr_array_add(words, g_strdup(variant));
+                if (limit > 0 && words->len >= limit) {
+                    break;
+                }
             }
-            g_ptr_array_add(words, word);
+            g_ptr_array_free(variants, TRUE);
+            g_free(word);
             if (limit > 0 && words->len >= limit) {
                 break;
             }
@@ -687,9 +726,11 @@ static void sidebar_list_item_bind(GtkSignalListItemFactory *factory, GtkListIte
 
     guint position = gtk_list_item_get_position(item);
     SidebarRowPayload *payload = sidebar_payload_at(sidebar, position);
+    GtkStringObject *string_object = GTK_STRING_OBJECT(gtk_list_item_get_item(item));
+    const char *row_text = string_object ? gtk_string_object_get_string(string_object) : "";
     const char *title    = payload && payload->title    ? payload->title    : "";
     const char *subtitle = payload && payload->subtitle ? payload->subtitle : "";
-    char *safe_title    = safe_markup_escape_n(title, -1);
+    char *safe_title    = safe_markup_escape_n(row_text, -1);
     char *safe_subtitle = safe_markup_escape_n(subtitle, -1);
     char *markup = NULL;
 
@@ -1060,59 +1101,77 @@ static gboolean continue_sidebar_search(gpointer user_data) {
         }
 
         if (is_valid_match) {
-                if (!g_hash_table_contains(state->seen_words, word_key)) {
+                char *render_word = normalize_headword_for_render(word, node->h_len, TRUE);
+                GPtrArray *raw_variants = split_headword_variants(word);
+                GPtrArray *render_variants = split_headword_variants(render_word ? render_word : word);
+
+                for (guint variant_idx = 0; variant_idx < raw_variants->len; variant_idx++) {
+                    const char *raw_variant = g_ptr_array_index(raw_variants, variant_idx);
+                    const char *display_variant = variant_idx < render_variants->len
+                        ? g_ptr_array_index(render_variants, variant_idx)
+                        : raw_variant;
+                    char *variant_key = g_utf8_casefold(raw_variant, -1);
+
+                    if (g_hash_table_contains(state->seen_words, variant_key)) {
+                        g_free(variant_key);
+                        continue;
+                    }
+
                     RelatedRowPayload *payload = g_new0(RelatedRowPayload, 1);
                     payload->type = RELATED_ROW_CANDIDATE;
-                    
-                    /* Use rendering normalization for display in sidebar (strip dots) */
-                    char *display_word = normalize_headword_for_render(word, node->h_len, TRUE);
-                    payload->word = g_strdup(word);
-                    payload->sort_key = g_utf8_casefold(display_word ? display_word : "", -1);
-                    
+                    payload->word = g_strdup(raw_variant);
+                    payload->sort_key = g_utf8_casefold(display_variant ? display_variant : raw_variant, -1);
                     payload->fuzzy_score = fuzzy_score;
-                    g_hash_table_add(state->seen_words, g_strdup(word_key));
-                
-                int b = (int)bucket;
-                if (b >= 0 && b < BUCKET_COUNT) {
-                    g_ptr_array_add(state->global_bucket_labels[b], display_word); 
-                    g_ptr_array_add(state->global_bucket_payloads[b], payload);
-                    display_word = NULL;
 
-                    // 🔥 PROGRESSIVE FLUSH (per bucket)
-                    if ((state->global_bucket_labels[b]->len & 31) == 0) {
-                        guint n = state->global_bucket_labels[b]->len;
-                        if (n > 1) {
-                            BucketItem *items = g_new(BucketItem, n);
-                            for (guint j = 0; j < n; j++) {
-                                RelatedRowPayload *row_payload = g_ptr_array_index(state->global_bucket_payloads[b], j);
-                                items[j].label = g_ptr_array_index(state->global_bucket_labels[b], j);
-                                items[j].sort_key = row_payload ? row_payload->sort_key : NULL;
-                                items[j].payload = row_payload;
-                                items[j].score = items[j].payload ? items[j].payload->fuzzy_score : 0.0;
+                    g_hash_table_add(state->seen_words, g_strdup(variant_key));
+                    g_free(variant_key);
+
+                    int b = (int)bucket;
+                    if (b >= 0 && b < BUCKET_COUNT) {
+                        g_ptr_array_add(state->global_bucket_labels[b], g_strdup(display_variant));
+                        g_ptr_array_add(state->global_bucket_payloads[b], payload);
+
+                        // 🔥 PROGRESSIVE FLUSH (per bucket)
+                        if ((state->global_bucket_labels[b]->len & 31) == 0) {
+                            guint n = state->global_bucket_labels[b]->len;
+                            if (n > 1) {
+                                BucketItem *items = g_new(BucketItem, n);
+                                for (guint j = 0; j < n; j++) {
+                                    RelatedRowPayload *row_payload = g_ptr_array_index(state->global_bucket_payloads[b], j);
+                                    items[j].label = g_ptr_array_index(state->global_bucket_labels[b], j);
+                                    items[j].sort_key = row_payload ? row_payload->sort_key : NULL;
+                                    items[j].payload = row_payload;
+                                    items[j].score = items[j].payload ? items[j].payload->fuzzy_score : 0.0;
+                                }
+
+                                g_sort_array(items, n, sizeof(BucketItem), compare_bucket_item, GINT_TO_POINTER(b));
+
+                                for (guint j = 0; j < n; j++) {
+                                    g_ptr_array_index(state->global_bucket_labels[b], j) = items[j].label;
+                                    g_ptr_array_index(state->global_bucket_payloads[b], j) = items[j].payload;
+                                }
+                                g_free(items);
                             }
 
-                            g_sort_array(items, n, sizeof(BucketItem), compare_bucket_item, GINT_TO_POINTER(b));
-
-                            for (guint j = 0; j < n; j++) {
-                                g_ptr_array_index(state->global_bucket_labels[b], j) = items[j].label;
-                                g_ptr_array_index(state->global_bucket_payloads[b], j) = items[j].payload;
+                            if (!state->list_started) {
+                                set_related_rows(state->global_bucket_labels[b], state->global_bucket_payloads[b]);
+                                state->list_started = TRUE;
+                            } else {
+                                append_related_rows(state->global_bucket_labels[b], state->global_bucket_payloads[b]);
                             }
-                            g_free(items);
-                        }
 
-                        if (!state->list_started) {
-                            set_related_rows(state->global_bucket_labels[b], state->global_bucket_payloads[b]);
-                            state->list_started = TRUE;
-                        } else {
-                            append_related_rows(state->global_bucket_labels[b], state->global_bucket_payloads[b]);
+                            // clear bucket after flush without freeing strings
+                            g_ptr_array_set_size(state->global_bucket_labels[b], 0);
+                            g_ptr_array_set_size(state->global_bucket_payloads[b], 0);
                         }
-
-                        // clear bucket after flush without freeing strings
-                        g_ptr_array_set_size(state->global_bucket_labels[b], 0);
-                        g_ptr_array_set_size(state->global_bucket_payloads[b], 0);
+                    } else {
+                        related_row_payload_free(payload);
                     }
                 }
-            }
+
+                g_ptr_array_free(raw_variants, TRUE);
+                g_ptr_array_free(render_variants, TRUE);
+                g_free(render_word);
         }
 
         if (!state->has_current_pos) {
@@ -1177,19 +1236,38 @@ static guint seed_search_sidebar_fast_rows(SidebarSearchState *state) {
                                                    state->query_compact_key, state->query_compact_len,
                                                    word_key, &bucket, &score)) {
                 if (bucket == SEARCH_BUCKET_EXACT || bucket == SEARCH_BUCKET_PREFIX) {
-                    if (!g_hash_table_contains(state->seen_words, word_key)) {
-                        char *display_word = normalize_headword_for_render(raw_word, node->h_len, TRUE);
+                    char *render_word = normalize_headword_for_render(raw_word, node->h_len, TRUE);
+                    GPtrArray *raw_variants = split_headword_variants(raw_word);
+                    GPtrArray *render_variants = split_headword_variants(render_word ? render_word : raw_word);
+
+                    for (guint variant_idx = 0; variant_idx < raw_variants->len && added < max_seed_rows; variant_idx++) {
+                        const char *raw_variant = g_ptr_array_index(raw_variants, variant_idx);
+                        const char *display_variant = variant_idx < render_variants->len
+                            ? g_ptr_array_index(render_variants, variant_idx)
+                            : raw_variant;
+                        char *variant_key = g_utf8_casefold(raw_variant, -1);
+
+                        if (g_hash_table_contains(state->seen_words, variant_key)) {
+                            g_free(variant_key);
+                            continue;
+                        }
+
                         RelatedRowPayload *payload = g_new0(RelatedRowPayload, 1);
                         payload->type = RELATED_ROW_CANDIDATE;
-                        payload->word = g_strdup(raw_word);
-                        payload->sort_key = g_utf8_casefold(display_word ? display_word : "", -1);
+                        payload->word = g_strdup(raw_variant);
+                        payload->sort_key = g_utf8_casefold(display_variant ? display_variant : raw_variant, -1);
                         payload->fuzzy_score = score;
 
-                        g_hash_table_add(state->seen_words, g_strdup(word_key));
-                        g_ptr_array_add(labels, display_word);
+                        g_hash_table_add(state->seen_words, g_strdup(variant_key));
+                        g_free(variant_key);
+                        g_ptr_array_add(labels, g_strdup(display_variant));
                         g_ptr_array_add(payloads, payload);
                         added++;
                     }
+
+                    g_ptr_array_free(raw_variants, TRUE);
+                    g_ptr_array_free(render_variants, TRUE);
+                    g_free(render_word);
                 } else {
                     g_free(raw_word);
                     g_free(word_key);
@@ -1330,19 +1408,17 @@ static void update_favorites_word(const char *word, gboolean add) {
         favorite_words = g_ptr_array_new_with_free_func(g_free);
     }
 
-    for (guint i = 0; i < favorite_words->len; i++) {
-        const char *item = g_ptr_array_index(favorite_words, i);
-        if (g_ascii_strcasecmp(item, clean) == 0) {
-            if (!add) {
-                g_ptr_array_remove_index(favorite_words, i);
-            }
-            save_word_list(favorite_words, FAVORITES_FILE_NAME);
-            populate_favorites_sidebar();
-            populate_history_sidebar();
-        
-            g_free(clean);
-            return;
+    gint existing_idx = word_list_find_ci(favorite_words, clean);
+    if (existing_idx >= 0) {
+        if (!add) {
+            g_ptr_array_remove_index(favorite_words, (guint)existing_idx);
         }
+        save_word_list(favorite_words, FAVORITES_FILE_NAME);
+        populate_favorites_sidebar();
+        populate_history_sidebar();
+    
+        g_free(clean);
+        return;
     }
 
     if (add) {
@@ -1368,12 +1444,9 @@ static void update_history_word(const char *word) {
         history_words = g_ptr_array_new_with_free_func(g_free);
     }
 
-    for (guint i = 0; i < history_words->len; i++) {
-        const char *item = g_ptr_array_index(history_words, i);
-        if (g_ascii_strcasecmp(item, clean) == 0) {
-            g_ptr_array_remove_index(history_words, i);
-            break;
-        }
+    gint existing_idx = word_list_find_ci(history_words, clean);
+    if (existing_idx >= 0) {
+        g_ptr_array_remove_index(history_words, (guint)existing_idx);
     }
 
     g_ptr_array_insert(history_words, 0, clean);
@@ -2067,11 +2140,16 @@ static void populate_history_sidebar(void) {
 
     for (guint i = 0; i < history_words->len; i++) {
         const char *word = g_ptr_array_index(history_words, i);
-        SidebarRowPayload *payload = g_new0(SidebarRowPayload, 1);
-        payload->type = SIDEBAR_ROW_WORD;
-        payload->title = g_strdup(word);
-        g_ptr_array_add(labels, g_strdup(word));
-        g_ptr_array_add(payloads, payload);
+        GPtrArray *variants = split_headword_variants(word);
+        for (guint j = 0; j < variants->len; j++) {
+            const char *variant = g_ptr_array_index(variants, j);
+            SidebarRowPayload *payload = g_new0(SidebarRowPayload, 1);
+            payload->type = SIDEBAR_ROW_WORD;
+            payload->title = g_strdup(variant);
+            g_ptr_array_add(labels, g_strdup(variant));
+            g_ptr_array_add(payloads, payload);
+        }
+        g_ptr_array_free(variants, TRUE);
     }
 
     set_sidebar_list_rows(&history_sidebar, labels, payloads);
@@ -2098,11 +2176,16 @@ static void populate_favorites_sidebar(void) {
 
     for (guint i = 0; i < favorite_words->len; i++) {
         const char *word = g_ptr_array_index(favorite_words, i);
-        SidebarRowPayload *payload = g_new0(SidebarRowPayload, 1);
-        payload->type = SIDEBAR_ROW_WORD;
-        payload->title = g_strdup(word);
-        g_ptr_array_add(labels, g_strdup(word));
-        g_ptr_array_add(payloads, payload);
+        GPtrArray *variants = split_headword_variants(word);
+        for (guint j = 0; j < variants->len; j++) {
+            const char *variant = g_ptr_array_index(variants, j);
+            SidebarRowPayload *payload = g_new0(SidebarRowPayload, 1);
+            payload->type = SIDEBAR_ROW_WORD;
+            payload->title = g_strdup(variant);
+            g_ptr_array_add(labels, g_strdup(variant));
+            g_ptr_array_add(payloads, payload);
+        }
+        g_ptr_array_free(variants, TRUE);
     }
 
     set_sidebar_list_rows(&favorites_sidebar, labels, payloads);
@@ -2647,14 +2730,15 @@ static void related_list_item_bind(GtkSignalListItemFactory *factory, GtkListIte
     gtk_label_set_text(GTK_LABEL(label), valid_text);
     
     g_signal_handlers_disconnect_by_func(star_btn, on_sidebar_favorite_clicked, NULL);
-    g_signal_connect_data(star_btn, "clicked", G_CALLBACK(on_sidebar_favorite_clicked), g_strdup(valid_text), free_signal_data, 0);
+    const char *favorite_word = (payload && payload->word) ? payload->word : valid_text;
+    g_signal_connect_data(star_btn, "clicked", G_CALLBACK(on_sidebar_favorite_clicked), g_strdup(favorite_word), free_signal_data, 0);
     
-    gboolean is_fav = word_list_contains_ci(favorite_words, valid_text);
+    gboolean is_fav = word_list_contains_ci(favorite_words, favorite_word);
     gtk_button_set_icon_name(GTK_BUTTON(star_btn), is_fav ? "starred-symbolic" : "non-starred-symbolic");
 
     g_object_bind_property_full(item, "selected", star_btn, "visible", 
         G_BINDING_SYNC_CREATE,
-        transform_sidebar_star_visibility, NULL, g_strdup(valid_text), g_free);
+        transform_sidebar_star_visibility, NULL, g_strdup(favorite_word), g_free);
 
     g_free(valid_text);
 }
@@ -2844,6 +2928,63 @@ static void wrap_entry_in_style(GString *html_res,
     g_free(escaped_name);
 }
 
+static char *format_sidebar_headword_label(const char *headword) {
+    if (!headword) return g_strdup("");
+
+    GString *out = g_string_new("");
+    const char *p = headword;
+
+    while (*p) {
+        const char *sep = strstr(p, "; ");
+        if (!sep) {
+            g_string_append(out, p);
+            break;
+        }
+
+        g_string_append_len(out, p, sep - p);
+        g_string_append_c(out, '\n');
+        p = sep + 2;
+    }
+
+    return g_string_free(out, FALSE);
+}
+
+static GPtrArray *split_headword_variants(const char *headword) {
+    GPtrArray *variants = g_ptr_array_new_with_free_func(g_free);
+    if (!headword || !*headword) {
+        g_ptr_array_add(variants, g_strdup(""));
+        return variants;
+    }
+
+    char **parts = g_strsplit(headword, "; ", -1);
+    for (guint i = 0; parts && parts[i]; i++) {
+        char *copy = g_strdup(parts[i]);
+        g_strstrip(copy);
+        if (*copy) {
+            g_ptr_array_add(variants, copy);
+        } else {
+            g_free(copy);
+        }
+    }
+    g_strfreev(parts);
+
+    if (variants->len == 0) {
+        g_ptr_array_add(variants, g_strdup(headword));
+    }
+
+    return variants;
+}
+
+static char *format_entry_headword_for_display(const char *headword, DictFormat format) {
+    if (!headword) return g_strdup("");
+
+    if (format != DICT_FORMAT_XDXF) {
+        return g_strdup(headword);
+    }
+
+    return format_sidebar_headword_label(headword);
+}
+
 static void render_merged_group(GString *html_res,
                                 DictEntry *e,
                                 const char *headword,
@@ -2866,9 +3007,11 @@ static void render_merged_group(GString *html_res,
     const char *render_style = (app_settings && app_settings->render_style && *app_settings->render_style)
         ? app_settings->render_style : "diction";
 
-    wrap_entry_in_style(html_res, headword, e->name, e->icon_path,
+    char *display_headword = format_entry_headword_for_display(headword, e->format);
+    wrap_entry_in_style(html_res, display_headword, e->name, e->icon_path,
                         dict_format_emoji(e->format),
                         body_html->str, render_style);
+    g_free(display_headword);
 }
 
 
@@ -3124,7 +3267,7 @@ static int append_exact_matches_html(GString *html_res, const char *query) {
         while (pos != (size_t)-1) {
             const FlatTreeEntry *res = flat_index_get(e->dict->index, pos);
             if (!res) break;
-            if (compare_headword(e->dict->data, res, query, strlen(query)) != 0) break;
+            if (!flat_index_entry_matches_query(e->dict->data, res, query, strlen(query))) break;
 
             char *raw_hw = g_strndup(e->dict->data + res->h_off, res->h_len);
             char *clean_hw = normalize_headword_for_search(raw_hw, TRUE);

@@ -1,0 +1,90 @@
+./eng_fin/dict.xdxf is valid
+./german_english/dict.xdxf [80984:36] : Fatal error: entity reference must start with a letter, '_' or ':'
+./eng_eng_nw/dict.xdxf is valid
+./eng_eng_main/dict.xdxf [443:12] : Fatal error: entity reference must start with a letter, '_' or ':'
+./eng_eng_main/dict.xdxf [444:12] : Fatal error: entity reference must start with a letter, '_' or ':'
+./eng_eng_main/dict.xdxf [918:12] : Fatal error: entity reference must start with a letter, '_' or ':'
+./fin_eng/dict.xdxf is valid
+./eng_rus_comp/dict.xdxf [33:12] : Fatal error: entity reference not terminated correctly.  Expected ';'
+./eng_rus_eco/dict.xdxf is valid
+./swedish-english/dict.xdxf is valid
+./german_rus/dict.xdxf is valid
+./ger_hung/dict.xdxf [9974:16] : Fatal error: entity reference must start with a letter, '_' or ':'
+./ger_hung/dict.xdxf [24265:16] : Fatal error: entity reference must start with a letter, '_' or ':'
+./ger_hung/dict.xdxf [31575:27] : Fatal error: entity reference must start with a letter, '_' or ':'
+./hungarian-english/dict.xdxf is valid
+./portuguese-english/dict.xdxf is valid
+./chinese-eng/dict.xdxf is valid
+./german_rus2/dict.xdxf is valid
+./elements-english/dict.xdxf is valid
+./est-rus/dict.xdxf is valid
+./french-english/dict.xdxf is valid
+./ru_efremova/dict.xdxf is valid
+./hung_eng_expr/dict.xdxf is valid
+./fin_rus/dict.xdxf [55405:16] : Fatal error: entity reference must start with a letter, '_' or ':'
+./fin_rus/dict.xdxf [93574:23] : Fatal error: entity reference must start with a letter, '_' or ':'
+./eng_rus_slang/dict.xdxf [597:2330] : Fatal error: unexpected character U+0007 within text content of element 'ar'
+./dutch-english/dict.xdxf is valid
+./eng_arabic/dict.xdxf [22:11] : Fatal error: entity reference not terminated correctly.  Expected ';'
+./eng_arabic/dict.xdxf [23:11] : Fatal error: entity reference not terminated correctly.  Expected ';'
+./eng_arabic/dict.xdxf [53:12] : Fatal error: entity reference not terminated correctly.  Expected ';'
+./idioms_eng_rus/dict.xdxf [952:27] : Fatal error: entity reference must start with a letter, '_' or ':'
+./idioms_eng_rus/dict.xdxf [1160:11] : Fatal error: entity reference must start with a letter, '_' or ':'
+./idioms_eng_rus/dict.xdxf [1609:29] : Fatal error: entity reference must start with a letter, '_' or ':'
+./italian-english/dict.xdxf is valid
+./fifi_plus/dict.xdxf is valid
+./german-english/dict.xdxf [27977:55] : Fatal error: entity reference must start with a letter, '_' or ':'
+./german-english/dict.xdxf [64601:43] : Error: element content invalid. Element 'anderseits' is not expected here, expecting 'opt' or '</k>'
+./german-english/dict.xdxf [64601:43] : Error: undeclared element 'anderseits'
+./afrikaans-english/dict.xdxf is valid
+./dal/dict.xdxf is valid
+./rus_bigencdic/dict.xdxf is valid
+./finnish-english/dict.xdxf is valid
+./latin-english/dict.xdxf is valid
+./spanish-english/dict.xdxf is valid
+./czech-rus/dict.xdxf is valid
+./brokg/dict.xdxf [79:35] : Fatal error: end tag '</i>' does not match start tag.  Expected '</ar>'
+./brokg/dict.xdxf [79:37] : Error: unexpected character content within element 'xdxf'
+./brokg/dict.xdxf [79:40] : Error: element content invalid. Element 'i' is not expected here, expecting 'ar' or '</xdxf>'
+./rus_ger/dict.xdxf is valid
+./idioms_eng_eng/dict.xdxf is valid
+./ita_rus_zorko/dict.xdxf [33716:198] : Fatal error: end tag '</ar>' does not match start tag.  Expected '</i>'
+./ita_rus_zorko/dict.xdxf [33717:5] : Error: element content invalid. Element 'ar' is not expected here, expecting 'abr', 'b', 'c', 'co', 'def', 'dtrn', 'ex', 'i', 'iref', 'k', 'kref', 'pos', 'rref', 'sub', 'sup', 'tense', 'tr' or '</ar>'
+./ita_rus_zorko/dict.xdxf [62522:1376] : Fatal error: end tag '</ar>' does not match start tag.  Expected '</i>'
+./eng_serb/dict.xdxf [9958:11] : Fatal error: entity reference not terminated correctly.  Expected ';'
+./eng_serb/dict.xdxf [9959:11] : Fatal error: entity reference not terminated correctly.  Expected ';'
+./eng_serb/dict.xdxf [9961:16] : Fatal error: entity reference not terminated correctly.  Expected ';'
+./rus_bse/dict.xdxf [156:319] : Fatal error: end tag '</c>' does not match start tag.  Expected '</i>'
+./rus_bse/dict.xdxf [156:324] : Fatal error: end tag '</i>' does not match start tag.  Expected '</c>'
+./rus_bse/dict.xdxf [1549:255] : Fatal error: end tag '</i>' does not match start tag.  Expected '</c>'
+./bulg_comp/dict.xdxf is valid
+./spa_rus_sadikov/dict.xdxf is valid
+./ru_religious_sh/dict.xdxf is valid
+./bulg_syn/dict.xdxf is valid
+./jap-eng/dict.xdxf is valid
+./ger_eng/dict.xdxf [27591:55] : Fatal error: entity reference must start with a letter, '_' or ':'
+./ger_eng/dict.xdxf [64404:43] : Error: element content invalid. Element 'anderseits' is not expected here, expecting 'opt' or '</k>'
+./ger_eng/dict.xdxf [64404:43] : Error: undeclared element 'anderseits'
+./swahili-english/dict.xdxf is valid
+./ru_short_biogr/dict.xdxf is valid
+./norwegian-english/dict.xdxf is valid
+./eng_rus_short/dict.xdxf [83205:60] : Fatal error: unexpected character U+000C within text content of element 'ar'
+./fr_hung/dict.xdxf is valid
+./ru_synonym_sh/dict.xdxf is valid
+./rus_eng_short/dict.xdxf [98:73] : Fatal error: unexpected character U+001D within text content of element 'ar'
+./rus_eng_short/dict.xdxf [134:19] : Fatal error: unexpected character U+0002 within text content of element 'ar'
+./rus_eng_short/dict.xdxf [215:21] : Fatal error: unexpected character U+0002 within text content of element 'ar'
+./eng_eng_syn/dict.xdxf is valid
+./eng-hung/dict.xdxf is valid
+./fifi_norm/dict.xdxf is valid
+./eng-spa/dict.xdxf is valid
+./eng_rus_glazunov/dict.xdxf is valid
+./eng_rus_bus/dict.xdxf [258:80] : Fatal error: unexpected character U+001B within text content of element 'ar'
+./eng_rus_bus/dict.xdxf [7249:18] : Fatal error: entity reference must start with a letter, '_' or ':'
+./eng_rus_full/dict.xdxf [674:11] : Fatal error: entity reference not terminated correctly.  Expected ';'
+./eng_rus_full/dict.xdxf [675:11] : Fatal error: entity reference not terminated correctly.  Expected ';'
+./eng_rus_full/dict.xdxf [736:12] : Fatal error: entity reference must start with a letter, '_' or ':'
+./danish-english/dict.xdxf is valid
+./rus_eng_full/dict.xdxf [579:57] : Fatal error: unexpected character U+001D within text content of element 'ar'
+./rus_eng_full/dict.xdxf [828:1] : Fatal error: unexpected character U+0002 within text content of element 'ar'
+./rus_eng_full/dict.xdxf [1604:21] : Fatal error: unexpected character U+0002 within text content of element 'ar'

@@ -31,7 +31,7 @@ static void flush_chunk(DictChunkWriter *w) {
     size_t max_comp = ZSTD_compressBound(w->buffer_pos);
     char *comp_buf = g_malloc(max_comp);
     
-    size_t comp_size = ZSTD_compressCCtx(w->cctx, comp_buf, max_comp, w->buffer, w->buffer_pos, 3);
+    size_t comp_size = ZSTD_compressCCtx(w->cctx, comp_buf, max_comp, w->buffer, w->buffer_pos, DICT_ZSTD_LEVEL);
     
     uint64_t off = (uint64_t)ftell(w->file);
     g_array_append_val(w->chunk_offsets, off);

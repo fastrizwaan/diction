@@ -630,10 +630,10 @@ static void process_xml_xdxf(xmlTextReaderPtr reader, XdxfParserState *state, co
                     dict_cache_builder_add_headword(state->builder, hw_str->str, hw_str->len, &hw_off);
                     dict_cache_builder_add_definition(state->builder, def_str->str, def_str->len, &def_off);
                     
-                    entry.h_off = (int64_t)hw_off;
-                    entry.h_len = hw_str->len;
-                    entry.d_off = (int64_t)def_off;
-                    entry.d_len = def_str->len;
+                    entry.h_off = (uint32_t)hw_off;
+                    entry.h_len = (uint32_t)hw_str->len;
+                    entry.d_off = (uint32_t)def_off;
+                    entry.d_len = (uint32_t)def_str->len;
                     
                     g_array_append_val(state->entries, entry);
                 }

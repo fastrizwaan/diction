@@ -1273,9 +1273,9 @@ rebuild_cache:
                         uint64_t hw_off = 0;
                         dict_cache_builder_add_headword(builder, word, wlen, &hw_off);
 
-                        tree_entries[valid_count].h_off = (int64_t)hw_off;
-                        tree_entries[valid_count].h_len = (uint64_t)wlen;
-                        tree_entries[valid_count].d_off = (int64_t)id;
+                        tree_entries[valid_count].h_off = (uint32_t)hw_off;
+                        tree_entries[valid_count].h_len = (uint32_t)wlen;
+                        tree_entries[valid_count].d_off = (uint32_t)id;
                         valid_count++;
                     }
                     g_free(kb_data);
@@ -1375,7 +1375,7 @@ rebuild_cache:
                         tree_entries[entry_idx].d_len = rec_len;
                     }
 
-                    tree_entries[entry_idx].d_off = (int64_t)def_off;
+                    tree_entries[entry_idx].d_off = (uint32_t)def_off;
                     valid_count_processed++;
                 }
                 current_decomp_offset += dlen;

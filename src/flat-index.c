@@ -39,62 +39,95 @@ static size_t get_dsl_brace_tag_len(const char *s, size_t max_len) {
 static size_t get_dsl_ignored_len_ext(const char *s, size_t max_len, bool raw_side) {
     if (max_len == 0) return 0;
 
-    if (s[0] == '{') {
+    gunichar ch = g_utf8_get_char_validated(s, max_len);
+    if (ch == (gunichar)-1 || ch == (gunichar)-2) return 1; /* Invalid UTF-8, skip 1 byte */
+
+    size_t char_len = g_utf8_skip[*(unsigned char *)s];
+
+    /* 1. Standard DSL tags like {*} or {·} */
+    if (ch == '{') {
         size_t brace_tag_len = get_dsl_brace_tag_len(s, max_len);
-        if (brace_tag_len > 0) {
-            return brace_tag_len;
-        }
-        if (raw_side) {
-            return 1;
-        }
+        if (brace_tag_len > 0) return brace_tag_len;
+        if (raw_side) return 1; /* Skip literal { in raw side if not a known tag */
+    }
+    if (raw_side && ch == '}') return 1;
+
+    /* 2. Common DSL noise and Unicode diacritics */
+    if (g_unichar_isspace(ch) || 
+        ch == '*' || 
+        ch == 0x00B7 || /* Middle dot */
+        ch == 0x02C8 || ch == 0x02CC || /* Stress marks */
+        ch == 0x2018 || ch == 0x2019 || /* Smart quotes */
+        ch == 0x201C || ch == 0x201D ||
+        ch == '(' || ch == ')' || ch == '[' || ch == ']' ||
+        ch == '-' || ch == '\'' || ch == '`' || ch == '"' ||
+        ch == ';' || ch == ':' || ch == '.' || ch == ',' ||
+        ch == '!' || ch == '?' || ch == '_' || ch == '/' ||
+        ch == '|' || ch == '~' ||
+        g_unichar_type(ch) == G_UNICODE_NON_SPACING_MARK) {
+        return char_len;
     }
 
-    if (raw_side && s[0] == '}') {
-        return 1;
-    }
-
-    char c = s[0];
-    if (g_ascii_isspace(c) || c == '*') {
-        return 1;
-    }
-    
-    unsigned char u0 = (unsigned char)s[0];
-    if (max_len >= 2) {
-        unsigned char u1 = (unsigned char)s[1];
-        if (u0 == 0xC2 && u1 == 0xB7) return 2; /* U+00B7 Middle Dot */
-        if (u0 == 0xCB && (u1 == 0x88 || u1 == 0x8C)) return 2; /* U+02C8, U+02CC Stress marks */
-        if (u0 == 0xCC && u1 == 0x81) return 2; /* U+0301 Combining Acute Accent */
-    }
     return 0;
 }
 
-static int compare_dsl_agnostic(const char *raw, size_t raw_len, const char *clean, size_t clean_len) {
-    size_t r = 0, c = 0;
+static gunichar get_base_unichar(gunichar ch) {
+    gunichar decomposed[8];
+    if (g_unichar_fully_decompose(ch, FALSE, decomposed, 8) > 0) {
+        return g_unichar_tolower(decomposed[0]);
+    }
+    return g_unichar_tolower(ch);
+}
+
+int compare_dsl_internal(const char *a, size_t la, bool a_raw,
+                         const char *b, size_t lb, bool b_raw) {
+    size_t i = 0, j = 0;
     size_t skip;
 
-    while (r < raw_len || c < clean_len) {
-        while (r < raw_len && (skip = get_dsl_ignored_len_ext(raw + r, raw_len - r, true)) > 0) r += skip;
-        while (c < clean_len && (skip = get_dsl_ignored_len_ext(clean + c, clean_len - c, false)) > 0) c += skip;
+    while (i < la || j < lb) {
+        while (i < la && (skip = get_dsl_ignored_len_ext(a + i, la - i, a_raw)) > 0) i += skip;
+        while (j < lb && (skip = get_dsl_ignored_len_ext(b + j, lb - j, b_raw)) > 0) j += skip;
 
-        if (r == raw_len || c == clean_len) break;
+        if (i == la || j == lb) break;
 
-        char char_r, char_c;
-        if (raw[r] == '\\' && r + 1 < raw_len && dsl_headword_is_escapable_char(raw[r + 1])) {
-            r++; char_r = raw[r++];
+        gunichar ch_a, ch_b;
+        size_t len_a, len_b;
+
+        if (a[i] == '\\' && i + 1 < la && dsl_headword_is_escapable_char(a[i + 1])) {
+            i++;
+            ch_a = g_utf8_get_char_validated(a + i, la - i);
+            len_a = (ch_a != (gunichar)-1 && ch_a != (gunichar)-2) ? g_utf8_skip[*(unsigned char *)(a + i)] : 1;
+            i += len_a;
         } else {
-            char_r = raw[r++];
+            ch_a = g_utf8_get_char_validated(a + i, la - i);
+            len_a = (ch_a != (gunichar)-1 && ch_a != (gunichar)-2) ? g_utf8_skip[*(unsigned char *)(a + i)] : 1;
+            i += len_a;
         }
-        char_c = clean[c++];
 
-        int diff = g_ascii_tolower(char_r) - g_ascii_tolower(char_c);
+        if (b[j] == '\\' && j + 1 < lb && dsl_headword_is_escapable_char(b[j + 1])) {
+            j++;
+            ch_b = g_utf8_get_char_validated(b + j, lb - j);
+            len_b = (ch_b != (gunichar)-1 && ch_b != (gunichar)-2) ? g_utf8_skip[*(unsigned char *)(b + j)] : 1;
+            j += len_b;
+        } else {
+            ch_b = g_utf8_get_char_validated(b + j, lb - j);
+            len_b = (ch_b != (gunichar)-1 && ch_b != (gunichar)-2) ? g_utf8_skip[*(unsigned char *)(b + j)] : 1;
+            j += len_b;
+        }
+
+        int diff = (int)get_base_unichar(ch_a) - (int)get_base_unichar(ch_b);
         if (diff != 0) return diff;
     }
 
-    while (r < raw_len && (skip = get_dsl_ignored_len_ext(raw + r, raw_len - r, true)) > 0) r += skip;
-    while (c < clean_len && (skip = get_dsl_ignored_len_ext(clean + c, clean_len - c, false)) > 0) c += skip;
+    while (i < la && (skip = get_dsl_ignored_len_ext(a + i, la - i, a_raw)) > 0) i += skip;
+    while (j < lb && (skip = get_dsl_ignored_len_ext(b + j, lb - j, b_raw)) > 0) j += skip;
 
-    if (r == raw_len && c == clean_len) return 0;
-    return (r == raw_len) ? -1 : 1;
+    if (i == la && j == lb) return 0;
+    return (i == la) ? -1 : 1;
+}
+
+int compare_dsl_agnostic(const char *raw, size_t raw_len, const char *clean, size_t clean_len) {
+    return compare_dsl_internal(raw, raw_len, true, clean, clean_len, false);
 }
 
 static int compare_prefix_raw_segment(const char *raw, size_t raw_len,
@@ -139,15 +172,32 @@ static int compare_prefix(const char *data, const FlatTreeEntry *entry,
 
         if (r == raw_len || c == plen) break;
 
-        char char_r, char_c;
-        if (raw[r] == '\\' && r + 1 < raw_len && dsl_headword_is_escapable_char(raw[r + 1])) {
-            r++; char_r = raw[r++];
-        } else {
-            char_r = raw[r++];
-        }
-        char_c = prefix[c++];
+        gunichar ch_r, ch_c;
+        size_t len_r, len_c;
 
-        int diff = g_ascii_tolower(char_r) - g_ascii_tolower(char_c);
+        if (raw[r] == '\\' && r + 1 < raw_len && dsl_headword_is_escapable_char(raw[r + 1])) {
+            r++;
+            ch_r = g_utf8_get_char_validated(raw + r, raw_len - r);
+            len_r = (ch_r != (gunichar)-1 && ch_r != (gunichar)-2) ? g_utf8_skip[*(unsigned char *)(raw + r)] : 1;
+            r += len_r;
+        } else {
+            ch_r = g_utf8_get_char_validated(raw + r, raw_len - r);
+            len_r = (ch_r != (gunichar)-1 && ch_r != (gunichar)-2) ? g_utf8_skip[*(unsigned char *)(raw + r)] : 1;
+            r += len_r;
+        }
+
+        if (prefix[c] == '\\' && c + 1 < plen && dsl_headword_is_escapable_char(prefix[c + 1])) {
+            c++;
+            ch_c = g_utf8_get_char_validated(prefix + c, plen - c);
+            len_c = (ch_c != (gunichar)-1 && ch_c != (gunichar)-2) ? g_utf8_skip[*(unsigned char *)(prefix + c)] : 1;
+            c += len_c;
+        } else {
+            ch_c = g_utf8_get_char_validated(prefix + c, plen - c);
+            len_c = (ch_c != (gunichar)-1 && ch_c != (gunichar)-2) ? g_utf8_skip[*(unsigned char *)(prefix + c)] : 1;
+            c += len_c;
+        }
+
+        int diff = (int)get_base_unichar(ch_r) - (int)get_base_unichar(ch_c);
         if (diff != 0) return diff;
     }
     if (c == plen) return 0;
@@ -165,15 +215,32 @@ static int compare_prefix_raw_segment(const char *raw, size_t raw_len,
 
         if (r == raw_len || c == plen) break;
 
-        char char_r, char_c;
-        if (raw[r] == '\\' && r + 1 < raw_len && dsl_headword_is_escapable_char(raw[r + 1])) {
-            r++; char_r = raw[r++];
-        } else {
-            char_r = raw[r++];
-        }
-        char_c = prefix[c++];
+        gunichar ch_r, ch_c;
+        size_t len_r, len_c;
 
-        int diff = g_ascii_tolower(char_r) - g_ascii_tolower(char_c);
+        if (raw[r] == '\\' && r + 1 < raw_len && dsl_headword_is_escapable_char(raw[r + 1])) {
+            r++;
+            ch_r = g_utf8_get_char_validated(raw + r, raw_len - r);
+            len_r = (ch_r != (gunichar)-1 && ch_r != (gunichar)-2) ? g_utf8_skip[*(unsigned char *)(raw + r)] : 1;
+            r += len_r;
+        } else {
+            ch_r = g_utf8_get_char_validated(raw + r, raw_len - r);
+            len_r = (ch_r != (gunichar)-1 && ch_r != (gunichar)-2) ? g_utf8_skip[*(unsigned char *)(raw + r)] : 1;
+            r += len_r;
+        }
+
+        if (prefix[c] == '\\' && c + 1 < plen && dsl_headword_is_escapable_char(prefix[c + 1])) {
+            c++;
+            ch_c = g_utf8_get_char_validated(prefix + c, plen - c);
+            len_c = (ch_c != (gunichar)-1 && ch_c != (gunichar)-2) ? g_utf8_skip[*(unsigned char *)(prefix + c)] : 1;
+            c += len_c;
+        } else {
+            ch_c = g_utf8_get_char_validated(prefix + c, plen - c);
+            len_c = (ch_c != (gunichar)-1 && ch_c != (gunichar)-2) ? g_utf8_skip[*(unsigned char *)(prefix + c)] : 1;
+            c += len_c;
+        }
+
+        int diff = (int)get_base_unichar(ch_r) - (int)get_base_unichar(ch_c);
         if (diff != 0) return diff;
     }
 
@@ -238,46 +305,16 @@ static int sort_compare(const void *a, const void *b) {
     size_t la = (size_t)ea->h_len;
     size_t lb = (size_t)eb->h_len;
 
-    size_t i = 0, j = 0;
-    size_t skip;
+    int res = compare_dsl_internal(ra, la, true, rb, lb, true);
+    if (res != 0) return res;
 
-    while (i < la || j < lb) {
-        while (i < la && (skip = get_dsl_ignored_len_ext(ra + i, la - i, true)) > 0) i += skip;
-        while (j < lb && (skip = get_dsl_ignored_len_ext(rb + j, lb - j, true)) > 0) j += skip;
-
-        if (i == la || j == lb) break;
-
-        char char_a, char_b;
-        if (ra[i] == '\\' && i + 1 < la && dsl_headword_is_escapable_char(ra[i + 1])) {
-            i++; char_a = ra[i++];
-        } else {
-            char_a = ra[i++];
-        }
-
-        if (rb[j] == '\\' && j + 1 < lb && dsl_headword_is_escapable_char(rb[j + 1])) {
-            j++; char_b = rb[j++];
-        } else {
-            char_b = rb[j++];
-        }
-
-        int diff = g_ascii_tolower(char_a) - g_ascii_tolower(char_b);
-        if (diff != 0) return diff;
-    }
-
-    while (i < la && (skip = get_dsl_ignored_len_ext(ra + i, la - i, true)) > 0) i += skip;
-    while (j < lb && (skip = get_dsl_ignored_len_ext(rb + j, lb - j, true)) > 0) j += skip;
-
-    if (i == la && j == lb) {
-        /* Tie-breaker: Case-sensitive exact comparison of the RAW bytes */
-        size_t min_len = (la < lb) ? la : lb;
-        int diff = strncmp(ra, rb, min_len);
-        if (diff != 0) return diff;
-        if (la < lb) return -1;
-        if (la > lb) return 1;
-        return 0;
-    }
-    if (i == la) return -1;
-    return 1;
+    /* Tie-breaker: Case-sensitive exact comparison of the RAW bytes */
+    size_t min_len = (la < lb) ? la : lb;
+    int diff = strncmp(ra, rb, min_len);
+    if (diff != 0) return diff;
+    if (la < lb) return -1;
+    if (la > lb) return 1;
+    return 0;
 }
 
 /* ── public API ──────────────────────────────────────── */
@@ -292,6 +329,17 @@ FlatIndex* flat_index_open(const char *data, size_t size) {
 
     if (dict_cache_is_compressed(data, size)) {
         const DictCacheHeader *h = (const DictCacheHeader *)data;
+        if (h->version != DICT_CACHE_VERSION) {
+            /* Stale cache from a different format version — treat as empty
+             * so the loader rebuilds it. */
+            FlatIndex *idx = g_new0(FlatIndex, 1);
+            if (!idx) return NULL;
+            idx->entries = NULL;
+            idx->count = 0;
+            idx->mmap_data = data;
+            idx->mmap_size = size;
+            return idx;
+        }
         count = h->entry_count;
         index_off = (size_t)h->index_off;
     } else {
@@ -439,17 +487,17 @@ bool flat_index_validate(const FlatIndex *idx) {
     }
 
     for (size_t i = 0; i < idx->count; i++) {
-        int64_t h_off = idx->entries[i].h_off;
-        uint64_t h_len = idx->entries[i].h_len;
-        int64_t d_off = idx->entries[i].d_off;
-        uint64_t d_len = idx->entries[i].d_len;
+        uint32_t h_off = idx->entries[i].h_off;
+        uint32_t h_len = idx->entries[i].h_len;
+        uint32_t d_off = idx->entries[i].d_off;
+        uint32_t d_len = idx->entries[i].d_len;
 
-        if (h_off < 8 || (uint64_t)h_off >= headword_region_end) return false;
-        if ((uint64_t)h_off + h_len > headword_region_end) return false;
+        if (h_off < 8 || (size_t)h_off >= headword_region_end) return false;
+        if ((size_t)h_off + h_len > headword_region_end) return false;
 
         if (!is_comp) {
-            if (d_off < 8 || (uint64_t)d_off >= data_region_end) return false;
-            if ((uint64_t)d_off + d_len > data_region_end) return false;
+            if (d_off < 8 || (size_t)d_off >= data_region_end) return false;
+            if ((size_t)d_off + d_len > data_region_end) return false;
         }
     }
 

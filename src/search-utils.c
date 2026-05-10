@@ -95,7 +95,12 @@ char *normalize_headword_for_search(const char *value, gboolean unescape_dsl) {
     const char *p = valid;
 
     while (*p) {
-        if (*p == '{') {
+        gunichar ch = g_utf8_get_char(p);
+        const char *next = g_utf8_next_char(p);
+        size_t char_len = next - p;
+
+        /* 1. Braces and DSL tags */
+        if (ch == '{') {
             size_t brace_tag_len = dsl_headword_brace_tag_len(p);
             if (brace_tag_len > 0) {
                 p += brace_tag_len;
@@ -106,65 +111,57 @@ char *normalize_headword_for_search(const char *value, gboolean unescape_dsl) {
                 continue;
             }
         }
-
-        /* Raw DSL markers that should be ignored even outside of braces */
-        if (*p == '*') { p++; continue; }
-
-        /* UTF-8 middle dot (C2 B7) */
-        if ((unsigned char)p[0] == 0xC2 && (unsigned char)p[1] == 0xB7) {
-            p += 2;
-            continue;
-        }
-
-        /* UTF-8 Stress marks (IPA CB 88, CB 8C) */
-        if ((unsigned char)p[0] == 0xCB && ((unsigned char)p[1] == 0x88 || (unsigned char)p[1] == 0x8C)) {
-            p += 2;
-            continue;
-        }
-
-        /* DSL-specific square bracket tags in headwords (rare handles formatting) */
-        if (g_str_has_prefix(p, "[']")) { p += 3; continue; }
-        if (g_str_has_prefix(p, "[/']")) { p += 4; continue; }
-
-        /* Strip actual Unicode combining acute accent (U+0301) for search */
-        if (g_str_has_prefix(p, "\xCC\x81")) { p += 2; continue; }
-
-        if (*p == '}' && unescape_dsl) {
+        if (ch == '}' && unescape_dsl) {
             p++;
             continue;
         }
 
+        /* 2. Common noise and Unicode diacritics - matches flat-index.c ignore list */
+        if (g_unichar_isspace(ch) || 
+            ch == '*' || 
+            ch == 0x00B7 || /* Middle dot */
+            ch == 0x02C8 || ch == 0x02CC || /* Stress marks */
+            ch == 0x2018 || ch == 0x2019 || /* Smart quotes */
+            ch == 0x201C || ch == 0x201D ||
+            ch == '(' || ch == ')' || ch == '[' || ch == ']' ||
+            ch == '-' || ch == '\'' || ch == '`' || ch == '"' ||
+            ch == ';' || ch == ':' || ch == '.' || ch == ',' ||
+            ch == '!' || ch == '?' || ch == '_' || ch == '/' ||
+            ch == '|' || ch == '~' ||
+            g_unichar_type(ch) == G_UNICODE_NON_SPACING_MARK) {
+            p = next;
+            continue;
+        }
 
-
-        if (*p == '\\' && p[1] != '\0') {
+        /* 3. DSL Escapes */
+        if (ch == '\\' && *next != '\0') {
             if (unescape_dsl) {
-                /* Only unescape DSL control escapes; preserve literal leet/backslash patterns. */
-                if (dsl_headword_is_escapable_char(p[1])) {
-                    const char *next = p + 1;
-                    const char *next_end = g_utf8_next_char(next);
-                    g_string_append_len(out, next, next_end - next);
-                    p = next_end;
-                } else {
-                    /* Not special, keep the backslash */
-                    g_string_append_c(out, '\\');
-                    p++;
+                if (dsl_headword_is_escapable_char(*next)) {
+                    p = next;
+                    ch = g_utf8_get_char(p);
+                    next = g_utf8_next_char(p);
+                    g_string_append_len(out, p, next - p);
+                    p = next;
+                    continue;
                 }
             } else {
-                /* Literal mode: keep everything as-is (e.g. from user search box) */
                 g_string_append_c(out, '\\');
-                p++;
+                p = next;
+                continue;
             }
-            continue;
         }
 
-        if (g_ascii_isspace(*p)) {
-            g_string_append_c(out, ' ');
-            while (g_ascii_isspace(*p)) p++;
-            continue;
+        /* 4. Normal character - decompose to base form */
+        gunichar base = ch;
+        gunichar decomposed[8];
+        if (g_unichar_fully_decompose(ch, FALSE, decomposed, 8) > 0) {
+            base = decomposed[0];
         }
-
-        const char *next = g_utf8_next_char(p);
-        g_string_append_len(out, p, next - p);
+        gunichar base_lower = g_unichar_tolower(base);
+        
+        char utf8_out[6];
+        int len_out = g_unichar_to_utf8(base_lower, utf8_out);
+        g_string_append_len(out, utf8_out, len_out);
         p = next;
     }
 

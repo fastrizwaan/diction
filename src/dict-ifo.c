@@ -23,6 +23,7 @@
 #include "dict-cache-builder.h"
 #include "dict-chunked.h"
 #include "settings.h"
+#include "dictzip.h"
 
 /* IFO uses multi-source cache validation since it has .ifo + .idx + .dict */
 
@@ -324,6 +325,16 @@ static gboolean append_stardict_article(GString *article,
     return TRUE;
 }
 
+char* stardict_transcode_article(const char *raw_data, size_t size, const char *sametypesequence) {
+    if (!raw_data || size == 0) return NULL;
+    GString *article = g_string_new("");
+    if (!append_stardict_article(article, (const unsigned char*)raw_data, size, sametypesequence)) {
+        g_string_assign(article, "");
+        append_html_escaped_text(article, raw_data, size);
+    }
+    return g_string_free(article, FALSE);
+}
+
 static int parse_ifo_metadata(const char *ifo_path,
                               uint32_t *wordcount,
                               uint32_t *idxfilesize,
@@ -376,9 +387,7 @@ static int parse_ifo_metadata(const char *ifo_path,
 static gboolean build_stardict_cache(DictCacheBuilder *builder,
                                      const unsigned char *idx_data,
                                      size_t idx_size,
-                                     const unsigned char *dict_raw,
                                      size_t dict_raw_len,
-                                     const char *sametypesequence,
                                      int idxoffsetbits,
                                      TreeEntry **entries_out,
                                      size_t *entry_count_out,
@@ -498,16 +507,8 @@ static gboolean build_stardict_cache(DictCacheBuilder *builder,
             continue;
         }
 
-        GString *article = g_string_new("");
-        if (!append_stardict_article(article, dict_raw + def_offset, def_size, sametypesequence)) {
-            g_string_assign(article, "");
-            append_html_escaped_text(article, (const char *)dict_raw + def_offset, def_size);
-        }
-
         uint64_t hw_off = 0;
-        uint64_t def_off = 0;
         dict_cache_builder_add_headword(builder, (const char *)hw_start, hw_len, &hw_off);
-        dict_cache_builder_add_definition(builder, article->str, article->len, &def_off);
 
         if (count == cap) {
             cap *= 2;
@@ -516,11 +517,9 @@ static gboolean build_stardict_cache(DictCacheBuilder *builder,
 
         entries[count].h_off = hw_off;
         entries[count].h_len = hw_len;
-        entries[count].d_off = def_off;
-        entries[count].d_len = article->len;
+        entries[count].d_off = def_offset;
+        entries[count].d_len = def_size;
         count++;
-
-        g_string_free(article, TRUE);
     }
 
     *entries_out = entries;
@@ -528,7 +527,7 @@ static gboolean build_stardict_cache(DictCacheBuilder *builder,
     return TRUE;
 }
 
-static DictMmap *open_cached_stardict(const char *cache_path, char *bookname, char *resource_dir) {
+static DictMmap *open_cached_stardict(const char *cache_path, char *bookname, char *resource_dir, const char *dict_path) {
     int fd = open(cache_path, O_RDONLY);
     if (fd < 0) {
         g_free(bookname);
@@ -560,8 +559,27 @@ static DictMmap *open_cached_stardict(const char *cache_path, char *bookname, ch
     dict->resource_dir = resource_dir;
     dict->index = flat_index_open(dict->data, dict->size);
     if (dict_cache_is_compressed(dict->data, dict->size)) {
+        const DictCacheHeader *header = (const DictCacheHeader*)dict->data;
         dict->is_compressed = TRUE;
-        dict->chunk_reader = dict_chunk_reader_new(dict->data, dict->size, (const DictCacheHeader*)dict->data);
+        if (header->chunk_count == 0) {
+            /* Index-only source-backed cache */
+            if (g_str_has_suffix(dict_path, ".dz") || g_str_has_suffix(dict_path, ".DZ")) {
+                dict->source_dz = dictzip_open(dict_path);
+            } else {
+                dict->source_fd = open(dict_path, O_RDONLY);
+                if (dict->source_fd >= 0) {
+                    struct stat s_st;
+                    fstat(dict->source_fd, &s_st);
+                    dict->source_size = s_st.st_size;
+                    dict->source_mmap = mmap(NULL, dict->source_size, PROT_READ, MAP_SHARED, dict->source_fd, 0);
+                }
+            }
+            if (header->stardict_sts[0] != '\0') {
+                dict->stardict_sts = g_strdup(header->stardict_sts);
+            }
+        } else {
+            dict->chunk_reader = dict_chunk_reader_new(dict->data, dict->size, header);
+        }
     }
 
     /* Validate the index loaded from cache */
@@ -623,7 +641,7 @@ DictMmap* parse_stardict(const char *ifo_path, volatile gint *cancel_flag, gint 
     const char *sources[] = { ifo_path, idx_path, dict_path };
 
     if (is_cache_valid_for_sources(cache_path, sources, G_N_ELEMENTS(sources))) {
-        DictMmap *cached = open_cached_stardict(cache_path, bookname, resource_dir);
+        DictMmap *cached = open_cached_stardict(cache_path, bookname, resource_dir, dict_path);
         g_free(cache_path);
         g_free(idx_path);
         g_free(dict_path);
@@ -742,8 +760,8 @@ DictMmap* parse_stardict(const char *ifo_path, volatile gint *cancel_flag, gint 
     TreeEntry *entries = NULL;
     size_t entry_count = 0;
     settings_scan_progress_notify(ifo_path, 30);
-    gboolean built = build_stardict_cache(builder, idx_data, idx_size, dict_raw, dict_raw_len,
-                                          sametypesequence, idxoffsetbits, &entries, &entry_count,
+    gboolean built = build_stardict_cache(builder, idx_data, idx_size, dict_raw_len,
+                                          idxoffsetbits, &entries, &entry_count,
                                           ifo_path, cancel_flag, expected);
 
     if (built && entry_count > 0 && entries) {
@@ -764,7 +782,7 @@ DictMmap* parse_stardict(const char *ifo_path, volatile gint *cancel_flag, gint 
             fclose(rf);
         }
 
-        dict_cache_builder_finalize(builder, entries, (uint64_t)entry_count);
+        dict_cache_builder_finalize_index_only(builder, entries, (uint64_t)entry_count, 0, sametypesequence);
     }
     dict_cache_builder_free(builder);
     dict_cache_sync_mtime(cache_path, sources, G_N_ELEMENTS(sources));
@@ -782,7 +800,7 @@ DictMmap* parse_stardict(const char *ifo_path, volatile gint *cancel_flag, gint 
         return NULL;
     }
 
-    DictMmap *dict = open_cached_stardict(cache_path, bookname, resource_dir);
+    DictMmap *dict = open_cached_stardict(cache_path, bookname, resource_dir, dict_path);
     g_free(cache_path);
     settings_scan_progress_notify(ifo_path, 100);
     return dict;

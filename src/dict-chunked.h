@@ -7,8 +7,9 @@
 #include <zstd.h>
 
 #define DICT_CACHE_MAGIC "DCMP"
-#define DICT_CACHE_VERSION 1
+#define DICT_CACHE_VERSION 3
 #define DICT_CHUNK_SIZE (1024 * 1024) /* 1MB uncompressed chunks */
+#define DICT_ZSTD_LEVEL 3            /* standard high-performance level */
 
 typedef struct {
     char magic[4];
@@ -20,7 +21,8 @@ typedef struct {
     uint64_t chunk_count;
     uint64_t index_off;
     uint64_t total_uncompressed_size;
-    uint8_t reserved[8];
+    uint32_t source_encoding;
+    char stardict_sts[12];
 } DictCacheHeader;
 
 /* Writer API */

@@ -1957,8 +1957,8 @@ void dict_render_get_theme_palette(const char *theme_name, int dark_mode, dsl_th
     /* Defaults */
     out->fg = dark_mode ? "#e0e0e0" : "#222222";
     out->bg = dark_mode ? "#1e1e21" : "#ffffff";
-    out->link = dark_mode ? "#7fb0e0" : "#005bbb";
-    out->accent = dark_mode ? "#e0b07f" : "#e45649"; /* keyword */
+    out->link = dark_mode ? "#42a7e3" : "#3c78d8";
+    out->accent = dark_mode ? "#d4a678" : "#e45649"; /* keyword */
     out->border = dark_mode ? "#444444" : "#cccccc";
     out->heading = out->fg;
     out->trn = out->fg;

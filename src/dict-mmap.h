@@ -15,6 +15,14 @@ typedef struct DictMmap {
     FILE *tmp_file;  // Used for temporary decompression (NULL for cached dicts)
     const char *data;
     size_t size;
+    
+    /* Fields for source-backed lightweight index caches */
+    const char *source_mmap;
+    size_t source_size;
+    int source_fd;
+    struct DictZip *source_dz;
+    int source_encoding;
+    char *stardict_sts;
     FlatIndex *index;
     struct DictChunkReader *chunk_reader;
     gboolean is_compressed;
@@ -34,6 +42,7 @@ DictMmap* dict_mmap_open(const char *path, volatile gint *cancel_flag, gint expe
 DictMmap* parse_mdx_file(const char *path, volatile gint *cancel_flag, gint expected);
 DictMmap* parse_bgl_file(const char *path, volatile gint *cancel_flag, gint expected);
 DictMmap* parse_stardict(const char *path, volatile gint *cancel_flag, gint expected);
+char* stardict_transcode_article(const char *raw_data, size_t size, const char *sametypesequence);
 DictMmap* parse_slob_file(const char *path, volatile gint *cancel_flag, gint expected);
 DictMmap* parse_xdxf_file(const char *path, volatile gint *cancel_flag, gint expected);
 DictMmap* parse_sdict_file(const char *path, volatile gint *cancel_flag, gint expected);

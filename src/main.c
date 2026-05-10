@@ -1101,7 +1101,7 @@ static gboolean continue_sidebar_search(gpointer user_data) {
         }
 
         if (is_valid_match) {
-                char *render_word = normalize_headword_for_render(word, node->h_len, TRUE);
+                char *render_word = normalize_headword_for_render(word, node->h_len, FALSE);
                 GPtrArray *raw_variants = split_headword_variants(word);
                 GPtrArray *render_variants = split_headword_variants(render_word ? render_word : word);
 
@@ -1110,7 +1110,9 @@ static gboolean continue_sidebar_search(gpointer user_data) {
                     const char *display_variant = variant_idx < render_variants->len
                         ? g_ptr_array_index(render_variants, variant_idx)
                         : raw_variant;
-                    char *variant_key = g_utf8_casefold(raw_variant, -1);
+                    char *clean_variant = normalize_headword_for_search(raw_variant, TRUE);
+                    char *variant_key = g_utf8_casefold(clean_variant ? clean_variant : raw_variant, -1);
+                    g_free(clean_variant);
 
                     if (g_hash_table_contains(state->seen_words, variant_key)) {
                         g_free(variant_key);
@@ -1123,47 +1125,12 @@ static gboolean continue_sidebar_search(gpointer user_data) {
                     payload->sort_key = g_utf8_casefold(display_variant ? display_variant : raw_variant, -1);
                     payload->fuzzy_score = fuzzy_score;
 
-                    g_hash_table_add(state->seen_words, g_strdup(variant_key));
-                    g_free(variant_key);
+                    g_hash_table_add(state->seen_words, variant_key);
 
                     int b = (int)bucket;
                     if (b >= 0 && b < BUCKET_COUNT) {
                         g_ptr_array_add(state->global_bucket_labels[b], g_strdup(display_variant));
                         g_ptr_array_add(state->global_bucket_payloads[b], payload);
-
-                        // 🔥 PROGRESSIVE FLUSH (per bucket)
-                        if ((state->global_bucket_labels[b]->len & 31) == 0) {
-                            guint n = state->global_bucket_labels[b]->len;
-                            if (n > 1) {
-                                BucketItem *items = g_new(BucketItem, n);
-                                for (guint j = 0; j < n; j++) {
-                                    RelatedRowPayload *row_payload = g_ptr_array_index(state->global_bucket_payloads[b], j);
-                                    items[j].label = g_ptr_array_index(state->global_bucket_labels[b], j);
-                                    items[j].sort_key = row_payload ? row_payload->sort_key : NULL;
-                                    items[j].payload = row_payload;
-                                    items[j].score = items[j].payload ? items[j].payload->fuzzy_score : 0.0;
-                                }
-
-                                g_sort_array(items, n, sizeof(BucketItem), compare_bucket_item, GINT_TO_POINTER(b));
-
-                                for (guint j = 0; j < n; j++) {
-                                    g_ptr_array_index(state->global_bucket_labels[b], j) = items[j].label;
-                                    g_ptr_array_index(state->global_bucket_payloads[b], j) = items[j].payload;
-                                }
-                                g_free(items);
-                            }
-
-                            if (!state->list_started) {
-                                set_related_rows(state->global_bucket_labels[b], state->global_bucket_payloads[b]);
-                                state->list_started = TRUE;
-                            } else {
-                                append_related_rows(state->global_bucket_labels[b], state->global_bucket_payloads[b]);
-                            }
-
-                            // clear bucket after flush without freeing strings
-                            g_ptr_array_set_size(state->global_bucket_labels[b], 0);
-                            g_ptr_array_set_size(state->global_bucket_payloads[b], 0);
-                        }
                     } else {
                         related_row_payload_free(payload);
                     }
@@ -1236,7 +1203,7 @@ static guint seed_search_sidebar_fast_rows(SidebarSearchState *state) {
                                                    state->query_compact_key, state->query_compact_len,
                                                    word_key, &bucket, &score)) {
                 if (bucket == SEARCH_BUCKET_EXACT || bucket == SEARCH_BUCKET_PREFIX) {
-                    char *render_word = normalize_headword_for_render(raw_word, node->h_len, TRUE);
+                    char *render_word = normalize_headword_for_render(raw_word, node->h_len, FALSE);
                     GPtrArray *raw_variants = split_headword_variants(raw_word);
                     GPtrArray *render_variants = split_headword_variants(render_word ? render_word : raw_word);
 
@@ -1245,7 +1212,9 @@ static guint seed_search_sidebar_fast_rows(SidebarSearchState *state) {
                         const char *display_variant = variant_idx < render_variants->len
                             ? g_ptr_array_index(render_variants, variant_idx)
                             : raw_variant;
-                        char *variant_key = g_utf8_casefold(raw_variant, -1);
+                        char *clean_variant = normalize_headword_for_search(raw_variant, TRUE);
+                        char *variant_key = g_utf8_casefold(clean_variant ? clean_variant : raw_variant, -1);
+                        g_free(clean_variant);
 
                         if (g_hash_table_contains(state->seen_words, variant_key)) {
                             g_free(variant_key);
@@ -2985,34 +2954,7 @@ static char *format_entry_headword_for_display(const char *headword, DictFormat 
     return format_sidebar_headword_label(headword);
 }
 
-static void render_merged_group(GString *html_res,
-                                DictEntry *e,
-                                const char *headword,
-                                GString *body_html,
-                                int dict_idx,
-                                int *dict_header_shown,
-                                int *found_count) {
-    if (body_html->len == 0) return;
 
-    if (!*dict_header_shown) {
-        *dict_header_shown = 1;
-        e->has_matches = TRUE;
-        (*found_count)++;
-        g_string_append_printf(
-            html_res,
-            "<div id='dict-%d' class='dict-anchor' style='scroll-margin-top: 8px;'></div>",
-            dict_idx);
-    }
-
-    const char *render_style = (app_settings && app_settings->render_style && *app_settings->render_style)
-        ? app_settings->render_style : "diction";
-
-    char *display_headword = format_entry_headword_for_display(headword, e->format);
-    wrap_entry_in_style(html_res, display_headword, e->name, e->icon_path,
-                        dict_format_emoji(e->format),
-                        body_html->str, render_style);
-    g_free(display_headword);
-}
 
 
 
@@ -3238,9 +3180,35 @@ static char *exact_lookup_definite_article_variant(const char *query) {
     return g_strdup_printf("the %s", query);
 }
 
+typedef struct {
+    DictEntry *dict;
+    const FlatTreeEntry *entry;
+    char *raw_hw;
+    char *clean_hw;
+    char *display_hw;
+} ExactMatch;
+
+static int compare_exact_match_items(gconstpointer a, gconstpointer b) {
+    const ExactMatch *ma = *(const ExactMatch **)a;
+    const ExactMatch *mb = *(const ExactMatch **)b;
+    int cmp = g_strcmp0(ma->clean_hw, mb->clean_hw);
+    if (cmp != 0) return cmp;
+    /* Tie-breaker: sort by dictionary order */
+    return 0; 
+}
+
+static void exact_match_free(gpointer data) {
+    ExactMatch *m = data;
+    dict_entry_unref(m->dict);
+    g_free(m->raw_hw);
+    g_free(m->clean_hw);
+    g_free(m->display_hw);
+    g_free(m);
+}
+
 static int append_exact_matches_html(GString *html_res, const char *query) {
     int found_count = 0;
-    int dict_idx = 0;
+    GPtrArray *matches = g_ptr_array_new_with_free_func(exact_match_free);
 
     g_mutex_lock(&dict_loader_mutex);
     DictEntry *e = all_dicts;
@@ -3256,69 +3224,94 @@ static int append_exact_matches_html(GString *html_res, const char *query) {
             continue;
         }
 
-        // ... (rest of search logic)
-
         size_t pos = flat_index_search(e->dict->index, query);
-        int dict_header_shown = 0;
-        char *last_hw_clean = NULL;
-        char *last_hw_render = NULL;
-        GString *merged_body = g_string_new("");
-
         while (pos != (size_t)-1) {
             const FlatTreeEntry *res = flat_index_get(e->dict->index, pos);
             if (!res) break;
             if (!flat_index_entry_matches_query(e->dict->data, res, query, strlen(query))) break;
 
-            char *raw_hw = g_strndup(e->dict->data + res->h_off, res->h_len);
-            char *clean_hw = normalize_headword_for_search(raw_hw, TRUE);
-            char *display_hw = normalize_headword_for_render(raw_hw, strlen(raw_hw), TRUE);
-            const char *hw_to_use = clean_hw ? clean_hw : raw_hw;
-            const char *hw_to_render = display_hw ? display_hw : hw_to_use;
-
-            if (last_hw_clean && strcmp(hw_to_use, last_hw_clean) != 0) {
-                render_merged_group(html_res, e, last_hw_render, merged_body, dict_idx, &dict_header_shown, &found_count);
-                g_string_truncate(merged_body, 0);
-                g_clear_pointer(&last_hw_render, g_free);
-            }
-
-            char *rendered = render_entry_def_to_html(e, res);
-            if (rendered) {
-                if (merged_body->len > 0) {
-                    g_string_append(merged_body, "<hr style='border:none;border-top:1px dashed #ccc;margin:10px 0;opacity:0.5;'>");
-                }
-                g_string_append(merged_body, rendered);
-                g_free(rendered);
-            }
-
-            if (!last_hw_render || (strstr(hw_to_render, "\xC2\xB7") && !strstr(last_hw_render, "\xC2\xB7"))) {
-                g_free(last_hw_render);
-                last_hw_render = g_strdup(hw_to_render);
-            }
-
-            g_free(last_hw_clean);
-            last_hw_clean = g_strdup(hw_to_use);
-            g_free(raw_hw);
-            if (clean_hw) g_free(clean_hw);
-            if (display_hw) g_free(display_hw);
-
+            ExactMatch *m = g_new0(ExactMatch, 1);
+            m->dict = e;
+            dict_entry_ref(e);
+            m->entry = res;
+            m->raw_hw = g_strndup(e->dict->data + res->h_off, res->h_len);
+            m->clean_hw = normalize_headword_for_search(m->raw_hw, TRUE);
+            m->display_hw = normalize_headword_for_render(m->raw_hw, strlen(m->raw_hw), FALSE);
+            
+            g_ptr_array_add(matches, m);
             pos++;
             if (pos >= flat_index_count(e->dict->index)) break;
         }
 
-        if (last_hw_render && merged_body->len > 0) {
-            render_merged_group(html_res, e, last_hw_render, merged_body, dict_idx, &dict_header_shown, &found_count);
-        }
-        g_string_free(merged_body, TRUE);
-        g_free(last_hw_clean);
-        g_free(last_hw_render);
-        dict_idx++;
-        
         g_mutex_lock(&dict_loader_mutex);
         DictEntry *next = e->next;
         dict_entry_unref(e);
         e = next;
     }
     if (e == NULL) g_mutex_unlock(&dict_loader_mutex);
+
+    if (matches->len == 0) {
+        g_ptr_array_unref(matches);
+        return 0;
+    }
+
+    g_ptr_array_sort(matches, compare_exact_match_items);
+
+    const char *render_style = (app_settings && app_settings->render_style && *app_settings->render_style)
+        ? app_settings->render_style : "diction";
+
+    char *last_clean = NULL;
+    GString *group_body = g_string_new("");
+    char *current_display_hw = NULL;
+
+    for (guint i = 0; i <= matches->len; i++) {
+        ExactMatch *m = (i < matches->len) ? g_ptr_array_index(matches, i) : NULL;
+        
+        if (last_clean && (!m || strcmp(m->clean_hw, last_clean) != 0)) {
+            /* Render the group */
+            char *escaped_hw = safe_markup_escape_n(current_display_hw, -1);
+            
+            g_string_append_printf(html_res, 
+                "<section class='%s-entry'><div class='%s-header'><span class='%s-lemma'>%s</span></div>"
+                "<div class='%s-entry-body'>%s</div></section>",
+                render_style, render_style, render_style, escaped_hw, render_style, group_body->str);
+            
+            g_free(escaped_hw);
+            g_string_truncate(group_body, 0);
+            found_count++;
+        }
+
+        if (!m) break;
+
+        if (group_body->len > 0) {
+            g_string_append(group_body, "<hr style='border:none;border-top:1px dashed #ccc;margin:15px 0;opacity:0.3;'>");
+        }
+
+        /* Source label */
+        char *escaped_dict_name = safe_markup_escape_n(m->dict->name, -1);
+        const char *emoji = dict_format_emoji(m->dict->format);
+        g_string_append_printf(group_body, 
+            "<div style='font-size:0.85em;font-weight:600;opacity:0.6;margin-bottom:8px;display:flex;align-items:center;'>"
+            "<span>%s %s</span></div>",
+            emoji ? emoji : "📖", escaped_dict_name);
+        g_free(escaped_dict_name);
+
+        char *rendered = render_entry_def_to_html(m->dict, m->entry);
+        if (rendered) {
+            g_string_append(group_body, rendered);
+            g_free(rendered);
+        }
+
+        g_free(last_clean);
+        last_clean = g_strdup(m->clean_hw);
+        g_free(current_display_hw);
+        current_display_hw = g_strdup(m->display_hw);
+    }
+
+    g_string_free(group_body, TRUE);
+    g_free(last_clean);
+    g_free(current_display_hw);
+    g_ptr_array_unref(matches);
 
     return found_count;
 }
@@ -3495,7 +3488,7 @@ static void append_rendered_word_html_impl(const char *raw_word, gboolean push_h
 
     select_related_word(query);
 
-    char *display_title = normalize_headword_for_render(raw_word, raw_word ? strlen(raw_word) : 0, TRUE);
+    char *display_title = normalize_headword_for_render(raw_word, raw_word ? strlen(raw_word) : 0, FALSE);
 
     GString *html_res = g_string_new("");
     int found_count = append_exact_matches_html(html_res, query);
@@ -3593,7 +3586,7 @@ static void on_search_changed(GtkEditable *entry, gpointer user_data) {
     
     // Automatically update the title of the present tab to match what we progressively type
     const char *query = gtk_editable_get_text(GTK_EDITABLE(entry));
-    char *display_query = normalize_headword_for_render(query, query ? strlen(query) : 0, TRUE);
+    char *display_query = normalize_headword_for_render(query, query ? strlen(query) : 0, FALSE);
 
     if (tab_view) {
         AdwTabPage *page = adw_tab_view_get_selected_page(tab_view);
@@ -6182,6 +6175,137 @@ static void on_app_shutdown(GApplication *app, gpointer user_data) {
     related_row_payloads = NULL;
 }
 
+static const char* dict_format_to_str(DictFormat fmt) {
+    switch(fmt) {
+        case DICT_FORMAT_DSL: return "DSL";
+        case DICT_FORMAT_STARDICT: return "StarDict";
+        case DICT_FORMAT_MDX: return "MDX";
+        case DICT_FORMAT_BGL: return "BGL";
+        case DICT_FORMAT_SLOB: return "Slob";
+        case DICT_FORMAT_XDXF: return "XDXF";
+        case DICT_FORMAT_DICTD: return "Dictd";
+        case DICT_FORMAT_SDICT: return "Sdict";
+        case DICT_FORMAT_LSD: return "LSD";
+        default: return "Unknown";
+    }
+}
+
+static int run_cli_search(const char *query, const char *in_dict) {
+    if (!query) {
+        g_printerr("Usage: diction <query> [--in-dict=<name_or_path>]\n");
+        return 1;
+    }
+
+    g_print("CLI Search for: '%s'\n", query);
+    if (in_dict) g_print("Filter: '%s'\n", in_dict);
+
+    /* 1. Load system dictionaries first */
+    if (app_settings && app_settings->dictionary_dirs) {
+        for (guint i = 0; i < app_settings->dictionary_dirs->len; i++) {
+            const char *dir = g_ptr_array_index(app_settings->dictionary_dirs, i);
+            DictEntry *scanned = dict_loader_scan_directory(dir);
+            if (scanned) {
+                if (!all_dicts) all_dicts = scanned;
+                else {
+                    DictEntry *last = all_dicts;
+                    while (last->next) last = last->next;
+                    last->next = scanned;
+                }
+            }
+        }
+    }
+
+    /* 2. If in_dict is a path to a file, load it specifically if not present */
+    if (in_dict && (g_str_has_suffix(in_dict, ".dsl") || g_str_has_suffix(in_dict, ".dz") || 
+                    g_str_has_suffix(in_dict, ".mdx") || g_str_has_suffix(in_dict, ".bgl"))) {
+        struct stat st;
+        if (stat(in_dict, &st) == 0 && S_ISREG(st.st_mode)) {
+            gboolean already_loaded = FALSE;
+            for (DictEntry *e = all_dicts; e; e = e->next) {
+                if (g_strcmp0(e->path, in_dict) == 0) {
+                    already_loaded = TRUE;
+                    break;
+                }
+            }
+            if (!already_loaded) {
+                DictFormat fmt = dict_detect_format(in_dict);
+                DictMmap *d = dict_load_any(in_dict, fmt, NULL, 0);
+                if (d) {
+                    DictEntry *e = g_new0(DictEntry, 1);
+                    e->magic = 0xDEADC0DE;
+                    e->ref_count = 1;
+                    const char *slash = strrchr(in_dict, '/');
+                    e->name = g_strdup(slash ? slash + 1 : in_dict);
+                    e->path = g_strdup(in_dict);
+                    e->format = fmt;
+                    e->dict = d;
+                    e->next = all_dicts;
+                    all_dicts = e;
+                    g_print("Loaded dictionary: %s\n", in_dict);
+                }
+            }
+        }
+    }
+
+    /* 3. Execute search */
+    const char *normalized_query = query;
+    int total_found = 0;
+
+    for (DictEntry *e = all_dicts; e; e = e->next) {
+        if (!e->dict) continue;
+
+        /* Filter by name or path if in_dict is set */
+        if (in_dict) {
+            if (g_strcmp0(e->name, in_dict) != 0 && g_strcmp0(e->path, in_dict) != 0) {
+                continue;
+            }
+        }
+
+        g_print("Searching in: %s... ", e->name);
+        size_t pos = flat_index_search(e->dict->index, normalized_query);
+        g_print("Result: %zd\n", pos);
+        gboolean dict_header_printed = FALSE;
+
+        while (pos != (size_t)-1) {
+            const FlatTreeEntry *res = flat_index_get(e->dict->index, pos);
+            if (!res) break;
+            if (!flat_index_entry_matches_query(e->dict->data, res, normalized_query, strlen(normalized_query))) break;
+
+            if (!dict_header_printed) {
+                g_print("\n--- From: %s (%s) ---\n", e->name, dict_format_to_str(e->format));
+                dict_header_printed = TRUE;
+            }
+
+            char *raw_hw = g_strndup(e->dict->data + res->h_off, res->h_len);
+            g_print("Headword: %s\n", raw_hw);
+            g_free(raw_hw);
+
+            char *rendered = render_entry_def_to_html(e, res);
+            if (rendered) {
+                /* Simple HTML tag stripping for CLI */
+                GRegex *regex = g_regex_new("<[^>]*>", 0, 0, NULL);
+                char *stripped = g_regex_replace(regex, rendered, -1, 0, "", 0, NULL);
+                g_print("%s\n", stripped);
+                g_free(stripped);
+                g_regex_unref(regex);
+                g_free(rendered);
+            }
+            
+            total_found++;
+            pos++;
+            if (pos >= flat_index_count(e->dict->index)) break;
+        }
+    }
+
+    if (total_found == 0) {
+        g_print("\nNo exact match found for '%s'.\n", query);
+    } else {
+        g_print("\nFound %d matches.\n", total_found);
+    }
+
+    return 0;
+}
+
 int main(int argc, char *argv[]) {
     // Disable compositing to fix rendering issues
     setenv("WEBKIT_DISABLE_COMPOSITING_MODE", "1", 1);
@@ -6193,15 +6317,43 @@ int main(int argc, char *argv[]) {
     history_words = load_word_list(HISTORY_FILE_NAME, 200);
     favorite_words = load_word_list(FAVORITES_FILE_NAME, 0);
 
-    /* Load dictionaries only in CLI mode (single file or directory argument).      *
-     * When running with no arguments, loading happens async after window is shown. */
-    if (argc > 1) {
+    /* Parse CLI arguments */
+    char *cli_query = NULL;
+    char *in_dict = NULL;
+    gboolean force_cli = FALSE;
+
+    for (int i = 1; i < argc; i++) {
+        if (g_str_has_prefix(argv[i], "--in-dict=")) {
+            in_dict = argv[i] + 10;
+            force_cli = TRUE;
+        } else if (argv[i][0] == '-') {
+            // Ignore other flags for now or handle them
+        } else {
+            if (!cli_query) cli_query = argv[i];
+            // If it doesn't look like a path, it's a query
+            struct stat st;
+            if (stat(argv[i], &st) != 0 || !S_ISDIR(st.st_mode)) {
+                force_cli = TRUE;
+            }
+        }
+    }
+
+    if (force_cli && cli_query) {
+        int ret = run_cli_search(cli_query, in_dict);
+        /* Cleanup and exit */
+        if (app_settings) settings_free(app_settings);
+        g_free(active_scope_id);
+        dict_loader_free_list(all_dicts);
+        return ret;
+    }
+
+    /* Legacy single file/dir loading for GUI mode */
+    if (argc > 1 && !force_cli) {
         struct stat st;
         if (stat(argv[1], &st) == 0) {
             if (S_ISDIR(st.st_mode)) {
                 all_dicts = dict_loader_scan_directory(argv[1]);
             } else {
-                /* Single file mode */
                 DictFormat fmt = dict_detect_format(argv[1]);
                 DictMmap *d = dict_load_any(argv[1], fmt, NULL, 0);
                 if (d) {

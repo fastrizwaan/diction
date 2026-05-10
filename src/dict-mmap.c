@@ -18,6 +18,7 @@
 #include "dict-cache.h"
 #include "settings.h"
 #include "dict-chunked.h"
+#include "dictzip.h"
 
 void dict_mmap_close(DictMmap *dict) {
     if (dict) {
@@ -25,6 +26,9 @@ void dict_mmap_close(DictMmap *dict) {
         resource_reader_close(dict->resource_reader);
         if (dict->chunk_reader) dict_chunk_reader_free(dict->chunk_reader);
         if (dict->data) munmap((void*)dict->data, dict->size);
+        if (dict->source_mmap) munmap((void*)dict->source_mmap, dict->source_size);
+        if (dict->source_dz) dictzip_close(dict->source_dz);
+        if (dict->source_fd >= 0) close(dict->source_fd);
         if (dict->fd >= 0) close(dict->fd);
         if (dict->tmp_file) fclose(dict->tmp_file);
         g_free(dict->name);
@@ -34,6 +38,7 @@ void dict_mmap_close(DictMmap *dict) {
         g_free(dict->source_lang);
         g_free(dict->target_lang);
         g_free(dict->icon_path);
+        g_free(dict->stardict_sts);
         g_free(dict);
     }
 }

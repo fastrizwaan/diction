@@ -7,12 +7,13 @@
 
 /* TreeEntry: same layout used in cache files. Each entry stores
  * byte offsets and lengths into the mmap'd cache data for headword
- * and definition. */
+ * and definition.  Uses 32-bit fields (max 4 GB) to halve the
+ * per-entry footprint from 32 to 16 bytes. */
 typedef struct {
-    int64_t  h_off;
-    uint64_t h_len;
-    int64_t  d_off;
-    uint64_t d_len;
+    uint32_t h_off;
+    uint32_t h_len;
+    uint32_t d_off;
+    uint32_t d_len;
 } FlatTreeEntry;
 
 /* FlatIndex: a sorted, read-only index backed by mmap'd data.
@@ -58,10 +59,12 @@ size_t flat_index_count(const FlatIndex *idx);
  * Returns true if valid, false if corrupt. */
 bool flat_index_validate(const FlatIndex *idx);
 
-/* Sort a mutable TreeEntry array by headword (case-insensitive).
- * Used during cache building. */
 void flat_index_sort_entries(FlatTreeEntry *entries, size_t count,
                              const char *data, size_t data_size);
+
+int compare_dsl_internal(const char *a, size_t la, bool a_raw,
+                         const char *b, size_t lb, bool b_raw);
+int compare_dsl_agnostic(const char *raw, size_t raw_len, const char *clean, size_t clean_len);
 
 /* Compare an entry's headword against a query using agnostic rules.
  * Exposed for iterating group matches in main.c. */

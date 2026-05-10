@@ -58,7 +58,9 @@ srcs = [
   'src/dict-dictd.c',
   'src/dict-stardict-render.c',
   'src/text-utils.c',
-  'src/dict-sdict.c'
+  'src/dict-sdict.c',
+  'src/dict-dsl-scanner.c',
+  'src/dict-dsl-index.c'
 ]
 
 executable('diction', srcs,

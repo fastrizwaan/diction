@@ -107,6 +107,36 @@ void dict_cache_builder_finalize(DictCacheBuilder *b, FlatTreeEntry *entries, ui
     fwrite(&b->header, sizeof(DictCacheHeader), 1, b->file);
 }
 
+void dict_cache_builder_finalize_index_only(DictCacheBuilder *b, FlatTreeEntry *entries, uint64_t actual_count, uint32_t source_encoding, const char *stardict_sts) {
+    if (!b || !b->file) return;
+
+    b->header.entry_count = actual_count;
+    b->header.headwords_len = b->headwords_len;
+    b->header.source_encoding = source_encoding;
+
+    if (stardict_sts) {
+        strncpy(b->header.stardict_sts, stardict_sts, sizeof(b->header.stardict_sts) - 1);
+        b->header.stardict_sts[sizeof(b->header.stardict_sts) - 1] = '\0';
+    } else {
+        memset(b->header.stardict_sts, 0, sizeof(b->header.stardict_sts));
+    }
+
+    /* No compressed definition chunks. */
+    b->header.total_uncompressed_size = 0;
+    b->header.chunk_count = 0;
+    b->header.chunk_table_off = 0;
+
+    /* Write the sorted flat tree entries directly after the headwords */
+    uint64_t index_off = (uint64_t)ftell(b->file);
+    fwrite(entries, sizeof(FlatTreeEntry), b->header.entry_count, b->file);
+    
+    b->header.index_off = index_off;
+    
+    /* Rewrite header */
+    fseek(b->file, 0, SEEK_SET);
+    fwrite(&b->header, sizeof(DictCacheHeader), 1, b->file);
+}
+
 void dict_cache_builder_free(DictCacheBuilder *b) {
     if (b) {
         dict_chunk_writer_free(b->writer);

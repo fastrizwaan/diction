@@ -14,17 +14,141 @@
 #include "dict-chunked.h"
 #include "dict-fts-index.h"
 
+#include "dictzip.h"
+
+static size_t convert_utf16le_to_utf8(const unsigned char *in_buf, size_t in_len, unsigned char *out_buf, size_t out_max) {
+    size_t in = 0, out = 0;
+    while (in + 1 < in_len && out + 4 <= out_max) {
+        uint32_t wc = in_buf[in] | (in_buf[in+1] << 8);
+        in += 2;
+        if (wc >= 0xD800 && wc <= 0xDBFF && in + 1 < in_len) {
+            uint32_t wc2 = in_buf[in] | (in_buf[in+1] << 8);
+            if (wc2 >= 0xDC00 && wc2 <= 0xDFFF) {
+                in += 2;
+                wc = 0x10000 + ((wc & 0x3FF) << 10) + (wc2 & 0x3FF);
+            }
+        }
+        if (wc < 0x80) { out_buf[out++] = wc; }
+        else if (wc < 0x800) {
+            out_buf[out++] = 0xC0 | (wc >> 6);
+            out_buf[out++] = 0x80 | (wc & 0x3F);
+        } else if (wc < 0x10000) {
+            out_buf[out++] = 0xE0 | (wc >> 12);
+            out_buf[out++] = 0x80 | ((wc >> 6) & 0x3F);
+            out_buf[out++] = 0x80 | (wc & 0x3F);
+        } else {
+            out_buf[out++] = 0xF0 | (wc >> 18);
+            out_buf[out++] = 0x80 | ((wc >> 12) & 0x3F);
+            out_buf[out++] = 0x80 | ((wc >> 6) & 0x3F);
+            out_buf[out++] = 0x80 | (wc & 0x3F);
+        }
+    }
+    return out;
+}
+
+static size_t convert_utf16be_to_utf8(const unsigned char *in_buf, size_t in_len, unsigned char *out_buf, size_t out_max) {
+    size_t in = 0, out = 0;
+    while (in + 1 < in_len && out + 4 <= out_max) {
+        uint32_t wc = (in_buf[in] << 8) | in_buf[in+1];
+        in += 2;
+        if (wc >= 0xD800 && wc <= 0xDBFF && in + 1 < in_len) {
+            uint32_t wc2 = (in_buf[in] << 8) | in_buf[in+1];
+            if (wc2 >= 0xDC00 && wc2 <= 0xDFFF) {
+                in += 2;
+                wc = 0x10000 + ((wc & 0x3FF) << 10) + (wc2 & 0x3FF);
+            }
+        }
+        if (wc < 0x80) { out_buf[out++] = wc; }
+        else if (wc < 0x800) {
+            out_buf[out++] = 0xC0 | (wc >> 6);
+            out_buf[out++] = 0x80 | (wc & 0x3F);
+        } else if (wc < 0x10000) {
+            out_buf[out++] = 0xE0 | (wc >> 12);
+            out_buf[out++] = 0x80 | ((wc >> 6) & 0x3F);
+            out_buf[out++] = 0x80 | (wc & 0x3F);
+        } else {
+            out_buf[out++] = 0xF0 | (wc >> 18);
+            out_buf[out++] = 0x80 | ((wc >> 12) & 0x3F);
+            out_buf[out++] = 0x80 | ((wc >> 6) & 0x3F);
+            out_buf[out++] = 0x80 | (wc & 0x3F);
+        }
+    }
+    return out;
+}
+
 const char* dict_get_definition(DictMmap *dict, const FlatTreeEntry *entry, size_t *out_len, char **out_to_free) {
     if (!dict || !entry) return NULL;
     if (out_len) *out_len = entry->d_len;
     if (out_to_free) *out_to_free = NULL;
 
+    /* 1. Direct memory map read for plain source-backed dicts (e.g., .dsl, .dict) */
+    if (dict->source_mmap) {
+        if (dict->stardict_sts) {
+            char *transcoded = stardict_transcode_article(dict->source_mmap + entry->d_off, entry->d_len, dict->stardict_sts);
+            if (out_len) *out_len = transcoded ? strlen(transcoded) : 0;
+            if (out_to_free) *out_to_free = transcoded;
+            return transcoded;
+        }
+        if (dict->source_encoding == 1 || dict->source_encoding == 2) {
+            size_t max_out = entry->d_len * 2;
+            char *utf8_buf = g_malloc(max_out + 1);
+            size_t utf8_len = 0;
+            if (dict->source_encoding == 1) {
+                utf8_len = convert_utf16le_to_utf8((const unsigned char*)dict->source_mmap + entry->d_off, entry->d_len, (unsigned char*)utf8_buf, max_out);
+            } else {
+                utf8_len = convert_utf16be_to_utf8((const unsigned char*)dict->source_mmap + entry->d_off, entry->d_len, (unsigned char*)utf8_buf, max_out);
+            }
+            utf8_buf[utf8_len] = '\0';
+            if (out_len) *out_len = utf8_len;
+            if (out_to_free) *out_to_free = utf8_buf;
+            return utf8_buf;
+        }
+        return dict->source_mmap + entry->d_off;
+    }
+
+    /* 2. dictzip random access for .dsl.dz / .dict.dz */
+    if (dict->source_dz) {
+        size_t raw_len = 0;
+        unsigned char *raw = dictzip_read(dict->source_dz, entry->d_off, entry->d_len, &raw_len);
+        if (!raw) return NULL;
+        
+        if (dict->stardict_sts) {
+            char *transcoded = stardict_transcode_article((const char*)raw, raw_len, dict->stardict_sts);
+            g_free(raw);
+            if (out_len) *out_len = transcoded ? strlen(transcoded) : 0;
+            if (out_to_free) *out_to_free = transcoded;
+            return transcoded;
+        }
+
+        if (dict->source_encoding == 1 || dict->source_encoding == 2) {
+            size_t max_out = raw_len * 2;
+            char *utf8_buf = g_malloc(max_out + 1);
+            size_t utf8_len = 0;
+            if (dict->source_encoding == 1) {
+                utf8_len = convert_utf16le_to_utf8(raw, raw_len, (unsigned char*)utf8_buf, max_out);
+            } else {
+                utf8_len = convert_utf16be_to_utf8(raw, raw_len, (unsigned char*)utf8_buf, max_out);
+            }
+            utf8_buf[utf8_len] = '\0';
+            g_free(raw);
+            if (out_len) *out_len = utf8_len;
+            if (out_to_free) *out_to_free = utf8_buf;
+            return utf8_buf;
+        }
+
+        if (out_len) *out_len = raw_len;
+        if (out_to_free) *out_to_free = (char*)raw;
+        return (char*)raw;
+    }
+
+    /* 3. Chunked self-contained format (DCMP) */
     if (dict->is_compressed && dict->chunk_reader) {
         char *decomp = dict_chunk_reader_get_definition(dict->chunk_reader, (uint64_t)entry->d_off, (uint64_t)entry->d_len);
         if (out_to_free) *out_to_free = decomp;
         return decomp;
     }
 
+    /* 4. Fallback (if using old in-memory ->data logic) */
     return dict->data + entry->d_off;
 }
 

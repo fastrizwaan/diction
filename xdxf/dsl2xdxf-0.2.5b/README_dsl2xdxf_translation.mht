@@ -1,0 +1,447 @@
+From: <Saved by WebKit>
+Subject: Webkit Word
+Date: Mon, 10 May 2026 13:31:23 +0530
+MIME-Version: 1.0
+Content-Type: multipart/related;
+	type="text/html";
+	boundary="----=_NextPart_000_32B8_ACC572AF.8BA59D4C"
+
+------=_NextPart_000_32B8_ACC572AF.8BA59D4C
+Content-Type: text/html
+Content-Transfer-Encoding: quoted-printable
+Content-Location: wyciwyg://frame/0
+
+<html style=3D"height: 100%;"><head><meta charset=3D"UTF-8">
+           =20
+            <title>Webkit Word</title>
+            <style>
+               =20
+            html, body {
+                height: 100%;
+                padding: 0;
+                font-family: Sans;
+            }
+            #editor {
+                padding: 0px;
+                outline: none;
+                height: 100%;
+                font-family: Sans;
+                font-size: 12pt;
+                position: relative; /* Important for absolute positioning o=
+f floating tables */
+                min-height: 300px;  /* Ensure there's space to drag tables =
+*/
+            }
+            #editor div {
+                margin: 0;
+                padding: 0;
+            }
+            #editor:empty:not(:focus):before {
+                content: "Type here to start editing...";
+                color: #aaa;
+                font-style: italic;
+                position: absolute;
+                pointer-events: none;
+                top: 10px;
+                left: 10px;
+            }
+       =20
+               =20
+            /* Table styles */
+            table {
+                border-collapse: collapse;
+                margin: 0 0 10px 0;  /* Changed from margin: 10px 0 */
+                position: relative;  /* Important for internal handles */
+                resize: both;
+                overflow: visible;   /* Changed from auto to visible to ens=
+ure handles are not clipped */
+                min-width: 30px;
+                min-height: 30px;
+            }
+            table.left-align {
+                float: left;
+                margin-right: 10px;
+                margin-top: 0;  /* Ensure no top margin for floated tables =
+*/
+                clear: none;
+            }
+            table.right-align {
+                float: right;
+                margin-left: 10px;
+                margin-top: 0;  /* Ensure no top margin for floated tables =
+*/
+                clear: none;
+            }
+            table.center-align {
+                display: table;  /* Ensure block behavior is correct */
+                margin-left: auto !important;
+                margin-right: auto !important;
+                margin-top: 0;
+                float: none !important;
+                clear: both;
+                position: relative;
+            }
+            table.no-wrap {
+                float: none;
+                clear: both;
+                width: 100%;
+                margin-top: 0;
+            }
+            table td {
+                padding: 5px;
+                min-width: 30px;
+                position: relative;
+            }
+            table th {
+                padding: 5px;
+                min-width: 30px;
+                background-color: #f0f0f0;
+            }
+       =20
+               =20
+            /* Floating table styles - border removed from CSS and applied =
+conditionally via JS */
+            table.floating-table {
+                position: absolute !important;
+                z-index: 50;
+                box-shadow: 0 3px 10px rgba(0,0,0,0.2);
+                background-color: rgba(255, 255, 255, 0.95);
+                cursor: grab;
+            }
+           =20
+            table.floating-table:active {
+                cursor: grabbing;
+            }
+           =20
+            table.floating-table .table-drag-handle {
+                width: 20px !important;
+                height: 20px !important;
+                border-radius: 3px;
+                opacity: 0.9;
+            }
+       =20
+               =20
+            /* Text box styles (enhanced table) */
+            table.text-box-table {
+                border: 1px solid #ccc !important;
+                border-radius: 0px;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                background-color: #fff;
+                width: 80px;  /* Initial width */
+                height: 80px; /* Initial height */
+                min-width: 80px;
+                min-height: 80px;
+                resize: both !important; /* Ensure resizability */
+            }
+           =20
+            table.text-box-table td {
+                vertical-align: top;
+            }
+       =20
+               =20
+            /* Ensure text boxes handle selection properly */
+            #editor ::selection {
+                background-color: #b5d7ff;
+                color: inherit;
+            }
+       =20
+               =20
+            @media (prefers-color-scheme: dark) {
+                html, body {
+                    background-color: #1e1e1e;
+                    color: #c0c0c0;
+                }
+                table th {
+                    background-color: #2a2a2a;
+                }
+                table.text-box-table {
+                    border-color: #444 !important;
+                    background-color: #2d2d2d;
+                    box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+                }
+                table.floating-table {
+                    background-color: rgba(45, 45, 45, 0.95);
+                    box-shadow: 0 3px 10px rgba(0,0,0,0.5);
+                }
+                #editor ::selection {
+                    background-color: #264f78;
+                    color: inherit;
+                }
+            }
+       =20
+               =20
+            @media (prefers-color-scheme: light) {
+                html, body {
+                    background-color: #ffffff;
+                    color: #000000;
+                }
+            }
+       =20
+            </style>
+           =20
+       =20
+        <style id=3D"table-handle-styles">
+        /* Table drag handle - positioned inside the table */
+        .table-drag-handle {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 16px;
+            height: 16px;
+            background-color: #4e9eff;
+            cursor: move;
+            z-index: 1000;
+            display: flex;  /* Changed from static display to allow proper =
+show/hide */
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 10px;
+            pointer-events: all;
+            user-select: none;
+            -webkit-user-select: none;
+            -moz-user-select: none;
+            -ms-user-select: none;
+        }
+
+        /* Table resize handle - triangular shape in bottom right */
+        .table-handle {
+            position: absolute;
+            bottom: 0;
+            right: 0;
+            width: 0;
+            height: 0;
+            border-style: solid;
+            border-width: 0 0 16px 16px;
+            border-color: transparent transparent #4e9eff transparent;
+            cursor: nwse-resize;
+            z-index: 1000;
+            pointer-events: all;
+            user-select: none;
+            -webkit-user-select: none;
+            -moz-user-select: none;
+            -ms-user-select: none;
+            display: block;  /* Added to allow proper show/hide */
+        }
+       =20
+        /* Floating table styles */
+        .floating-table {
+            position: absolute !important;
+            z-index: 50;
+            box-shadow: 0 3px 10px rgba(0,0,0,0.2);
+            background-color: rgba(255, 255, 255, 0.95);
+            cursor: grab;
+        }
+       =20
+        .floating-table:active {
+            cursor: grabbing;
+        }
+       =20
+        .floating-table .table-drag-handle {
+            width: 20px !important;
+            height: 20px !important;
+            border-radius: 3px;
+            opacity: 0.9;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            .table-drag-handle {
+                background-color: #0078d7;
+            }
+            .table-handle {
+                border-color: transparent transparent #0078d7 transparent;
+            }
+            .floating-table {
+                background-color: rgba(45, 45, 45, 0.95);
+                box-shadow: 0 3px 10px rgba(0,0,0,0.5);
+            }
+            .floating-table .table-drag-handle {
+                background-color: #0078d7;
+            }
+        }</style></head>
+        <body>
+           =20
+            <div id=3D"editor" contenteditable=3D"true" tabindex=3D"0"><p s=
+tyle=3D"line-height: 100%; margin-bottom: 0in">
+DSL2XDXF</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in"><br>
+
+</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">Only in Russian,
+sorry.</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in"><br>
+
+</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">Converter of Lingvo
+8 DSL dictionary source files into XML language in XDXF format.
+Supports both Unicode DSL and ANSI DSL. Compatible with DSL files
+from earlier Lingvo versions.</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in"><br>
+
+</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">Command format:</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in"><br>
+
+</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">dslx2dxf.py
+=E2=80=93[T|X|E|S|A] [-h] [-n &lt;name&gt;] [-z &lt;full_name&gt;] [-d
+&lt;descr&gt;] [-f &lt;from&gt;] [-t &lt;to&gt;] [-a &lt;file&gt;]
+[-i] &lt;DSL_name&gt; [&lt;target_directory&gt;]</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in"><br>
+
+</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">Parameters enclosed
+in square brackets are optional.</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in"><br>
+
+</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">Options:</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">- -h =E2=80=94 Help.</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">- -T =E2=80=94 Dictionar=
+y
+type: "translation"</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">- -X =E2=80=94 Dictionar=
+y
+type: "explanatory"</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">- -E =E2=80=94 Dictionar=
+y
+type: "encyclopedia"</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">- -S =E2=80=94 Dictionar=
+y
+type: "spelling"</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">- -A =E2=80=94 Dictionar=
+y
+type: "audio"</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in"><br>
+
+</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">More than one
+dictionary type parameter may be specified, but at least one is
+required.</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in"><br>
+
+</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">Metadata options:</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">- -n &lt;name&gt; =E2=80=
+=94
+Short dictionary name. If not specified, taken from the DSL file.</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">- -z &lt;full_name&gt;
+=E2=80=94 Full dictionary name.</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">- -d &lt;descr&gt; =E2=
+=80=94
+Dictionary description.</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">- -f &lt;from&gt; =E2=80=
+=94
+Source language.</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">- -t &lt;to&gt; =E2=80=
+=94
+Target language.</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">- -a &lt;file&gt; =E2=80=
+=94
+Path to abbreviations file.</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">- -i =E2=80=94 Pretty
+formatting.</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in"><br>
+
+</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">Example:</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">python dsl2xdxf.py
+-EX -n "AppliedMathematics (Ru-En)" -d "My dictionary"
+-f Russian -t English /var/dict/dict.dsl</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in"><br>
+
+</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">The dictionary will
+be saved as:</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">/var/dict/appliedmathema=
+tics
+(ru-en)/appliedmathematics (ru-en).xdxf</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in"><br>
+
+</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">Additional behavior:</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">- .ann annotation
+files are appended into &lt;description&gt;.</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">- abbrev.dsl /
+abrv.dsl files may be imported.</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">- matching .bmp
+files are copied.</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">- referenced
+multimedia files are copied.</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">- output names are
+lowercased.</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in"><br>
+
+</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">DSL Tag Conversion
+Table:</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in"><br>
+
+</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">[b][/b] -&gt;
+&lt;b&gt;&lt;/b&gt;</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">[i][/i] -&gt;
+&lt;i&gt;&lt;/i&gt;</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">[u][/u] -&gt;
+&lt;u&gt;&lt;/u&gt;</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">[c][/c] -&gt;
+&lt;color&gt;&lt;/color&gt;</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">[trn][/trn] -&gt;
+&lt;dtrn&gt;&lt;/dtrn&gt;</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">[ex][/ex] -&gt;
+&lt;example&gt;&lt;/example&gt;</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">[com][/com] -&gt;
+&lt;comment&gt;&lt;/comment&gt;</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">[s]file[/s] -&gt;
+&lt;rref&gt;file&lt;/rref&gt;</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">[url]link[/url] -&gt;
+&lt;iref&gt;link&lt;/iref&gt;</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">[ref]link[/ref] -&gt;
+&lt;kref&gt;&lt;/kref&gt;</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">[sub][/sub] -&gt;
+&lt;sub&gt;&lt;/sub&gt;</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">[sup][/sup] -&gt;
+&lt;sup&gt;&lt;/sup&gt;</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">[t][/t] -&gt;
+&lt;transcription&gt;&lt;/transcription&gt;</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in"><br>
+
+</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">Nested article
+syntax:</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in"><br>
+
+</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">@ heading</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">body</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in"><br>
+
+</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">becomes:</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in"><br>
+
+</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">&lt;subarticle&gt;</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in"> &lt;key&gt;heading&lt;/=
+key&gt;</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in"> &lt;def&gt;body&lt;/def=
+&gt;</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">&lt;/subarticle&gt;</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in"><br>
+
+</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">Special
+substitutions:</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">~      -&gt; current
+headword</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">^~     -&gt; current
+headword with changed first-letter case</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">(...)  -&gt;
+optional part</p>
+<p style=3D"line-height: 100%; margin-bottom: 0in">{...}  -&gt;
+non-sortable part</p></div>
+       =20
+       =20
+       =20
+        </body></html>
+------=_NextPart_000_32B8_ACC572AF.8BA59D4C--

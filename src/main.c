@@ -98,6 +98,7 @@ static guint search_execute_source_id = 0;
 static GtkStringList *related_string_list = NULL;
 static GtkSingleSelection *related_selection_model = NULL;
 static GtkListView *related_list_view = NULL;
+static guint related_activated_pos = GTK_INVALID_LIST_POSITION;
 static GPtrArray *related_row_payloads = NULL;
 static GHashTable *dictionary_dir_monitors = NULL;
 static GHashTable *dictionary_root_parent_monitors = NULL;
@@ -132,6 +133,7 @@ typedef struct {
     GtkSingleSelection *selection_model;
     GtkListView *list_view;
     GPtrArray *payloads;
+    guint activated_pos;
 } SidebarListView;
 
 static SidebarListView dict_sidebar = {0};
@@ -215,6 +217,7 @@ static void render_idle_page_to_webview(WebKitWebView *target_wv,
                                         const char *title,
                                         const char *message_html);
 static void render_query_to_webview(const char *query_raw, WebKitWebView *target_wv, gboolean push_history);
+static void update_listview_hw_selected(GtkListView *list_view, guint activated_pos);
 static void populate_search_sidebar(const char *query);
 static void execute_search_now(void);
 static void execute_search_now_for_query(const char *query_raw, gboolean push_history);
@@ -473,6 +476,7 @@ static void clear_related_rows(void) {
         guint n_items = g_list_model_get_n_items(G_LIST_MODEL(related_string_list));
         gtk_string_list_splice(related_string_list, 0, n_items, NULL);
     }
+    related_activated_pos = GTK_INVALID_LIST_POSITION;
 }
 
 static void set_related_rows(GPtrArray *labels, GPtrArray *payloads) {
@@ -503,12 +507,14 @@ static void set_related_rows(GPtrArray *labels, GPtrArray *payloads) {
     }
     g_ptr_array_set_size(payloads, 0);
 
-    /* Restore selection if the word is still in the new list */
+    /* Restore selection and hw-selected highlight if the word is still in the new list */
     if (selected_text && related_selection_model) {
         for (guint i = 0; i < g_list_model_get_n_items(G_LIST_MODEL(related_string_list)); i++) {
             GtkStringObject *obj = g_list_model_get_item(G_LIST_MODEL(related_string_list), i);
             if (obj && g_strcmp0(gtk_string_object_get_string(obj), selected_text) == 0) {
                 gtk_single_selection_set_selected(related_selection_model, i);
+                related_activated_pos = i;
+                update_listview_hw_selected(related_list_view, i);
                 break;
             }
         }
@@ -558,6 +564,9 @@ static gboolean select_related_word(const char *word) {
         RelatedRowPayload *payload = g_ptr_array_index(related_row_payloads, i);
         if (related_payload_matches_word(payload, word)) {
             gtk_single_selection_set_selected(related_selection_model, i);
+            /* Update hw-selected highlight to follow the matched word */
+            related_activated_pos = i;
+            update_listview_hw_selected(related_list_view, i);
             return TRUE;
         }
     }
@@ -566,9 +575,8 @@ static gboolean select_related_word(const char *word) {
 }
 
 static void clear_sidebar_list(SidebarListView *sidebar) {
-    if (!sidebar) {
-        return;
-    }
+    if (!sidebar) return;
+    sidebar->activated_pos = GTK_INVALID_LIST_POSITION;
     if (sidebar->payloads) {
         g_ptr_array_set_size(sidebar->payloads, 0);
     }
@@ -663,11 +671,11 @@ static void free_signal_data(gpointer data, GClosure *closure) {
 }
 
 static gboolean transform_sidebar_star_visibility(GBinding *binding, const GValue *from_value, GValue *to_value, gpointer user_data) {
-    (void)binding;
-    gboolean selected = g_value_get_boolean(from_value);
+    (void)binding; (void)from_value;
     const char *word = user_data;
     gboolean is_favorite = word && word_list_contains_ci(favorite_words, word);
-    g_value_set_boolean(to_value, selected || is_favorite);
+    /* Only show persistently for favorites; hover enter/leave handles the rest */
+    g_value_set_boolean(to_value, is_favorite);
     return TRUE;
 }
 
@@ -682,12 +690,49 @@ static const char *dict_format_emoji(DictFormat fmt) {
     }
 }
 
+static void sidebar_list_item_setup(GtkSignalListItemFactory *factory, GtkListItem *item, gpointer user_data);
+static void sidebar_list_item_bind(GtkSignalListItemFactory *factory, GtkListItem *item, gpointer user_data);
+static void sidebar_list_item_unbind(GtkSignalListItemFactory *factory, GtkListItem *item, gpointer user_data);
+
+static void on_row_box_enter(GtkEventControllerMotion *ctrl, double x, double y, gpointer ud) {
+    (void)x; (void)y; (void)ud;
+    GtkWidget *box = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(ctrl));
+    GtkWidget *row = gtk_widget_get_parent(box);
+    /* Only show hover if not activated */
+    if (row && !gtk_widget_has_css_class(row, "hw-selected"))
+        gtk_widget_add_css_class(box, "hw-hovered");
+    /* Show star button on hover */
+    GtkWidget *star_btn = gtk_widget_get_last_child(box);
+    if (star_btn && GTK_IS_BUTTON(star_btn))
+        gtk_widget_set_visible(star_btn, TRUE);
+}
+
+static void on_row_box_leave(GtkEventControllerMotion *ctrl, gpointer ud) {
+    (void)ud;
+    GtkWidget *box = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(ctrl));
+    gtk_widget_remove_css_class(box, "hw-hovered");
+    /* Hide star button on leave, unless it's a favorite (starred) */
+    GtkWidget *star_btn = gtk_widget_get_last_child(box);
+    if (star_btn && GTK_IS_BUTTON(star_btn)) {
+        const char *icon_name = gtk_button_get_icon_name(GTK_BUTTON(star_btn));
+        gboolean is_fav = icon_name && g_strcmp0(icon_name, "starred-symbolic") == 0;
+        if (!is_fav)
+            gtk_widget_set_visible(star_btn, FALSE);
+    }
+}
+
 static void sidebar_list_item_setup(GtkSignalListItemFactory *factory, GtkListItem *item, gpointer user_data) {
     (void)factory;
     (void)user_data;
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_widget_set_hexpand(box, TRUE);
     gtk_widget_add_css_class(box, "sidebar-row");
     gtk_widget_set_margin_start(box, 12);
+    
+    GtkEventController *motion = gtk_event_controller_motion_new();
+    g_signal_connect(motion, "enter", G_CALLBACK(on_row_box_enter), NULL);
+    g_signal_connect(motion, "leave", G_CALLBACK(on_row_box_leave), NULL);
+    gtk_widget_add_controller(box, motion);
 
     /* File-based icon (shown when dict has an icon image) */
     GtkWidget *icon = gtk_image_new();
@@ -725,6 +770,16 @@ static void sidebar_list_item_bind(GtkSignalListItemFactory *factory, GtkListIte
     GtkWidget *star_btn = gtk_widget_get_last_child(box);
 
     guint position = gtk_list_item_get_position(item);
+    GtkWidget *row = gtk_widget_get_parent(box);
+    if (row) {
+        g_object_set_data(G_OBJECT(row), "row-position", GUINT_TO_POINTER(position));
+        if (position == sidebar->activated_pos) {
+            gtk_widget_add_css_class(row, "hw-selected");
+        } else {
+            gtk_widget_remove_css_class(row, "hw-selected");
+        }
+    }
+
     SidebarRowPayload *payload = sidebar_payload_at(sidebar, position);
     GtkStringObject *string_object = GTK_STRING_OBJECT(gtk_list_item_get_item(item));
     const char *row_text = string_object ? gtk_string_object_get_string(string_object) : "";
@@ -792,8 +847,16 @@ static void sidebar_list_item_bind(GtkSignalListItemFactory *factory, GtkListIte
     }
 
     g_free(markup);
-    g_free(safe_title);
     g_free(safe_subtitle);
+}
+
+static void sidebar_list_item_unbind(GtkSignalListItemFactory *factory, GtkListItem *item, gpointer user_data) {
+    (void)factory; (void)user_data;
+    GtkWidget *box = gtk_list_item_get_child(item);
+    if (box) {
+        GtkWidget *row = gtk_widget_get_parent(box);
+        if (row) gtk_widget_remove_css_class(row, "hw-selected");
+    }
 }
 
 static void populate_history_sidebar(void);
@@ -803,6 +866,7 @@ static void populate_search_sidebar(const char *query);
 static gboolean dict_entry_in_active_scope(DictEntry *entry);
 
 static void cancel_sidebar_search(void) {
+    related_activated_pos = GTK_INVALID_LIST_POSITION;
     if (sidebar_search_state && sidebar_search_state->source_id != 0) {
         g_source_remove(sidebar_search_state->source_id);
         sidebar_search_state->source_id = 0;
@@ -2425,7 +2489,10 @@ static void on_dict_item_activated(GtkListView *view, guint position, gpointer u
 static void append_rendered_word_html_impl(const char *raw_word, gboolean push_history);
 static void append_rendered_word_html(const char *raw_word);
 
+
+
 static GtkWidget *create_sidebar_list_view(SidebarListView *sidebar, GCallback activate_cb) {
+    sidebar->activated_pos = GTK_INVALID_LIST_POSITION;
     sidebar->string_list = gtk_string_list_new(NULL);
     sidebar->payloads = g_ptr_array_new_with_free_func((GDestroyNotify)sidebar_row_payload_free);
     sidebar->selection_model = GTK_SINGLE_SELECTION(gtk_single_selection_new(G_LIST_MODEL(sidebar->string_list)));
@@ -2435,11 +2502,49 @@ static GtkWidget *create_sidebar_list_view(SidebarListView *sidebar, GCallback a
     GtkListItemFactory *factory = gtk_signal_list_item_factory_new();
     g_signal_connect(factory, "setup", G_CALLBACK(sidebar_list_item_setup), NULL);
     g_signal_connect(factory, "bind", G_CALLBACK(sidebar_list_item_bind), sidebar);
+    g_signal_connect(factory, "unbind", G_CALLBACK(sidebar_list_item_unbind), sidebar);
 
     sidebar->list_view = GTK_LIST_VIEW(gtk_list_view_new(GTK_SELECTION_MODEL(sidebar->selection_model), factory));
     gtk_list_view_set_single_click_activate(sidebar->list_view, TRUE);
     g_signal_connect(sidebar->list_view, "activate", activate_cb, sidebar);
     return GTK_WIDGET(sidebar->list_view);
+}
+
+/*
+ * Directly toggle hw-selected CSS class on visible rows of a GtkListView.
+ * This avoids gtk_string_list_splice which fires items-changed and causes
+ * the list view to scroll back to the top.
+ */
+static void update_listview_hw_selected(GtkListView *list_view, guint activated_pos) {
+    if (!list_view) return;
+    /* GtkListView children are the row widgets (GtkListItemWidget).
+     * Each row's first child is the box set via gtk_list_item_set_child(). */
+    for (GtkWidget *child = gtk_widget_get_first_child(GTK_WIDGET(list_view));
+         child != NULL;
+         child = gtk_widget_get_next_sibling(child)) {
+        /* The row widget exposes a "position" property via GtkListItem.
+         * We can get the position by inspecting the child box's inner label
+         * or by checking the GtkListItem accessible role.
+         * Simpler: GtkListItemWidget has the child widget whose parent is `child` (the row).
+         * The GtkListItem is accessible via the listitem CSS node.
+         * Actually, just walk children: the row widget itself has a child (the box).
+         * We need to use gtk_list_item_get_position, but we don't have the GtkListItem.
+         * GTK4 doesn't expose a public API from row widget → GtkListItem.
+         *
+         * Alternative approach: use "position" data we stash on the row during bind.
+         */
+        guint pos = GPOINTER_TO_UINT(g_object_get_data(G_OBJECT(child), "row-position"));
+        /* pos 0 is ambiguous (could be position 0 or not-set). Use a sentinel. */
+        gboolean has_pos = g_object_get_data(G_OBJECT(child), "row-position") != NULL
+                           || pos == 0;
+        if (!has_pos) continue;
+
+        if (pos == activated_pos) {
+            gtk_widget_add_css_class(child, "hw-selected");
+        } else {
+            gtk_widget_remove_css_class(child, "hw-selected");
+        }
+    }
 }
 
 static void on_history_item_activated(GtkListView *view, guint position, gpointer user_data) {
@@ -2452,6 +2557,9 @@ static void on_history_item_activated(GtkListView *view, guint position, gpointe
     if (sidebar && sidebar->selection_model) {
         gtk_single_selection_set_selected(sidebar->selection_model, position);
     }
+    
+    sidebar->activated_pos = position;
+    update_listview_hw_selected(sidebar->list_view, position);
 }
 
 static void on_find_next(GtkButton *btn, gpointer user_data) {
@@ -2626,12 +2734,22 @@ static GtkWidget* create_find_bar() {
     return GTK_WIDGET(find_revealer);
 }
 
+static void related_list_item_setup(GtkSignalListItemFactory *factory, GtkListItem *item, gpointer user_data);
+static void related_list_item_bind(GtkSignalListItemFactory *factory, GtkListItem *item, gpointer user_data);
+static void related_list_item_unbind(GtkSignalListItemFactory *factory, GtkListItem *item, gpointer user_data);
+
 static void related_list_item_setup(GtkSignalListItemFactory *factory, GtkListItem *item, gpointer user_data) {
     (void)factory;
     (void)user_data;
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_widget_set_hexpand(box, TRUE);
     gtk_widget_add_css_class(box, "sidebar-row");
     gtk_widget_set_margin_start(box, 12);
+
+    GtkEventController *motion = gtk_event_controller_motion_new();
+    g_signal_connect(motion, "enter", G_CALLBACK(on_row_box_enter), NULL);
+    g_signal_connect(motion, "leave", G_CALLBACK(on_row_box_leave), NULL);
+    gtk_widget_add_controller(box, motion);
     GtkWidget *label = gtk_label_new("");
     gtk_label_set_xalign(GTK_LABEL(label), 0.0f);
     gtk_label_set_wrap(GTK_LABEL(label), TRUE);
@@ -2677,6 +2795,16 @@ static void related_list_item_bind(GtkSignalListItemFactory *factory, GtkListIte
     
     GtkStringObject *string_object = GTK_STRING_OBJECT(gtk_list_item_get_item(item));
     guint position = gtk_list_item_get_position(item);
+    GtkWidget *row = gtk_widget_get_parent(box);
+    if (row) {
+        g_object_set_data(G_OBJECT(row), "row-position", GUINT_TO_POINTER(position));
+        if (position == related_activated_pos) {
+            gtk_widget_add_css_class(row, "hw-selected");
+        } else {
+            gtk_widget_remove_css_class(row, "hw-selected");
+        }
+    }
+
     const char *text = string_object ? gtk_string_object_get_string(string_object) : "";
     char *valid_text = g_utf8_make_valid(text ? text : "", -1);
     RelatedRowPayload *payload = NULL;
@@ -2712,6 +2840,15 @@ static void related_list_item_bind(GtkSignalListItemFactory *factory, GtkListIte
     g_free(valid_text);
 }
 
+static void related_list_item_unbind(GtkSignalListItemFactory *factory, GtkListItem *item, gpointer user_data) {
+    (void)factory; (void)user_data;
+    GtkWidget *box = gtk_list_item_get_child(item);
+    if (box) {
+        GtkWidget *row = gtk_widget_get_parent(box);
+        if (row) gtk_widget_remove_css_class(row, "hw-selected");
+    }
+}
+
 static void on_related_item_activated(GtkListView *view, guint position, gpointer user_data) {
     (void)view;
     (void)user_data;
@@ -2728,6 +2865,10 @@ static void on_related_item_activated(GtkListView *view, guint position, gpointe
     if (related_selection_model) {
         gtk_single_selection_set_selected(related_selection_model, position);
     }
+    
+    related_activated_pos = position;
+    update_listview_hw_selected(related_list_view, position);
+
     append_rendered_word_html(payload->word);
 }
 
@@ -2741,6 +2882,9 @@ static void on_favorites_item_activated(GtkListView *view, guint position, gpoin
     if (sidebar && sidebar->selection_model) {
         gtk_single_selection_set_selected(sidebar->selection_model, position);
     }
+
+    sidebar->activated_pos = position;
+    update_listview_hw_selected(sidebar->list_view, position);
 }
 
 
@@ -2763,6 +2907,9 @@ static void on_dict_item_activated(GtkListView *view, guint position, gpointer u
         SidebarRowPayload *p = g_ptr_array_index(sidebar->payloads, i);
         if (p->type == SIDEBAR_ROW_DICT && p->dict_entry == target_entry) {
             gtk_single_selection_set_selected(sidebar->selection_model, i);
+            
+            sidebar->activated_pos = i;
+            update_listview_hw_selected(sidebar->list_view, i);
             break;
         }
     }
@@ -3364,6 +3511,8 @@ static void render_query_to_webview(const char *query_raw, WebKitWebView *target
         g_string_append(html_res, "</div></body></html>");
         webkit_web_view_load_html(target_wv, html_res->str, "file:///");
         set_tab_metadata(target_wv, query, query, 1);
+        /* Auto-highlight the matching word in the search sidebar */
+        select_related_word(query);
         if (push_history && target_wv == get_current_web_view()) {
             update_history_word(query);
             const char *current_search_query = gtk_editable_get_text(GTK_EDITABLE(search_entry));
@@ -3941,13 +4090,9 @@ static void update_theme_colors(void) {
     const char *accent = (is_default_theme) ? (dark_mode ? "#3584e4" : "#e45649") : palette.accent;
     const char *popover_bg = (is_default_theme) ? (dark_mode ? "#2e2e32" : "#ffffff") : c_surface;
 
-    /* Selection colors: standard blue for default, palette accent for others */
+    /* Selection colors: standard neutral grey for hover, soft tint for activation */
     char sidebar_hover[64];
-    if (is_default_theme) {
-        g_strlcpy(sidebar_hover, dark_mode ? "rgba(255, 255, 255, 0.06)" : "rgba(0, 0, 0, 0.04)", sizeof(sidebar_hover));
-    } else {
-        g_snprintf(sidebar_hover, sizeof(sidebar_hover), "rgba(%u,%u,%u,0.12)", ar, ag, ab);
-    }
+    g_strlcpy(sidebar_hover, "rgba(128, 128, 128, 0.15)", sizeof(sidebar_hover));
 
     char sidebar_selected_bg[64];
     char sidebar_selected_fg[32];
@@ -4008,29 +4153,26 @@ static void update_theme_colors(void) {
         "row, listitem {\n"
         "  color: inherit;\n"
         "}\n"
-        "row:selected, row:selected:hover, row:selected:focus, row:selected:focus-within, row:selected:backdrop,\n"
-        "listitem:selected, listitem:selected:hover, listitem:selected:focus, listitem:selected:focus-within, listitem:selected:backdrop,\n"
-        "listview listitem:selected, listview listitem:selected:hover, listview listitem:selected:backdrop {\n"
+        "row:selected, row:selected:focus, row:selected:focus-within, row:selected:backdrop,\n"
+        "listitem:selected, listitem:selected:focus, listitem:selected:focus-within, listitem:selected:backdrop,\n"
+        "listview listitem:selected, listview listitem:selected:backdrop {\n"
         "  background-color: %s;\n"
         "  color: %s;\n"
         "  outline: none;\n"
         "  transition: none;\n"
         "}\n"
-        "listitem:selected .sidebar-row, listitem:selected:hover .sidebar-row, listitem:selected:backdrop .sidebar-row,\n"
-        "row:selected .sidebar-row, row:selected:hover .sidebar-row, row:selected:backdrop .sidebar-row {\n"
+        "listitem:selected .sidebar-row, listitem:selected:backdrop .sidebar-row,\n"
+        "row:selected .sidebar-row, row:selected:backdrop .sidebar-row {\n"
         "  background-color: transparent;\n"
         "  color: %s;\n"
         "}\n"
+
         "/* Explicitly set webview backgrounds */\n"
         "webkitwebview, webview {\n"
         "  background-color: @view_bg_color;\n"
         "}\n"
-        "row:hover:not(:selected), listitem:hover:not(:selected), listview listitem:hover:not(:selected) {\n"
+        ".hw-hovered {\n"
         "  background-color: %s;\n"
-        "  color: inherit;\n"
-        "}\n"
-        "listitem:hover:not(:selected) .sidebar-row, row:hover:not(:selected) .sidebar-row {\n"
-        "  background-color: transparent;\n"
         "  color: inherit;\n"
         "}\n"
         "popover, popovermenu {\n"
@@ -4063,7 +4205,7 @@ static void update_theme_colors(void) {
         "  opacity: 0.7;\n"
         "}\n"
         ".content-header, .content-header headerbar {\n"
-        "  background-color: %s;\n"
+        "  background-color: transparent;\n"
         "  border-bottom: none;\n"
         "  box-shadow: none;\n"
         "}\n"
@@ -4081,6 +4223,38 @@ static void update_theme_colors(void) {
         "  min-height: 0;\n"
         "  opacity: 0;\n"
         "  background: transparent;\n"
+        "}\n"
+        /* hw-selected: beat the theme's row:selected/row:hover rules above */
+        "listview row.hw-selected,"
+        "listview row.hw-selected:hover,"
+        "listview row.hw-selected:selected,"
+        "listview row.hw-selected:selected:hover,"
+        "listview listitem.hw-selected,"
+        "listview listitem.hw-selected:hover,"
+        "listview listitem.hw-selected:selected,"
+        "listview listitem.hw-selected:selected:hover {"
+        "  background-color: alpha(@accent_bg_color, 0.22);"
+        "  color: inherit;"
+        "}"
+        "listview row.hw-selected .sidebar-row,"
+        "listview row.hw-selected:hover .sidebar-row,"
+        "listview listitem.hw-selected .sidebar-row,"
+        "listview listitem.hw-selected:hover .sidebar-row {"
+        "  background-color: transparent;"
+        "  color: inherit;"
+        "}"
+        "listview row:not(.hw-selected):selected,"
+        "listview listitem:not(.hw-selected):selected {"
+        "  background-color: transparent;"
+        "  color: inherit;"
+        "}"
+        /* Hover highlight: MUST come last to beat :selected clearing rules */
+        "listview row:hover:not(.hw-selected),"
+        "listview row:not(.hw-selected):selected:hover,"
+        "listview listitem:hover:not(.hw-selected),"
+        "listview listitem:not(.hw-selected):selected:hover {"
+        "  background-color: %s;"
+        "  color: inherit;"
         "}\n",
         /* @define-color values */
         w_bg, w_fg, ch_bg, w_fg, h_bg, w_fg,
@@ -4089,14 +4263,14 @@ static void update_theme_colors(void) {
         palette.border,
         /* selected item colors (3) */
         sidebar_selected_bg, sidebar_selected_fg, sidebar_selected_fg,
-        /* row:hover (1) */
+        /* .hw-hovered (1) */
         sidebar_hover,
         /* popover row hover (1) */
         hover_color,
-        /* content header (1) */
-        ch_bg,
         /* tab bar (1) */
-        ch_bg
+        ch_bg,
+        /* listview row:hover — last rule in CSS (1) */
+        sidebar_hover
     );
 
     gtk_css_provider_load_from_string(dynamic_theme_provider, css);
@@ -5729,6 +5903,7 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     GtkListItemFactory *related_factory = gtk_signal_list_item_factory_new();
     g_signal_connect(related_factory, "setup", G_CALLBACK(related_list_item_setup), NULL);
     g_signal_connect(related_factory, "bind", G_CALLBACK(related_list_item_bind), NULL);
+    g_signal_connect(related_factory, "unbind", G_CALLBACK(related_list_item_unbind), NULL);
 
     related_list_view = GTK_LIST_VIEW(gtk_list_view_new(GTK_SELECTION_MODEL(related_selection_model), related_factory));
     gtk_list_view_set_single_click_activate(related_list_view, TRUE);
@@ -6067,7 +6242,7 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     ".sidebar-tabs button:checked { background: alpha(@theme_fg_color, 0.1); }"
     ".sidebar-tabs button:checked image { opacity: 1.0; }"
 
-    ".sidebar-row { min-height: 34px; background: transparent; }"
+    ".sidebar-row { min-height: 34px; }"
     ".content-header { background: transparent; }\n"
     ".menu-item { font-weight: normal; padding: 4px 8px; min-height: 0; }"
 

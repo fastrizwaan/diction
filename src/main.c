@@ -4011,10 +4011,68 @@ static void update_theme_colors(void) {
     dsl_theme_palette palette;
     dict_render_get_theme_palette(app_settings->color_theme, dark_mode, &palette);
 
-    /* Update all WebKit views to match palette */
     GdkRGBA bg_color;
     if (!gdk_rgba_parse(&bg_color, palette.bg))
         gdk_rgba_parse(&bg_color, dark_mode ? "#1e1e21" : "#ffffff");
+
+    /* Derive colors for JS injection, matching dict-render.c logic */
+    char gold_surface[16], gold_badge[16];
+    char slate_surface[16], slate_badge[16];
+    char paper_surface[16], paper_edge[16], paper_accent[16];
+    char tmp_color[16];
+
+    if (dark_mode) {
+        darken_hex_color(gold_surface, palette.link, sizeof(gold_surface), 0.28);
+        darken_hex_color(gold_badge, palette.link, sizeof(gold_badge), 0.40);
+        darken_hex_color(slate_surface, palette.border, sizeof(slate_surface), 0.82);
+        lighten_hex_color(slate_badge, palette.border, sizeof(slate_badge));
+        darken_hex_color(paper_surface, palette.com, sizeof(paper_surface), 0.30);
+        darken_hex_color(paper_edge, palette.border, sizeof(paper_edge), 0.90);
+        darken_hex_color(paper_accent, palette.link, sizeof(paper_accent), 0.72);
+    } else {
+        lighten_hex_color(tmp_color, palette.link, sizeof(tmp_color));
+        lighten_hex_color(gold_surface, tmp_color, sizeof(gold_surface));
+        g_strlcpy(gold_badge, tmp_color, sizeof(gold_badge));
+        darken_hex_color(slate_surface, palette.bg, sizeof(slate_surface), 0.97);
+        lighten_hex_color(slate_badge, palette.border, sizeof(slate_badge));
+        lighten_hex_color(tmp_color, palette.com, sizeof(tmp_color));
+        lighten_hex_color(paper_surface, tmp_color, sizeof(paper_surface));
+        lighten_hex_color(paper_edge, palette.border, sizeof(paper_edge));
+        lighten_hex_color(paper_accent, palette.link, sizeof(paper_accent));
+    }
+
+    char pbg[64], phov[64];
+    if (dark_mode) {
+        darken_hex_color(pbg, palette.link, sizeof(pbg), 0.55);
+        darken_hex_color(phov, palette.link, sizeof(phov), 0.72);
+    } else {
+        darken_hex_color(pbg, palette.link, sizeof(pbg), 0.80);
+        darken_hex_color(phov, palette.link, sizeof(phov), 0.65);
+    }
+
+    char *js_theme = g_strdup_printf(
+        "if (typeof updateDictionTheme === 'function') {"
+        "  updateDictionTheme({"
+        "    'bg-color': '%s', 'body-color': '%s', 'link-color': '%s', 'heading-color': '%s', "
+        "    'trn-color': '%s', 'ex-color': '%s', 'com-color': '%s', 'pos-color': '%s', "
+        "    'translit-color': '%s', 'border-color': '%s', 'fts-highlight': '%s', "
+        "    'gold-surface': '%s', 'gold-badge': '%s', "
+        "    'slate-surface': '%s', 'slate-badge': '%s', "
+        "    'paper-surface': '%s', 'paper-edge': '%s', 'paper-accent': '%s', "
+        "    'code-bg': '%s', 'code-fg': '%s', 'table-border': '%s', "
+        "    'pill-bg': '%s', 'pill-hover': '%s', "
+        "    'xdxf-num': '%s', 'paper-shadow': '%s'"
+        "  });"
+        "}",
+        palette.bg, palette.fg, palette.link, palette.heading,
+        palette.trn, palette.ex, palette.com, palette.pos,
+        palette.translit, palette.border, dark_mode ? "#ffd700" : "#ffeb3b",
+        gold_surface, gold_badge, slate_surface, slate_badge,
+        paper_surface, paper_edge, paper_accent,
+        dark_mode ? "#242424" : "#f5f5f5", dark_mode ? "#ececec" : "#222222",
+        dark_mode ? "#555555" : "#d0d0d0", pbg, phov,
+        dark_mode ? "#ff6b6b" : "#d32f2f",
+        dark_mode ? "0 1px 0 rgba(0,0,0,0.22)" : "none");
 
     if (tab_view) {
         GListModel *pages = G_LIST_MODEL(adw_tab_view_get_pages(tab_view));
@@ -4025,9 +4083,11 @@ static void update_theme_colors(void) {
             WebKitWebView *wv = get_web_view_from_scroll(scroll);
             if (wv) {
                 webkit_web_view_set_background_color(wv, &bg_color);
+                webkit_web_view_evaluate_javascript(wv, js_theme, -1, NULL, NULL, NULL, NULL, NULL);
             }
         }
     }
+    g_free(js_theme);
 
     if (!dynamic_theme_provider) {
         dynamic_theme_provider = gtk_css_provider_new();
@@ -4275,8 +4335,6 @@ static void update_theme_colors(void) {
 
     gtk_css_provider_load_from_string(dynamic_theme_provider, css);
     g_free(css);
-
-    refresh_search_results();
 }
 
 static void on_style_manager_changed(AdwStyleManager *manager, GParamSpec *pspec, gpointer user_data) {
@@ -4914,9 +4972,6 @@ static void collect_dictionary_candidate_paths_with_find(const char *dirpath,
     g_ptr_array_add(argv_array, g_strdup("-iname")); g_ptr_array_add(argv_array, g_strdup("*.bgl"));
     g_ptr_array_add(argv_array, g_strdup("-o"));
     g_ptr_array_add(argv_array, g_strdup("-iname")); g_ptr_array_add(argv_array, g_strdup("*.slob"));
-    g_ptr_array_add(argv_array, g_strdup("-o"));
-    g_ptr_array_add(argv_array, g_strdup("-iname")); g_ptr_array_add(argv_array, g_strdup("*.lsd"));
-    g_ptr_array_add(argv_array, g_strdup("-o"));
     g_ptr_array_add(argv_array, g_strdup("-iname")); g_ptr_array_add(argv_array, g_strdup("*.xdxf"));
     g_ptr_array_add(argv_array, g_strdup("-o"));
     g_ptr_array_add(argv_array, g_strdup("-iname")); g_ptr_array_add(argv_array, g_strdup("*.xdxf.dz"));
@@ -6360,7 +6415,6 @@ static const char* dict_format_to_str(DictFormat fmt) {
         case DICT_FORMAT_XDXF: return "XDXF";
         case DICT_FORMAT_DICTD: return "Dictd";
         case DICT_FORMAT_SDICT: return "Sdict";
-        case DICT_FORMAT_LSD: return "LSD";
         default: return "Unknown";
     }
 }

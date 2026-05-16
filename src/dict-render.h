@@ -46,5 +46,7 @@ typedef struct {
 } dsl_theme_palette;
 
 void dict_render_get_theme_palette(const char *theme_name, int dark_mode, dsl_theme_palette *out_palette);
+void lighten_hex_color(char *output, const char *hex, size_t output_size);
+void darken_hex_color(char *output, const char *hex, size_t output_size, double factor);
 
 #endif // DICT_RENDER_H

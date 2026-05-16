@@ -1854,7 +1854,6 @@ static void on_add_dictionary_file(GtkButton *btn, SettingsDialogData *data) {
     gtk_file_filter_add_pattern(filter, "*.mdx");
     gtk_file_filter_add_pattern(filter, "*.bgl");
     gtk_file_filter_add_pattern(filter, "*.slob");
-    gtk_file_filter_add_pattern(filter, "*.lsd");
     gtk_file_filter_add_pattern(filter, "*.tar.bz2");
     gtk_file_filter_add_pattern(filter, "*.tar.gz");
     gtk_file_filter_add_pattern(filter, "*.tar.xz");
@@ -1906,7 +1905,6 @@ static void on_import_dictionary_files(GtkButton *btn, SettingsDialogData *data)
     gtk_file_filter_add_pattern(filter, "*.mdx");
     gtk_file_filter_add_pattern(filter, "*.bgl");
     gtk_file_filter_add_pattern(filter, "*.slob");
-    gtk_file_filter_add_pattern(filter, "*.lsd");
     gtk_file_filter_add_pattern(filter, "*.tar.bz2");
     gtk_file_filter_add_pattern(filter, "*.tar.gz");
     gtk_file_filter_add_pattern(filter, "*.tar.xz");
@@ -2495,8 +2493,8 @@ static void on_render_style_row_changed(AdwComboRow *row, GParamSpec *pspec, Set
     g_free(data->settings->render_style);
     data->settings->render_style = g_strdup(styles[idx]);
     settings_save(data->settings);
-    if (data->font_changed_callback)
-        data->font_changed_callback(data->font_changed_user_data);
+    if (data->soft_reload_callback)
+        data->soft_reload_callback(data->user_data);
 }
 
 /* ---- Dialog closed ---- */

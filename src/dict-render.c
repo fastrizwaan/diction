@@ -129,7 +129,7 @@ static const char* get_light_mode_color(const char *color_name) {
 }
 
 // Simple hex color lightening helper
-static void lighten_hex_color(char *output, const char *hex, size_t output_size) {
+void lighten_hex_color(char *output, const char *hex, size_t output_size) {
     char *endptr;
     unsigned long r = 0, g = 0, b = 0;
 
@@ -209,7 +209,7 @@ static void lift_hex_color_for_dark_theme(char *output, const char *hex, size_t 
     g_snprintf(output, output_size, "#%02lx%02lx%02lx", r, g, b);
 }
 
-static void darken_hex_color(char *output, const char *hex, size_t output_size, double factor) {
+void darken_hex_color(char *output, const char *hex, size_t output_size, double factor) {
     char *endptr;
     unsigned long r = 0, g = 0, b = 0;
 
@@ -2310,35 +2310,52 @@ char* dsl_render_to_html(const char *dsl_text,
 
     buf_append_str(&b,
         "<style>"
+        ":root {"
+        "  --bg-color: "); buf_append_str(&b, bg_color); buf_append_str(&b, ";\n"
+        "  --body-color: "); buf_append_str(&b, body_color); buf_append_str(&b, ";\n"
+        "  --link-color: "); buf_append_str(&b, link_color); buf_append_str(&b, ";\n"
+        "  --heading-color: "); buf_append_str(&b, heading_color); buf_append_str(&b, ";\n"
+        "  --trn-color: "); buf_append_str(&b, trn_color); buf_append_str(&b, ";\n"
+        "  --ex-color: "); buf_append_str(&b, ex_color); buf_append_str(&b, ";\n"
+        "  --com-color: "); buf_append_str(&b, com_color); buf_append_str(&b, ";\n"
+        "  --pos-color: "); buf_append_str(&b, pos_color); buf_append_str(&b, ";\n"
+        "  --translit-color: "); buf_append_str(&b, translit_color); buf_append_str(&b, ";\n"
+        "  --border-color: "); buf_append_str(&b, border_color); buf_append_str(&b, ";\n"
+        "  --gold-surface: "); buf_append_str(&b, gold_surface); buf_append_str(&b, ";\n"
+        "  --gold-badge: "); buf_append_str(&b, gold_badge); buf_append_str(&b, ";\n"
+        "  --slate-surface: "); buf_append_str(&b, slate_surface); buf_append_str(&b, ";\n"
+        "  --slate-badge: "); buf_append_str(&b, slate_badge); buf_append_str(&b, ";\n"
+        "  --paper-surface: "); buf_append_str(&b, paper_surface); buf_append_str(&b, ";\n"
+        "  --paper-edge: "); buf_append_str(&b, paper_edge); buf_append_str(&b, ";\n"
+        "  --paper-accent: "); buf_append_str(&b, paper_accent); buf_append_str(&b, ";\n"
+        "  --fts-highlight: "); buf_append_str(&b, dark_mode ? "#ffd700" : "#ffeb3b"); buf_append_str(&b, ";\n"
+        "  --code-bg: "); buf_append_str(&b, dark_mode ? "#242424" : "#f5f5f5"); buf_append_str(&b, ";\n"
+        "  --code-fg: "); buf_append_str(&b, dark_mode ? "#ececec" : "#222222"); buf_append_str(&b, ";\n"
+        "  --table-border: "); buf_append_str(&b, dark_mode ? "#555555" : "#d0d0d0"); buf_append_str(&b, ";\n"
+        "  --pill-bg: "); { char pbg[64]; if (dark_mode) darken_hex_color(pbg, link_color, sizeof(pbg), 0.55); else darken_hex_color(pbg, link_color, sizeof(pbg), 0.80); buf_append_str(&b, pbg); } buf_append_str(&b, ";\n"
+        "  --pill-hover: "); { char phov[64]; if (dark_mode) darken_hex_color(phov, link_color, sizeof(phov), 0.72); else darken_hex_color(phov, link_color, sizeof(phov), 0.65); buf_append_str(&b, phov); } buf_append_str(&b, ";\n"
+        "  --xdxf-num: "); buf_append_str(&b, dark_mode ? "#ff6b6b" : "#d32f2f"); buf_append_str(&b, ";\n"
+        "  --paper-shadow: "); buf_append_str(&b, dark_mode ? "0 1px 0 rgba(0,0,0,0.22)" : "none"); buf_append_str(&b, ";\n"
+        "}\n"
         "html,body{margin:0;padding:0;width:100%;overflow-x:hidden;}"
         ".word-group{width:100% !important;display:block;}"
         "*{box-sizing:border-box;}"
         "body{font-family:");
     buf_append_str(&b, body_font_css);
-    buf_append_str(&b, ";line-height:1.45;color:");
-    buf_append_str(&b, body_color);
-    buf_append_str(&b, ";background:");
-    buf_append_str(&b, bg_color);
-    buf_append_str(&b, ";margin:0;padding:8px 20px 8px 8px;}"
+    buf_append_str(&b, ";line-height:1.45;color:var(--body-color);background:var(--bg-color);margin:0;padding:8px 20px 8px 8px;}"
         "img{max-width:100%;height:auto;vertical-align:middle;}"
         ".dict-audio{display:inline-block;line-height:0;}"
         ".dict-audio img{cursor:pointer;}"
         "table{max-width:100%;border-collapse:collapse;}"
-        "td,th{vertical-align:top;}"
-        "pre,code{white-space:pre-wrap;border-radius:6px;padding:0.2em 0.35em;}"
-        ".dict-link, a, a:link, a:visited, a:active, kref, ref, .reference, .xdxf-kref{color:");
-    buf_append_str(&b, link_color);
-    buf_append_str(&b, " !important;text-decoration:none;cursor:pointer;}");
+        "td,th{vertical-align:top;border:1px solid var(--table-border);}"
+        "pre,code{white-space:pre-wrap;border-radius:6px;padding:0.2em 0.35em;background:var(--code-bg);color:var(--code-fg);}"
+        ".dict-link, a, a:link, a:visited, a:active, kref, ref, .reference, .xdxf-kref{color:var(--link-color) !important;text-decoration:none;cursor:pointer;}");
     buf_append_str(&b, "a:hover, .dict-link:hover, kref:hover, ref:hover, .xdxf-kref:hover{text-decoration:underline !important;}");
     
-    buf_append_str(&b, ".xdxf-profile-strict .xdxf-tr { color: ");
-    buf_append_str(&b, trn_color);
-    buf_append_str(&b, "; display: block !important; margin: 0 0 0.12em 0; padding: 0; vertical-align: baseline; }\n");
+    buf_append_str(&b, ".xdxf-profile-strict .xdxf-tr { color: var(--trn-color); display: block !important; margin: 0 0 0.12em 0; padding: 0; vertical-align: baseline; }\n");
     buf_append_str(&b, ".xdxf-profile-strict .xdxf-tr::before { content: \"[\"; }\n");
     buf_append_str(&b, ".xdxf-profile-strict .xdxf-tr::after { content: \"]\"; }\n");
-    buf_append_str(&b, ".xdxf-profile-strict .xdxf-abbr { border-bottom: 1px dotted currentColor; color: ");
-    buf_append_str(&b, pos_color);
-    buf_append_str(&b, "; display: inline; margin: 0; }\n");
+    buf_append_str(&b, ".xdxf-profile-strict .xdxf-abbr { border-bottom: 1px dotted currentColor; color: var(--pos-color); display: inline; margin: 0; }\n");
     buf_append_str(&b, ".xdxf-profile-strict .xdxf-def { display: block; padding: 1px 0; margin: 1px 0; }\n");
     buf_append_str(&b, ".xdxf-profile-strict.xdxf-ar { counter-reset: xdxf-lvl1; }\n");
     buf_append_str(&b, ".xdxf-profile-strict .xdxf-def-lvl-2 { counter-reset: xdxf-lvl2; padding: 4px; color: inherit; }\n");
@@ -2347,7 +2364,7 @@ char* dsl_render_to_html(const char *dsl_text,
 
     /* Level 1 (lvl-2) Numbering */
     buf_append_str(&b, ".xdxf-profile-strict .xdxf-def-lvl-2::before { display: inline-block; min-width: 1.2em; counter-increment: xdxf-lvl1; content: counter(xdxf-lvl1, decimal) \". \"; font-weight: bold; color: ");
-    buf_append_str(&b, dark_mode ? "#ff6b6b" : "#d32f2f");
+    buf_append_str(&b, "var(--xdxf-num)");
     buf_append_str(&b, "; }\n");
     /* Switch to Roman if depth >= 3 */
     buf_append_str(&b, ".xdxf-profile-strict.xdxf-ar:has(.xdxf-def-lvl-4) .xdxf-def-lvl-2::before { content: counter(xdxf-lvl1, upper-roman) \". \"; }\n");
@@ -2406,174 +2423,80 @@ char* dsl_render_to_html(const char *dsl_text,
     buf_append_str(&b, ".fvr li{display:block;list-style:none;margin:0;padding:0;}");
     buf_append_str(&b, ".fvr li::before{content:'or\\00a0';font-style:italic;opacity:0.75;}");
     buf_append_str(&b, ".dsl-media-image{display:block;max-width:100%;height:auto;margin:0.35em 0;}");
-    buf_append_str(&b, ".trn, .sense{color:");
-    buf_append_str(&b, trn_color);
-    buf_append_str(&b, ";line-height:1.4;}");
-    buf_append_str(&b, ".ex, em{color:");
-    buf_append_str(&b, ex_color);
-    buf_append_str(&b, ";font-style:italic;}");
-    buf_append_str(&b, ".com{color:");
-    buf_append_str(&b, com_color);
-    buf_append_str(&b, ";display:inline;}");
-    buf_append_str(&b, ".pos, .main_entry_pos{display:inline;color:");
-    buf_append_str(&b, pos_color);
-    buf_append_str(&b, ";margin-left:0.4em;}");
+    buf_append_str(&b, ".trn, .sense{color:var(--trn-color);line-height:1.4;}");
+    buf_append_str(&b, ".ex, em{color:var(--ex-color);font-style:italic;}");
+    buf_append_str(&b, ".com{color:var(--com-color);display:inline;}");
+    buf_append_str(&b, ".pos, .main_entry_pos{display:inline;color:var(--pos-color);margin-left:0.4em;}");
     buf_append_str(&b, ".trn-label{margin-right:6px;}");
     buf_append_str(&b, ".pos .trn,.trn .pos{color:inherit;font-style:inherit;}");
-    buf_append_str(&b, ".translit, .sdict_tr{color:");
-    buf_append_str(&b, translit_color);
-    buf_append_str(&b, ";font-style:italic;}");
-    buf_append_str(&b, ".sdict_forms{color:");
-    buf_append_str(&b, pos_color);
-    buf_append_str(&b, ";font-weight:bold;}");
+    buf_append_str(&b, ".translit, .sdict_tr{color:var(--translit-color);font-style:italic;}");
+    buf_append_str(&b, ".sdict_forms{color:var(--pos-color);font-weight:bold;}");
     buf_append_str(&b, ".m-line{line-height:1.4;margin:2px 0;}");
     buf_append_str(&b, ".m-line br:last-child{display:none;}");
-    buf_append_str(&b, "hr{border:none;border-top:1px solid ");
-    buf_append_str(&b, border_color);
-    buf_append_str(&b, ";margin:10px 0;}");
+    buf_append_str(&b, "hr{border:none;border-top:1px solid var(--border-color);margin:10px 0;}");
     /* MDX font color overrides to follow theme */
-    buf_append_str(&b, "font[color=blue],font[color=\"blue\"],font[color=\"#0000ff\"],font[color=\"#0000ee\"]{color:");
-    buf_append_str(&b, link_color);
-    buf_append_str(&b, " !important;}");
-    buf_append_str(&b, "font[color=red],font[color=\"red\"],font[color=\"#ff0000\"]{color:");
-    buf_append_str(&b, heading_color);
-    buf_append_str(&b, " !important;}");
-    buf_append_str(&b, "font[color=darkcyan],font[color=\"darkcyan\"],font[color=\"#008b8b\"]{color:");
-    buf_append_str(&b, pos_color);
-    buf_append_str(&b, " !important;}");
-    buf_append_str(&b, "font[color=darkgreen],font[color=\"darkgreen\"],font[color=\"#006400\"]{color:");
-    buf_append_str(&b, ex_color);
-    buf_append_str(&b, " !important;}");
-    buf_append_str(&b, "font[color=brown],font[color=\"brown\"],font[color=\"#a52a2a\"],font[color=gray],font[color=\"gray\"],font[color=\"#808080\"]{color:");
-    buf_append_str(&b, translit_color);
-    buf_append_str(&b, " !important;}");
+    buf_append_str(&b, "font[color=blue],font[color=\"blue\"],font[color=\"#0000ff\"],font[color=\"#0000ee\"]{color:var(--link-color) !important;}");
+    buf_append_str(&b, "font[color=red],font[color=\"red\"],font[color=\"#ff0000\"]{color:var(--heading-color) !important;}");
+    buf_append_str(&b, "font[color=darkcyan],font[color=\"darkcyan\"],font[color=\"#008b8b\"]{color:var(--pos-color) !important;}");
+    buf_append_str(&b, "font[color=darkgreen],font[color=\"darkgreen\"],font[color=\"#006400\"]{color:var(--ex-color) !important;}");
+    buf_append_str(&b, "font[color=brown],font[color=\"brown\"],font[color=\"#a52a2a\"],font[color=gray],font[color=\"gray\"],font[color=\"#808080\"]{color:var(--translit-color) !important;}");
     /* MDX standard class markers */
-    buf_append_str(&b, ".m1{color:"); buf_append_str(&b, heading_color); buf_append_str(&b, ";}");
+    buf_append_str(&b, ".m1{color:var(--heading-color);}");
     buf_append_str(&b, ".m2{color:inherit;}");
-    buf_append_str(&b, ".m3{color:"); buf_append_str(&b, link_color); buf_append_str(&b, ";}");
-    buf_append_str(&b, ".m4{color:"); buf_append_str(&b, trn_color); buf_append_str(&b, ";}");
-    buf_append_str(&b, ".m5{color:"); buf_append_str(&b, ex_color); buf_append_str(&b, ";}");
-    buf_append_str(&b, ".m6{color:"); buf_append_str(&b, pos_color); buf_append_str(&b, ";}");
-    buf_append_str(&b, ".m7{color:"); buf_append_str(&b, pos_color); buf_append_str(&b, ";}");
-    buf_append_str(&b, ".m8{color:"); buf_append_str(&b, link_color); buf_append_str(&b, ";}");
-    buf_append_str(&b, ".m11{color:"); buf_append_str(&b, translit_color); buf_append_str(&b, ";}");
+    buf_append_str(&b, ".m3{color:var(--link-color);}");
+    buf_append_str(&b, ".m4{color:var(--trn-color);}");
+    buf_append_str(&b, ".m5{color:var(--ex-color);}");
+    buf_append_str(&b, ".m6{color:var(--pos-color);}");
+    buf_append_str(&b, ".m7{color:var(--pos-color);}");
+    buf_append_str(&b, ".m8{color:var(--link-color);}");
+    buf_append_str(&b, ".m11{color:var(--translit-color);}");
     /* entry structure */
     buf_append_str(&b, ".rendered-entry{margin:0 0 10px 0;}");
     buf_append_str(&b, ".rendered-entry-body{line-height:1.45;}");
-    buf_append_str(&b, ".dict-source-bar{background:");
-    buf_append_str(&b, border_color);
-    buf_append_str(&b, ";color:");
-    buf_append_str(&b, heading_color);
-    buf_append_str(&b, ";padding:4px 12px;margin:20px -10px 10px -10px;border-bottom:1px solid ");
-    buf_append_str(&b, border_color);
-    buf_append_str(&b, ";font-size:0.85em;font-weight:bold;text-transform:uppercase;letter-spacing:0.05em;}");
-    buf_append_str(&b, ".diction-entry{margin:0 0 14px 0;padding:0 0 6px 0;border-bottom:1px solid ");
-    buf_append_str(&b, border_color);
-    buf_append_str(&b, ";}");
+    buf_append_str(&b, ".dict-source-bar{background:var(--border-color);color:var(--heading-color);padding:4px 12px;margin:20px -10px 10px -10px;border-bottom:1px solid var(--border-color);font-size:0.85em;font-weight:bold;text-transform:uppercase;letter-spacing:0.05em;}");
+    buf_append_str(&b, ".diction-entry{margin:0 0 14px 0;padding:0 0 6px 0;border-bottom:1px solid var(--border-color);}");
     buf_append_str(&b, ".diction-entry{padding-left:8px;padding-right:8px;}");
     buf_append_str(&b, ".diction-header{display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin:0 0 6px 0;width:100%;}");
-    buf_append_str(&b, ".diction-lemma{font-size:1.22em;font-weight:700;color:");
-    buf_append_str(&b, heading_color);
-    buf_append_str(&b, ";}");
-    buf_append_str(&b, ".diction-dict{font-size:0.88em;color:");
-    buf_append_str(&b, com_color);
-    buf_append_str(&b, ";white-space:nowrap;text-align:right;}");
+    buf_append_str(&b, ".diction-lemma{font-size:1.22em;font-weight:700;color:var(--heading-color);}");
+    buf_append_str(&b, ".diction-dict{font-size:0.88em;color:var(--com-color);white-space:nowrap;text-align:right;}");
     buf_append_str(&b, ".entry{text-align:left;padding:0 8px 6px 8px;margin:0 0 14px 0;}");
     buf_append_str(&b, ".header{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px;gap:12px;width:100%;}");
-    buf_append_str(&b, ".lemma{font-size:1.3em;font-weight:bold;color:");
-    buf_append_str(&b, link_color);
-    buf_append_str(&b, ";}");
+    buf_append_str(&b, ".lemma{font-size:1.3em;font-weight:bold;color:var(--link-color);}");
     buf_append_str(&b, ".dict{font-size:0.9em;color:#888;white-space:nowrap;text-align:right;}");
     buf_append_str(&b, ".defs{margin-top:2px;line-height:1.45;}");
     buf_append_str(&b, "/* .example intentionally removed to match GoldenDict */");
     buf_append_str(&b, ".m-tag{opacity:0.7;font-style:italic;display:inline-block;}");
     buf_append_str(&b, ".pos-tag{opacity:0.85;font-style:italic;display:inline-block;margin:0 0.15em;}");
     buf_append_str(&b, ".comment{opacity:0.7;}");
-    buf_append_str(&b, ".media-file{color:");
-    buf_append_str(&b, link_color);
-    buf_append_str(&b, ";cursor:pointer;display:inline-block;margin-left:0.25em;}");
+    buf_append_str(&b, ".media-file{color:var(--link-color);cursor:pointer;display:inline-block;margin-left:0.25em;}");
     buf_append_str(&b, ".lang{opacity:0.8;font-style:italic;}");
     buf_append_str(&b, ".full-translation{display:none;opacity:0.8;font-style:italic;}");
-    buf_append_str(&b, ".py-entry{margin:0 0 14px 0;padding:0 0 6px 0;border-bottom:1px solid ");
-    buf_append_str(&b, border_color);
-    buf_append_str(&b, ";}");
+    buf_append_str(&b, ".py-entry{margin:0 0 14px 0;padding:0 0 6px 0;border-bottom:1px solid var(--border-color);}");
     buf_append_str(&b, ".py-header{display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin:0 0 4px 0;width:100%;}");
-    buf_append_str(&b, ".py-dict{font-size:0.9em;color:");
-    buf_append_str(&b, com_color);
-    buf_append_str(&b, ";white-space:nowrap;text-align:right;}");
-    buf_append_str(&b, ".py-lemma{font-size:1.3em;font-weight:700;color:");
-    buf_append_str(&b, link_color);
-    buf_append_str(&b, ";}");
+    buf_append_str(&b, ".py-dict{font-size:0.9em;color:var(--com-color);white-space:nowrap;text-align:right;}");
+    buf_append_str(&b, ".py-lemma{font-size:1.3em;font-weight:700;color:var(--link-color);}");
     buf_append_str(&b, ".py-entry .rendered-entry-body,.py-entry-body .rendered-entry-body{margin-top:2px;}");
     buf_append_str(&b, ".gold-header{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin:0 0 10px 0;width:100%;}");
-    buf_append_str(&b, ".gold-dict{display:inline-flex;align-items:center;padding:0.28em 0.75em;border-radius:999px;font-size:0.8em;font-weight:600;white-space:nowrap;background:");
-    buf_append_str(&b, border_color);
-    buf_append_str(&b, ";color:");
-    buf_append_str(&b, heading_color);
-    buf_append_str(&b, ";}");
-    buf_append_str(&b, ".gold-entry-headword{font-size:1.6em;font-weight:700;color:");
-    buf_append_str(&b, link_color);
-    buf_append_str(&b, ";}");
+    buf_append_str(&b, ".gold-dict{display:inline-flex;align-items:center;padding:0.28em 0.75em;border-radius:999px;font-size:0.8em;font-weight:600;white-space:nowrap;background:var(--border-color);color:var(--heading-color);}");
+    buf_append_str(&b, ".gold-entry-headword{font-size:1.6em;font-weight:700;color:var(--link-color);}");
     buf_append_str(&b, ".gdarticlebody{line-height:1.6;}");
-    buf_append_str(&b, ".gdarticlebody em{color:");
-    buf_append_str(&b, ex_color);
-    buf_append_str(&b, ";}");
-    buf_append_str(&b, ".gdarticle{margin:0.1em 0 0.7em 0;padding:12px 18px;border:1px solid ");
-    buf_append_str(&b, gold_badge);
-    buf_append_str(&b, ";border-radius:10px;background:");
-    buf_append_str(&b, gold_surface);
-    buf_append_str(&b, ";box-shadow:");
-    buf_append_str(&b, "none");
-    buf_append_str(&b, ";}");
+    buf_append_str(&b, ".gdarticlebody em{color:var(--ex-color);}");
+    buf_append_str(&b, ".gdarticle{margin:0.1em 0 0.7em 0;padding:12px 18px;border:1px solid var(--gold-badge);border-radius:10px;background:var(--gold-surface);box-shadow:none;}");
     buf_append_str(&b, ".gddictname{display:inline-flex;align-items:center;gap:0.35em;font-size:12px;font-weight:500;"
-        "margin:-4px -8px 8px auto;padding:0.3em 0.7em;border-radius:999px;background:");
-    buf_append_str(&b, border_color);
-    buf_append_str(&b, ";color:");
-    buf_append_str(&b, link_color);
-    buf_append_str(&b, ";user-select:none;}");
+        "margin:-4px -8px 8px auto;padding:0.3em 0.7em;border-radius:999px;background:var(--border-color);color:var(--link-color);user-select:none;}");
     buf_append_str(&b, ".gddicttitle{display:block;}");
     buf_append_str(&b, ".gdfromprefix{display:none;}");
     buf_append_str(&b, ".gdarticlebody{clear:both;}");
     buf_append_str(&b, ".gdarticlebody > .dsl_headwords{display:inline-block;margin-top:0;margin-bottom:0.35em;}");
-    buf_append_str(&b, ".dsl_headwords{font-size:1.18em;font-weight:700;color:");
-    buf_append_str(&b, heading_color);
-    buf_append_str(&b, ";}");
-    buf_append_str(&b, ".gold-entry-headword{display:inline-block;font-size:1.18em;font-weight:700;color:");
-    buf_append_str(&b, heading_color);
-    buf_append_str(&b, ";margin:0;}");
-    buf_append_str(&b, ".slate-entry{margin:0.25em 0 0.9em 0;padding:14px 18px;border-radius:16px;border:1px solid ");
-    buf_append_str(&b, slate_badge);
-    buf_append_str(&b, ";background:");
-    buf_append_str(&b, slate_surface);
-    buf_append_str(&b, ";box-shadow:");
-    buf_append_str(&b, "none");
-    buf_append_str(&b, ";}");
+    buf_append_str(&b, ".dsl_headwords{font-size:1.18em;font-weight:700;color:var(--heading-color);}");
+    buf_append_str(&b, ".gold-entry-headword{display:inline-block;font-size:1.18em;font-weight:700;color:var(--heading-color);margin:0;}");
+    buf_append_str(&b, ".slate-entry{margin:0.25em 0 0.9em 0;padding:14px 18px;border-radius:16px;border:1px solid var(--slate-badge);background:var(--slate-surface);box-shadow:none;}");
     buf_append_str(&b, ".slate-header{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin:0 0 12px 0;width:100%;}");
-    buf_append_str(&b, ".slate-dict{display:inline-flex;align-items:center;padding:0.28em 0.75em;border-radius:999px;font-size:0.82em;font-weight:600;white-space:nowrap;background:");
-    buf_append_str(&b, slate_badge);
-    buf_append_str(&b, ";color:");
-    buf_append_str(&b, link_color);
-    buf_append_str(&b, ";}");
-    buf_append_str(&b, ".slate-lemma{font-size:1.28em;font-weight:700;color:");
-    buf_append_str(&b, heading_color);
-    buf_append_str(&b, ";}");
+    buf_append_str(&b, ".slate-dict{display:inline-flex;align-items:center;padding:0.28em 0.75em;border-radius:999px;font-size:0.82em;font-weight:600;white-space:nowrap;background:var(--slate-badge);color:var(--link-color);}");
+    buf_append_str(&b, ".slate-lemma{font-size:1.28em;font-weight:700;color:var(--heading-color);}");
     buf_append_str(&b, ".slate-entry .rendered-entry-body{line-height:1.5;}");
-    buf_append_str(&b, ".fts-highlight{background-color:");
-    buf_append_str(&b, dark_mode ? "#ffd700" : "#ffeb3b");
-    buf_append_str(&b, ";color:#000;border-radius:2px;padding:0 2px;font-weight:bold;}");
-    buf_append_str(&b, ".paper-entry{margin:0 0 1em 0;padding:14px 18px 12px 18px;border-left:4px solid ");
-    buf_append_str(&b, paper_accent);
-    buf_append_str(&b, ";border-radius:10px;border-top:1px solid ");
-    buf_append_str(&b, paper_edge);
-    buf_append_str(&b, ";border-right:1px solid ");
-    buf_append_str(&b, paper_edge);
-    buf_append_str(&b, ";border-bottom:1px solid ");
-    buf_append_str(&b, paper_edge);
-    buf_append_str(&b, ";background:");
-    buf_append_str(&b, paper_surface);
-    buf_append_str(&b, ";box-shadow:");
-    buf_append_str(&b, dark_mode ? "0 1px 0 rgba(0,0,0,0.22)" : "none");
-    buf_append_str(&b, ";}");
+    buf_append_str(&b, ".fts-highlight{background-color:var(--fts-highlight);color:#000;border-radius:2px;padding:0 2px;font-weight:bold;}");
+    buf_append_str(&b, ".paper-entry{margin:0 0 1em 0;padding:14px 18px 12px 18px;border-left:4px solid var(--paper-accent);border-radius:10px;border-top:1px solid var(--paper-edge);border-right:1px solid var(--paper-edge);border-bottom:1px solid var(--paper-edge);}");
     buf_append_str(&b, ".paper-header{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin:0 0 10px 0;width:100%;}");
     buf_append_str(&b, ".paper-lemma{font-family:");
     if (font_family && *font_family) {
@@ -2581,28 +2504,18 @@ char* dsl_render_to_html(const char *dsl_text,
     } else {
         buf_append_str(&b, "Georgia,\"Times New Roman\",serif");
     }
-    buf_append_str(&b, ";font-size:1.32em;font-weight:700;color:");
-    buf_append_str(&b, heading_color);
-    buf_append_str(&b, ";}");
+    buf_append_str(&b, ";font-size:1.32em;font-weight:700;color:var(--heading-color);}");
     buf_append_str(&b, ".diction-lemma,.lemma,.py-lemma,.gold-entry-headword,.slate-lemma,.paper-lemma{white-space:pre-line;}");
     buf_append_str(&b, ".paper-dict{font-size:0.82em;letter-spacing:0.03em;text-transform:uppercase;white-space:nowrap;color:");
     buf_append_str(&b, com_color);
     buf_append_str(&b, ";}");
     buf_append_str(&b, ".paper-entry .rendered-entry-body{line-height:1.58;}");
-    buf_append_str(&b, "k{display:block;font-size:1.18em;font-weight:700;color:");
-    buf_append_str(&b, heading_color);
-    buf_append_str(&b, ";margin-bottom:0.2em;}");
+    buf_append_str(&b, "k{display:block;font-size:1.18em;font-weight:700;color:var(--heading-color);margin-bottom:0.2em;}");
     buf_append_str(&b, "dtrn{display:block;margin-top:0.3em;line-height:1.45;}");
-    buf_append_str(&b, "co{color:");
-    buf_append_str(&b, com_color);
-    buf_append_str(&b, ";}");
+    buf_append_str(&b, "co{color:var(--com-color);}");
     buf_append_str(&b, "nu{display:none;}");
-    buf_append_str(&b, "c{color:");
-    buf_append_str(&b, trn_color);
-    buf_append_str(&b, ";}");
-    buf_append_str(&b, "kref{cursor:pointer;color:");
-    buf_append_str(&b, link_color);
-    buf_append_str(&b, ";text-decoration:underline;}");
+    buf_append_str(&b, "c{color:var(--trn-color);}");
+    buf_append_str(&b, "kref{cursor:pointer;color:var(--link-color);text-decoration:underline;}");
     buf_append_str(&b, "ol.single,ul.single{list-style-type:none;padding-left:0;margin-left:0;margin-right:0.5em;}");
     buf_append_str(&b, "li>ol,li>ul{margin-top:0;margin-bottom:0;}");
     buf_append_str(&b, "li>ol.single,li>ul.single{display:inline;}");
@@ -2613,6 +2526,13 @@ char* dsl_render_to_html(const char *dsl_text,
     buf_append_str(&b, ".slobdict .form:first-child .orth { display: none; }");
     buf_append_str(&b, ".orth { font-weight: bold; display: inline-block; padding-right: 0.5rem; }");
     buf_append_str(&b, "</style><script>");
+    buf_append_str(&b, "function updateDictionTheme(colors) {");
+    buf_append_str(&b, "  for (const [key, value] of Object.entries(colors)) {");
+    buf_append_str(&b, "    document.documentElement.style.setProperty('--' + key + '-color', value);");
+    buf_append_str(&b, "    /* For backward compatibility with simpler var names */");
+    buf_append_str(&b, "    document.documentElement.style.setProperty('--' + key, value);");
+    buf_append_str(&b, "  }");
+    buf_append_str(&b, "}");
     buf_append_str(&b, "(function() {");
     buf_append_str(&b, "  const hideDuplicate = () => {");
     buf_append_str(&b, "    document.querySelectorAll('.diction-entry, .gold-entry, .slate-entry, .paper-entry, .entry, .gdarticle').forEach(entry => {");
@@ -2639,19 +2559,13 @@ char* dsl_render_to_html(const char *dsl_text,
     buf_append_str(&b, "  setTimeout(hideDuplicate, 100);");
     buf_append_str(&b, "})();");
     buf_append_str(&b, "</script><style>");
-    buf_append_str(&b, ".gen { color:");
-    buf_append_str(&b, pos_color);
-    buf_append_str(&b, "; font-style: italic; display: inline-block; vertical-align: top; padding-right: 0.5rem; }");
+    buf_append_str(&b, ".gen { color:var(--pos-color); font-style: italic; display: inline-block; vertical-align: top; padding-right: 0.5rem; }");
     buf_append_str(&b, ".gen::before { content: ' ('; }");
     buf_append_str(&b, ".gen::after { content: ')'; }");
-    buf_append_str(&b, ".pos { color:");
-    buf_append_str(&b, pos_color);
-    buf_append_str(&b, "; font-weight: bold; display: inline-block; vertical-align: top; padding-right: 0.5rem; font-style: italic; }");
+    buf_append_str(&b, ".pos { color:var(--pos-color); font-weight: bold; display: inline-block; vertical-align: top; padding-right: 0.5rem; font-style: italic; }");
     buf_append_str(&b, ".single { padding: 0; display: inline-block; padding-right: 0.5rem; }");
     buf_append_str(&b, ".gramGrp, .num, .number, .mood, .tns, .case { display: inline-block; vertical-align: top; padding-right: 0.5rem; font-style: italic; }");
-    buf_append_str(&b, ".pron{color:");
-    buf_append_str(&b, translit_color);
-    buf_append_str(&b, ";}");
+    buf_append_str(&b, ".pron{color:var(--translit-color);}");
     buf_append_str(&b, ".pron::before{content:'[';}");
     buf_append_str(&b, ".pron::after{content:']';}");
     buf_append_str(&b, ".orth{font-weight:bold;}");
@@ -2662,19 +2576,7 @@ char* dsl_render_to_html(const char *dsl_text,
     buf_append_str(&b, ".form.plur{display:block;margin-top:0.2em;}");
     buf_append_str(&b, ".plur .orth{font-style:italic;font-weight:normal;}");
     buf_append_str(&b, "</style>");
-    if (dark_mode) {
-        buf_append_str(&b,
-            "<style>"
-            "pre,code{background:#242424; color:#ececec;}"
-            "table,td,th{border-color:#555555;}"
-            "</style>");
-    } else {
-        buf_append_str(&b,
-            "<style>"
-            "pre,code{background:#f5f5f5; color:#222222;}"
-            "table,td,th{border-color:#d0d0d0;}"
-            "</style>");
-    }
+    /* Base styles now use variables, no need for conditional style blocks here */
 
     /* MDX thesaurus expand/collapse support (Cambridge SMART Thesaurus, etc.) */
     if (format == DICT_FORMAT_MDX) {
@@ -2697,10 +2599,10 @@ char* dsl_render_to_html(const char *dsl_text,
         buf_append_str(&b, ".expand_mcat a{display:inline-flex;align-items:center;cursor:pointer;font-weight:600;text-decoration:none;");
         buf_append_str(&b, "padding:0.28em 0.85em;border-radius:999px;font-size:0.72em;text-transform:uppercase;letter-spacing:0.04em;");
         buf_append_str(&b, "margin:2px 0 6px 0;transition:all 0.2s ease;box-shadow:0 1px 2px rgba(0,0,0,0.18);");
-        buf_append_printf(&b, "background-color:%s !important;color:%s !important;}", pill_bg, bg_color);
+        buf_append_str(&b, "background-color:var(--pill-bg) !important;color:var(--bg-color) !important;}");
         /* Lock visited/active/focus so browser states don't override our theme */
-        buf_append_printf(&b, ".expand_mcat a:visited,.expand_mcat a:active,.expand_mcat a:focus{background-color:%s !important;color:%s !important;}", pill_bg, bg_color);
-        buf_append_printf(&b, ".expand_mcat a:hover{background-color:%s !important;box-shadow:0 2px 5px rgba(0,0,0,0.22);transform:translateY(-0.5px);}", pill_hover);
+        buf_append_str(&b, ".expand_mcat a:visited,.expand_mcat a:active,.expand_mcat a:focus{background-color:var(--pill-bg) !important;color:var(--bg-color) !important;}");
+        buf_append_str(&b, ".expand_mcat a:hover{background-color:var(--pill-hover) !important;box-shadow:0 2px 5px rgba(0,0,0,0.22);transform:translateY(-0.5px);}");
         buf_append_str(&b, ".expand_mcat a::before{content:'\\25b6\\00a0';font-size:0.85em;margin-right:2px;transition:transform 0.2s;}");
         buf_append_str(&b, ".expand_mcat a.open::before{content:'\\25bc\\00a0';}");
 
@@ -2717,26 +2619,26 @@ char* dsl_render_to_html(const char *dsl_text,
         buf_append_str(&b, "text-transform:uppercase;letter-spacing:0.04em;");
         buf_append_str(&b, "margin:4px 0 6px 0;transition:background-color 0.2s ease,box-shadow 0.2s ease;");
         buf_append_str(&b, "box-shadow:0 1px 2px rgba(0,0,0,0.18);");
-        buf_append_printf(&b, "background-color:%s !important;color:%s !important;}", pill_bg, bg_color);
-        buf_append_printf(&b, "a:hover button.smartthesaurus,a:hover .button-pill{background-color:%s !important;}", pill_hover);
+        buf_append_str(&b, "background-color:var(--pill-bg) !important;color:var(--bg-color) !important;}");
+        buf_append_str(&b, "a:hover button.smartthesaurus,a:hover .button-pill{background-color:var(--pill-hover) !important;}");
 
 
         /* ── Expand container (.smartt / .mcat-body) ──────────────────────── */
-        buf_append_printf(&b, ".smartt,.mcat-body{border-left:2px solid %s;padding-left:0.6em;margin:0.3em 0 0.5em 0.2em;}", border_color);
+        buf_append_str(&b, ".smartt,.mcat-body{border-left:2px solid var(--border-color);padding-left:0.6em;margin:0.3em 0 0.5em 0.2em;}");
 
         /* ── Word list links ──────────────────────────────────────────────── */
         buf_append_str(&b, ".thswords{list-style:none;margin:0.2em 0 0.2em 1.2em;padding:0;}");
-        buf_append_printf(&b, ".thswords a,.thswords a:link,.thswords a:visited{text-decoration:none;color:%s !important;}", link_color);
+        buf_append_str(&b, ".thswords a,.thswords a:link,.thswords a:visited{text-decoration:none;color:var(--link-color) !important;}");
         buf_append_str(&b, ".thswords a:hover{text-decoration:underline;}");
 
         /* ── "Browse SMART Thesaurus" link (.thssib) ──────────────────────── */
-        buf_append_printf(&b, ".thssib,.thssib a,.thssib a:link,.thssib a:visited{color:%s !important;}", link_color);
+        buf_append_str(&b, ".thssib,.thssib a,.thssib a:link,.thssib a:visited{color:var(--link-color) !important;}");
         buf_append_str(&b, ".thssib{margin:0.3em 0 0 0.2em;font-size:0.9em;}");
 
         /* ── Wiktionary-style etymology toggle (.eol / .ywp / kyw.s()) ────────── */
         /* .t9d is the h3 header row; .ywp is the toggle img; .eol is the content div */
-        buf_append_printf(&b, ".t9d{display:flex;align-items:center;justify-content:space-between;"
-            "border-bottom:1px solid %s;padding:0.1em 0;margin:0.4em 0 0.2em 0;cursor:default;}", border_color);
+        buf_append_str(&b, ".t9d{display:flex;align-items:center;justify-content:space-between;"
+            "border-bottom:1px solid var(--border-color);padding:0.1em 0;margin:0.4em 0 0.2em 0;cursor:default;}");
         buf_append_str(&b, ".ywp{cursor:pointer;width:1em;height:1em;opacity:0.7;"
             "display:inline-block;user-select:none;flex-shrink:0;margin-left:0.4em;}");
         buf_append_str(&b, ".ywp:hover{opacity:1;}");
@@ -2744,35 +2646,29 @@ char* dsl_render_to_html(const char *dsl_text,
         buf_append_str(&b, ".eol.collapsed{display:none;}");
         /* Replace broken c.png/q.png with CSS-drawn SVG arrows (WebKit supports
            CSS 'content' override on img elements to replace broken/missing images) */
-        buf_append_printf(&b,
+        buf_append_str(&b,
             "img.ywp{content:url(\"data:image/svg+xml,"
             "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'>"
-            "<path d='M3 6L8 11L13 6' stroke='%s' stroke-width='2' fill='none' stroke-linecap='round'/>"
-            "</svg>\");width:14px;height:14px;cursor:pointer;opacity:0.8;flex-shrink:0;}",
-            link_color);
+            "<path d='M3 6L8 11L13 6' stroke='currentColor' stroke-width='2' fill='none' stroke-linecap='round'/>"
+            "</svg>\");width:14px;height:14px;cursor:pointer;opacity:0.8;flex-shrink:0;color:var(--link-color);}");
         buf_append_str(&b, "img.ywp:hover{opacity:1;}");
-        buf_append_printf(&b,
+        buf_append_str(&b,
             "img.gph{content:url(\"data:image/svg+xml,"
             "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'>"
-            "<path d='M3 6L8 11L13 6' stroke='%s' stroke-width='2' fill='none' stroke-linecap='round'/>"
-            "</svg>\");width:12px;height:12px;cursor:pointer;opacity:0.75;vertical-align:middle;margin-left:0.25em;}",
-            link_color);
+            "<path d='M3 6L8 11L13 6' stroke='currentColor' stroke-width='2' fill='none' stroke-linecap='round'/>"
+            "</svg>\");width:12px;height:12px;cursor:pointer;opacity:0.75;vertical-align:middle;margin-left:0.25em;color:var(--link-color);}");
         buf_append_str(&b, "img.gph:hover{opacity:1;}");
-        buf_append_str(&b, ".ypu{display:none;margin:0.4em 0 0.2em 0.5em;}");
-        buf_append_str(&b, border_color);
-        buf_append_str(&b, ";padding-left:0.5em;}");
+        buf_append_str(&b, ".ypu{display:none;margin:0.4em 0 0.2em 0.5em;border-left:1px solid var(--border-color);padding-left:0.5em;}");
 
         /* ── Wiktionary image float (.ymp) ─── matches MDict reference border-box style */
-        buf_append_printf(&b,
-            ".ymp{display:inline-block;border:1px solid %s;padding:3px;"
-            "margin:0.4em 0.8em 0.4em 0;background:%s;vertical-align:top;"
-            "text-align:center;border-radius:2px;box-shadow:0 1px 3px rgba(0,0,0,0.1);}",
-            border_color, bg_color);
+        buf_append_str(&b,
+            ".ymp{display:inline-block;border:1px solid var(--border-color);padding:3px;"
+            "margin:0.4em 0.8em 0.4em 0;background:var(--bg-color);vertical-align:top;"
+            "text-align:center;border-radius:2px;box-shadow:var(--paper-shadow);}");
         buf_append_str(&b, ".ymp img{display:block;max-width:100%;height:auto;margin:0 auto;}");
-        buf_append_printf(&b,
+        buf_append_str(&b,
             ".gdi{font-size:0.82em;text-align:center;margin:4px 0 2px 0;"
-            "color:%s;font-style:italic;}",
-            com_color);
+            "color:var(--com-color);font-style:italic;}");
         /* .bra = image hyperlink — don't underline on hover, keep cursor pointer */
         buf_append_str(&b, "a.bra{display:inline-block;line-height:0;cursor:pointer;}");
         buf_append_str(&b, "a.bra:hover{opacity:0.88;}");
@@ -2780,7 +2676,7 @@ char* dsl_render_to_html(const char *dsl_text,
         /* ── See also / Further reading list sections (.msm, .bkm) ── */
         buf_append_str(&b, ".msm,.bkm{margin:0.3em 0 0.5em 0.5em;padding:0;}");
         buf_append_str(&b, ".msm li,.bkm li{list-style:none;margin:0.15em 0;}");
-        buf_append_printf(&b, ".ulm,.zwb{color:%s !important;}", link_color);
+        buf_append_str(&b, ".ulm,.zwb{color:var(--link-color) !important;}");
 
         buf_append_str(&b, "</style>");
 
@@ -2838,7 +2734,7 @@ char* dsl_render_to_html(const char *dsl_text,
         buf_append_str(&b, "<div class='rendered-entry gold-entry-rendered'><div class='rendered-entry-body'>");
     } else {
         buf_append_str(&b, "<div class='rendered-entry diction-entry-rendered'>");
-        if (format == DICT_FORMAT_DSL || format == DICT_FORMAT_LSD || format == DICT_FORMAT_SDICT || format == DICT_FORMAT_DICTD) {
+        if (format == DICT_FORMAT_DSL || format == DICT_FORMAT_SDICT || format == DICT_FORMAT_DICTD) {
             buf_append_str(&b, "<h2 style='color:");
             buf_append_str(&b, heading_color);
             buf_append_str(&b, "; margin-bottom: 0.5em;'>");

@@ -38,7 +38,6 @@ srcs = [
   'src/dict-mdx.c',
   'src/dict-slob.c',
   'src/dict-bgl.c',
-  'src/dict-lsd.c',
   'src/dict-ifo.c',
   'src/dict-xdxf.c',
   'src/dict-render.c',

@@ -111,19 +111,12 @@ static void ensure_startup_splash_css(void) {
     provider = gtk_css_provider_new();
     gtk_css_provider_load_from_string(provider,
         "window.startup-splash,"
-        "window.startup-splash.background,"
         "window.startup-splash > contents {"
-        "  background: transparent;"
-        "  background-color: transparent;"
+        "  border-radius: 15px;"
         "}"
         ".startup-shell {"
         "  margin: 0;"
-        "  border-radius: 30px;"
         "  padding: 30px 34px 28px 34px;"
-        "  border: 1px solid alpha(@accent_bg_color, 0.18);"
-        "  background: @window_bg_color;"
-        "  box-shadow: none;"
-        "  overflow: hidden;"
         "}"
         ".startup-logo-wrap {"
         "  min-width: 78px;"
@@ -199,12 +192,11 @@ void startup_splash_show(GtkApplication *app, GtkWindow *parent, GCallback cance
 
     ensure_startup_splash_css();
 
-    GtkWindow *window = GTK_WINDOW(gtk_window_new());
+    GtkWindow *window = GTK_WINDOW(adw_window_new());
     gtk_window_set_application(window, app);
     gtk_window_set_title(window, "Diction");
     gtk_window_set_default_size(window, 476, 180);
     gtk_window_set_resizable(window, FALSE);
-    gtk_window_set_decorated(window, FALSE);
     gtk_window_set_modal(window, FALSE);
     gtk_window_set_hide_on_close(window, TRUE);
     gtk_window_set_icon_name(window, "io.github.fastrizwaan.diction");
@@ -215,7 +207,7 @@ void startup_splash_show(GtkApplication *app, GtkWindow *parent, GCallback cance
 
     GtkWidget *outer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_widget_add_css_class(outer, "startup-shell");
-    gtk_window_set_child(window, outer);
+    adw_window_set_content(ADW_WINDOW(window), outer);
 
     GtkWidget *header = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 18);
     gtk_box_append(GTK_BOX(outer), header);

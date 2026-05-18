@@ -538,6 +538,153 @@ static char *rewrite_style_for_theme(const char *style, gboolean dark_mode) {
     return g_string_free(out, FALSE);
 }
 
+static unsigned long get_djb2_hash(const char *str) {
+    unsigned long hash = 5381;
+    int c;
+    while ((c = (unsigned char)*str++)) {
+        hash = ((hash << 5) + hash) + c;
+    }
+    return hash;
+}
+
+static char* scope_css_selectors(const char *css, const char *scope_class) {
+    if (!css || !scope_class || *scope_class == '\0') {
+        return g_strdup(css ? css : "");
+    }
+    GString *out = g_string_new("");
+    const char *p = css;
+    
+    int brace_depth = 0;
+    gboolean in_comment = FALSE;
+    gboolean in_at_rule = FALSE;
+    GString *selector_buf = g_string_new("");
+    
+    while (*p) {
+        if (in_comment) {
+            if (p[0] == '*' && p[1] == '/') {
+                g_string_append_len(out, p, 2);
+                p += 2;
+                in_comment = FALSE;
+            } else {
+                g_string_append_c(out, *p);
+                p++;
+            }
+            continue;
+        }
+        
+        if (p[0] == '/' && p[1] == '*') {
+            if (selector_buf->len > 0) {
+                g_string_append(out, selector_buf->str);
+                g_string_truncate(selector_buf, 0);
+            }
+            g_string_append_len(out, p, 2);
+            p += 2;
+            in_comment = TRUE;
+            continue;
+        }
+        
+        char c = *p;
+        if (c == '{') {
+            brace_depth++;
+            if (brace_depth == 1 && selector_buf->len > 0) {
+                char *sel_str = selector_buf->str;
+                char *trimmed_sel = g_strstrip(g_strdup(sel_str));
+                gboolean is_at = g_str_has_prefix(trimmed_sel, "@");
+                g_free(trimmed_sel);
+                
+                if (is_at) {
+                    in_at_rule = TRUE;
+                    g_string_append(out, sel_str);
+                } else {
+                    char **parts = g_strsplit(sel_str, ",", -1);
+                    for (int i = 0; parts[i] != NULL; i++) {
+                        char *part = parts[i];
+                        char *trimmed = g_strstrip(g_strdup(part));
+                        if (i > 0) g_string_append(out, ", ");
+                        if (*trimmed != '\0') {
+                            if (g_str_has_prefix(trimmed, "html") || g_str_has_prefix(trimmed, "body")) {
+                                g_string_append_printf(out, ".%s", scope_class);
+                                if (strlen(trimmed) > 4) {
+                                    g_string_append(out, trimmed + 4);
+                                }
+                            } else if (g_str_has_prefix(trimmed, ":root")) {
+                                g_string_append_printf(out, ".%s", scope_class);
+                                if (strlen(trimmed) > 5) {
+                                    g_string_append(out, trimmed + 5);
+                                }
+                            } else {
+                                g_string_append_printf(out, ".%s %s", scope_class, trimmed);
+                            }
+                        } else {
+                            g_string_append(out, part);
+                        }
+                        g_free(trimmed);
+                    }
+                    g_strfreev(parts);
+                }
+                g_string_truncate(selector_buf, 0);
+            } else if (brace_depth > 1 && selector_buf->len > 0) {
+                char *sel_str = selector_buf->str;
+                char **parts = g_strsplit(sel_str, ",", -1);
+                for (int i = 0; parts[i] != NULL; i++) {
+                    char *part = parts[i];
+                    char *trimmed = g_strstrip(g_strdup(part));
+                    if (i > 0) g_string_append(out, ", ");
+                    if (*trimmed != '\0') {
+                        if (g_str_has_prefix(trimmed, "html") || g_str_has_prefix(trimmed, "body")) {
+                            g_string_append_printf(out, ".%s", scope_class);
+                            if (strlen(trimmed) > 4) {
+                                g_string_append(out, trimmed + 4);
+                            }
+                        } else if (g_str_has_prefix(trimmed, ":root")) {
+                            g_string_append_printf(out, ".%s", scope_class);
+                            if (strlen(trimmed) > 5) {
+                                g_string_append(out, trimmed + 5);
+                            }
+                        } else {
+                            g_string_append_printf(out, ".%s %s", scope_class, trimmed);
+                        }
+                    } else {
+                        g_string_append(out, part);
+                    }
+                    g_free(trimmed);
+                }
+                g_strfreev(parts);
+                g_string_truncate(selector_buf, 0);
+            }
+            g_string_append_c(out, '{');
+            p++;
+        } else if (c == '}') {
+            brace_depth--;
+            if (brace_depth == 0) {
+                in_at_rule = FALSE;
+            }
+            g_string_append_c(out, '}');
+            p++;
+        } else {
+            gboolean nested_is_at = FALSE;
+            if (selector_buf->len > 0) {
+                char *ts = g_strstrip(g_strdup(selector_buf->str));
+                nested_is_at = g_str_has_prefix(ts, "@");
+                g_free(ts);
+            }
+            if (brace_depth == 0 || (brace_depth == 1 && in_at_rule && !nested_is_at)) {
+                g_string_append_c(selector_buf, c);
+            } else {
+                g_string_append_c(out, c);
+            }
+            p++;
+        }
+    }
+    
+    if (selector_buf->len > 0) {
+        g_string_append(out, selector_buf->str);
+    }
+    
+    g_string_free(selector_buf, TRUE);
+    return g_string_free(out, FALSE);
+}
+
 static char *rewrite_stylesheet_for_theme(const char *css, gboolean dark_mode) {
     if (!css) {
         return g_strdup("");
@@ -1408,7 +1555,7 @@ static char *remove_html_attribute(const char *tag, const char *attr_name) {
     return g_strdup(tag);
 }
 
-static char *inline_local_stylesheet_if_possible(const char *tag, const char *resource_dir, const char *source_dir, gboolean dark_mode) {
+static char *inline_local_stylesheet_if_possible(const char *tag, const char *resource_dir, const char *source_dir, gboolean dark_mode, const char *scope_class) {
     char *rel = get_html_attribute_value(tag, "rel");
     char *rel_lower = rel ? g_ascii_strdown(rel, -1) : NULL;
     if (!rel_lower || !g_strrstr(rel_lower, "stylesheet")) {
@@ -1436,6 +1583,7 @@ static char *inline_local_stylesheet_if_possible(const char *tag, const char *re
         if (path && g_file_get_contents(path, &css, &css_len, NULL)) {
             char *with_urls = rewrite_css_urls(css, resource_dir, source_dir);
             char *with_theme = rewrite_stylesheet_for_theme(with_urls, dark_mode);
+            char *scoped_css = scope_css_selectors(with_theme, scope_class);
 
             /* If the CSS hides elements until a JS class is added (e.g. Chambers
              * Dictionary: `cb13 { display:none }` / `cb13.js_loaded { display:block }`),
@@ -1443,7 +1591,7 @@ static char *inline_local_stylesheet_if_possible(const char *tag, const char *re
             GString *override_buf = g_string_new("");
             /* Find every rule of the form:  SELECTOR.js_loaded { display: ... }
              * and emit a matching rule without the .js_loaded qualifier. */
-            const char *p = with_theme;
+            const char *p = scoped_css;
             while (p && *p) {
                 const char *js_class = strstr(p, ".js_loaded");
                 if (!js_class) break;
@@ -1481,11 +1629,12 @@ static char *inline_local_stylesheet_if_possible(const char *tag, const char *re
                 result = g_strdup_printf(
                     "<style data-diction-inline-css='1'>%s</style>"
                     "<style data-diction-js-override='1'>%s</style>",
-                    with_theme, override_buf->str);
+                    scoped_css, override_buf->str);
             } else {
-                result = g_strdup_printf("<style data-diction-inline-css='1'>%s</style>", with_theme);
+                result = g_strdup_printf("<style data-diction-inline-css='1'>%s</style>", scoped_css);
             }
             g_string_free(override_buf, TRUE);
+            g_free(scoped_css);
             g_free(with_theme);
             g_free(with_urls);
         }
@@ -2277,6 +2426,10 @@ char* dsl_render_to_html(const char *dsl_text,
     char *styled_text = NULL;
     char *normalized_plain_text = NULL;
     char *display_headword = normalize_headword_for_render(headword, hw_length, TRUE);
+    char scope_class[64] = "";
+    unsigned long path_hash = get_djb2_hash(resource_dir ? resource_dir : (source_dir ? source_dir : "default"));
+    g_snprintf(scope_class, sizeof(scope_class), "dict-scoped-%lx", path_hash);
+
     gboolean python_style = g_strcmp0(render_style, "python") == 0;
     gboolean goldendict_style = g_strcmp0(render_style, "goldendict-ng") == 0;
     gboolean slate_style = g_strcmp0(render_style, "slate-card") == 0;
@@ -2772,17 +2925,29 @@ char* dsl_render_to_html(const char *dsl_text,
     }
 
     if (python_style) {
-        buf_append_str(&b, "<div class='rendered-entry py-entry-rendered'><div class='rendered-entry-body'>");
+        buf_append_str(&b, "<div class='rendered-entry py-entry-rendered ");
+        buf_append_str(&b, scope_class);
+        buf_append_str(&b, "'><div class='rendered-entry-body'>");
     } else if (diction_style) {
-        buf_append_str(&b, "<div class='rendered-entry diction-entry-rendered'><div class='rendered-entry-body'>");
+        buf_append_str(&b, "<div class='rendered-entry diction-entry-rendered ");
+        buf_append_str(&b, scope_class);
+        buf_append_str(&b, "'><div class='rendered-entry-body'>");
     } else if (slate_style) {
-        buf_append_str(&b, "<div class='rendered-entry slate-entry-rendered'><div class='rendered-entry-body'>");
+        buf_append_str(&b, "<div class='rendered-entry slate-entry-rendered ");
+        buf_append_str(&b, scope_class);
+        buf_append_str(&b, "'><div class='rendered-entry-body'>");
     } else if (paper_style) {
-        buf_append_str(&b, "<div class='rendered-entry paper-entry-rendered'><div class='rendered-entry-body'>");
+        buf_append_str(&b, "<div class='rendered-entry paper-entry-rendered ");
+        buf_append_str(&b, scope_class);
+        buf_append_str(&b, "'><div class='rendered-entry-body'>");
     } else if (goldendict_style) {
-        buf_append_str(&b, "<div class='rendered-entry gold-entry-rendered'><div class='rendered-entry-body'>");
+        buf_append_str(&b, "<div class='rendered-entry gold-entry-rendered ");
+        buf_append_str(&b, scope_class);
+        buf_append_str(&b, "'><div class='rendered-entry-body'>");
     } else {
-        buf_append_str(&b, "<div class='rendered-entry diction-entry-rendered'>");
+        buf_append_str(&b, "<div class='rendered-entry diction-entry-rendered ");
+        buf_append_str(&b, scope_class);
+        buf_append_str(&b, "'>");
         if (format == DICT_FORMAT_DSL || format == DICT_FORMAT_SDICT || format == DICT_FORMAT_DICTD) {
             buf_append_str(&b, "<h2 style='color:");
             buf_append_str(&b, heading_color);
@@ -2902,7 +3067,7 @@ char* dsl_render_to_html(const char *dsl_text,
                     g_free(final_tag);
                 } else if (strcmp(tag_name, "link") == 0) {
                     /* Inline local stylesheets so color rewriting applies to their rules too */
-                    char *inlined_or_tag = inline_local_stylesheet_if_possible(tag, resource_dir, source_dir, dark_mode);
+                    char *inlined_or_tag = inline_local_stylesheet_if_possible(tag, resource_dir, source_dir, dark_mode, scope_class);
                     if (strcmp(inlined_or_tag, tag) == 0) {
                         char *processed_tag = process_html_tag_attribute(tag, "href", resource_dir, source_dir, dark_mode);
                         char *final_tag = process_html_common_attributes(processed_tag, resource_dir, source_dir, dark_mode);
@@ -2944,11 +3109,13 @@ char* dsl_render_to_html(const char *dsl_text,
                         char *css = g_strndup(dsl_text + head + tag_len, css_len);
                         char *rewritten_css = rewrite_css_urls(css, resource_dir, source_dir);
                         char *themed_css = rewrite_stylesheet_for_theme(rewritten_css, dark_mode);
-                        buf_append_str(&b, themed_css);
+                        char *scoped_css = scope_css_selectors(themed_css, scope_class);
+                        buf_append_str(&b, scoped_css);
                         buf_append_str(&b, "</style>");
                         g_free(css);
                         g_free(rewritten_css);
                         g_free(themed_css);
+                        g_free(scoped_css);
                         g_free(tag);
                         head = (close_style - dsl_text) + 8;
                         continue;

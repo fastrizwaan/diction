@@ -526,6 +526,18 @@ static void fts_post(FtsIndexCtx *ctx, const char *status, const char *path,
     g_idle_add(fts_idle_update, d);
 }
 
+static gint cmp_indices_by_doff(gconstpointer a, gconstpointer b, gpointer user_data) {
+    FlatIndex *index = user_data;
+    uint32_t ia = *(const uint32_t*)a;
+    uint32_t ib = *(const uint32_t*)b;
+    const FlatTreeEntry *ea = flat_index_get(index, ia);
+    const FlatTreeEntry *eb = flat_index_get(index, ib);
+    if (!ea || !eb) return 0;
+    if (ea->d_off < eb->d_off) return -1;
+    if (ea->d_off > eb->d_off) return 1;
+    return 0;
+}
+
 static gpointer fts_build_worker(gpointer user_data)
 {
     FtsIndexCtx *ctx = user_data;
@@ -565,12 +577,20 @@ static gpointer fts_build_worker(gpointer user_data)
         }
 
         size_t count = flat_index_count(dmmap->index);
+        guint32 *sorted_indices = g_new(guint32, count);
+        for (size_t i = 0; i < count; i++) {
+            sorted_indices[i] = (guint32)i;
+        }
+
+        g_qsort_with_data(sorted_indices, (gint)count, sizeof(guint32), cmp_indices_by_doff, dmmap->index);
+
         guint batch = 0;
 
-        for (size_t i = 0; i < count; i++) {
+        for (size_t si = 0; si < count; si++) {
             if (g_atomic_int_get(&ctx->cancel)) break;
 
-            const FlatTreeEntry *ent = flat_index_get(dmmap->index, i);
+            guint32 original_idx = sorted_indices[si];
+            const FlatTreeEntry *ent = flat_index_get(dmmap->index, original_idx);
             if (!ent) continue;
 
             const char *hw  = dmmap->data + ent->h_off;
@@ -584,17 +604,18 @@ static gpointer fts_build_worker(gpointer user_data)
                 def = dict_get_definition(dmmap, ent, &dl, &to_free);
             }
 
-            dict_fts_builder_add(builder, (guint)i, hw, hwl, def, dl);
+            dict_fts_builder_add(builder, (guint)original_idx, hw, hwl, def, dl);
             g_free(to_free);
 
             batch++;
             if (batch >= FTS_BATCH_SIZE) {
                 dict_fts_builder_commit_batch(builder);
                 batch = 0;
-                if ((i & 0x3FF) == 0)
-                    fts_post(ctx, NULL, dpath, FALSE, FALSE, (guint)i, (guint)count);
+                if ((si & 0x3FF) == 0)
+                    fts_post(ctx, NULL, dpath, FALSE, FALSE, (guint)si, (guint)count);
             }
         }
+        g_free(sorted_indices);
 
         if (g_atomic_int_get(&ctx->cancel)) {
             dict_fts_builder_abort(builder);

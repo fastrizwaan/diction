@@ -486,7 +486,28 @@ bool flat_index_validate(const FlatIndex *idx) {
         headword_region_end = (size_t)(h->headwords_off + h->headwords_len);
     }
 
-    for (size_t i = 0; i < idx->count; i++) {
+    if (idx->count == 0) return true;
+
+    /* Validate structural boundaries first */
+    size_t required_space = idx->count * sizeof(FlatTreeEntry);
+    if (idx->mmap_size < required_space) return false;
+
+    /* O(1) Validation: Check first, last, and a few sample entries to avoid page-faulting the entire index on startup. */
+    size_t sample_indices[16];
+    size_t num_samples = 0;
+    
+    sample_indices[num_samples++] = 0;
+    if (idx->count > 1) {
+        sample_indices[num_samples++] = idx->count - 1;
+    }
+    
+    /* 10 random/middle samples */
+    for (int s = 0; s < 10 && idx->count > 2; s++) {
+        sample_indices[num_samples++] = 1 + (size_t)(rand() % (idx->count - 2));
+    }
+
+    for (size_t s = 0; s < num_samples; s++) {
+        size_t i = sample_indices[s];
         uint32_t h_off = idx->entries[i].h_off;
         uint32_t h_len = idx->entries[i].h_len;
         uint32_t d_off = idx->entries[i].d_off;

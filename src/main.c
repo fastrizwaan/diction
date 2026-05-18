@@ -58,7 +58,7 @@ static void populate_search_sidebar_with_mode(const char *query, gboolean force_
 
 static AdwTabPage *create_new_tab(const char *title, gboolean select_it);
 static void on_tab_selected(AdwTabView *view, GParamSpec *pspec, gpointer user_data);
-static char *format_sidebar_headword_label(const char *headword);
+
 static GPtrArray *split_headword_variants(const char *headword);
 static GtkButton *search_button = NULL;
 static GtkLabel *search_button_label = NULL;
@@ -3051,81 +3051,7 @@ static char* render_entry_def_to_html(DictEntry *entry, const FlatTreeEntry *res
     return html;
 }
 
-static void wrap_entry_in_style(GString *html_res, 
-                               const char *headword, 
-                               const char *dict_name, 
-                               const char *icon_path,
-                               const char *fallback_emoji,
-                               const char *rendered_body, 
-                               const char *render_style) {
-    char *escaped_name = safe_markup_escape_n(dict_name ? dict_name : "", -1);
-    char *escaped_headword = safe_markup_escape_n(headword, -1);
-    char *icon_html = NULL;
-    if (icon_path) {
-        char *safe_icon = safe_markup_escape_n(icon_path, -1);
-        icon_html = g_strdup_printf("<img src='file://%s' style='height:1.1em;vertical-align:middle;margin-right:0.35em;border-radius:2px;'> ", safe_icon);
-        g_free(safe_icon);
-    } else {
-        icon_html = g_strdup_printf("%s ", fallback_emoji ? fallback_emoji : "📖");
-    }
 
-    if (g_strcmp0(render_style, "python") == 0) {
-        g_string_append_printf(
-            html_res,
-            "<div class='entry'><div class='header'><div><span class='lemma'>%s</span></div>"
-            "<span class='dict'>%s%s</span></div><div class='defs'>%s</div><hr></div>",
-            escaped_headword, icon_html, escaped_name, rendered_body);
-    } else if (g_strcmp0(render_style, "goldendict-ng") == 0) {
-        g_string_append_printf(
-            html_res,
-            "<article class='gdarticle'><div class='gold-header'><span class='gold-entry-headword'>%s</span>"
-            "<span class='gold-dict'>%s%s</span></div><div class='gdarticlebody'>%s</div></article>",
-            escaped_headword, icon_html, escaped_name, rendered_body);
-    } else if (g_strcmp0(render_style, "slate-card") == 0) {
-        g_string_append_printf(
-            html_res,
-            "<section class='slate-entry'><div class='slate-header'><span class='slate-lemma'>%s</span>"
-            "<span class='slate-dict'>%s%s</span></div><div class='slate-entry-body'>%s</div></section>",
-            escaped_headword, icon_html, escaped_name, rendered_body);
-    } else if (g_strcmp0(render_style, "paper") == 0) {
-        g_string_append_printf(
-            html_res,
-            "<section class='paper-entry'><div class='paper-header'><span class='paper-lemma'>%s</span>"
-            "<span class='paper-dict'>%s%s</span></div><div class='paper-entry-body'>%s</div></section>",
-            escaped_headword, icon_html, escaped_name, rendered_body);
-    } else {
-        g_string_append_printf(
-            html_res,
-            "<section class='diction-entry'><div class='diction-header'><span class='diction-lemma'>%s</span>"
-            "<span class='diction-dict'>%s%s</span></div><div class='diction-entry-body'>%s</div></section>",
-            escaped_headword, icon_html, escaped_name, rendered_body);
-    }
-
-    g_free(icon_html);
-    g_free(escaped_headword);
-    g_free(escaped_name);
-}
-
-static char *format_sidebar_headword_label(const char *headword) {
-    if (!headword) return g_strdup("");
-
-    GString *out = g_string_new("");
-    const char *p = headword;
-
-    while (*p) {
-        const char *sep = strstr(p, "; ");
-        if (!sep) {
-            g_string_append(out, p);
-            break;
-        }
-
-        g_string_append_len(out, p, sep - p);
-        g_string_append_c(out, '\n');
-        p = sep + 2;
-    }
-
-    return g_string_free(out, FALSE);
-}
 
 static GPtrArray *split_headword_variants(const char *headword) {
     GPtrArray *variants = g_ptr_array_new_with_free_func(g_free);
@@ -3153,15 +3079,6 @@ static GPtrArray *split_headword_variants(const char *headword) {
     return variants;
 }
 
-static char *format_entry_headword_for_display(const char *headword, DictFormat format) {
-    if (!headword) return g_strdup("");
-
-    if (format != DICT_FORMAT_XDXF) {
-        return g_strdup(headword);
-    }
-
-    return format_sidebar_headword_label(headword);
-}
 
 
 

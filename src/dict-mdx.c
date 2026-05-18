@@ -1134,6 +1134,161 @@ static gboolean mdx_is_valid_header(const char *path) {
     return is_valid;
 }
 
+typedef struct MdxRecordBlock {
+    uint64_t comp_size;
+    uint64_t decomp_size;
+    uint64_t file_offset;      
+    uint64_t uncomp_offset;    
+} MdxRecordBlock;
+
+typedef struct MdxContext {
+    int fd;
+    MdxRecordBlock *rbs;
+    uint64_t nrb;
+    int is_utf16;
+    char *encoding;
+} MdxContext;
+
+static void mdx_init_context(DictMmap *dict, FILE *fh, int is_v2, int num_size, uint64_t header_text_size, int encoding_is_utf16, const char *dict_encoding) {
+    long orig_pos = ftell(fh);
+    fseek(fh, 4 + header_text_size + 4, SEEK_SET);
+
+    int kbh_size = is_v2 ? (num_size * 5) : (num_size * 4);
+    unsigned char *kbh = g_malloc(kbh_size);
+    if (fread(kbh, 1, kbh_size, fh) != (size_t)kbh_size) {
+        g_free(kbh); fseek(fh, orig_pos, SEEK_SET); return;
+    }
+    const unsigned char *kp = kbh;
+    uint64_t num_key_blocks = read_num(&kp, num_size); (void)num_key_blocks;
+    uint64_t num_entries = read_num(&kp, num_size); (void)num_entries;
+    if (is_v2) read_num(&kp, num_size);
+    uint64_t kbi_comp = read_num(&kp, num_size);
+    uint64_t kb_data_size = read_num(&kp, num_size);
+    g_free(kbh);
+
+    fseek(fh, 4 + header_text_size + 4 + kbh_size + (is_v2?4:0) + kbi_comp + kb_data_size, SEEK_SET);
+
+    unsigned char rbh[64];
+    if (fread(rbh, 1, num_size * 4, fh) != (size_t)(num_size * 4)) {
+        fseek(fh, orig_pos, SEEK_SET);
+        return;
+    }
+    const unsigned char *rp = rbh;
+    uint64_t nrb = read_num(&rp, num_size);
+    read_num(&rp, num_size);
+    read_num(&rp, num_size);
+
+    MdxContext *ctx = g_new0(MdxContext, 1);
+    ctx->fd = dup(fileno(fh));
+    ctx->nrb = nrb;
+    ctx->is_utf16 = encoding_is_utf16;
+    ctx->encoding = g_strdup(dict_encoding);
+    ctx->rbs = g_malloc0_n(nrb, sizeof(MdxRecordBlock));
+
+    uint64_t file_offset = 4 + header_text_size + 4 + kbh_size + (is_v2?4:0) + kbi_comp + kb_data_size + num_size*4 + nrb * num_size * 2;
+    uint64_t uncomp_offset = 0;
+
+    for (uint64_t i = 0; i < nrb; i++) {
+        unsigned char tmp[16];
+        if (fread(tmp, 1, num_size * 2, fh) != (size_t)(num_size * 2)) break;
+        const unsigned char *ppb = tmp;
+        uint64_t comp = read_num(&ppb, num_size);
+        uint64_t decomp = read_num(&ppb, num_size);
+        
+        ctx->rbs[i].comp_size = comp;
+        ctx->rbs[i].decomp_size = decomp;
+        ctx->rbs[i].file_offset = file_offset;
+        ctx->rbs[i].uncomp_offset = uncomp_offset;
+        
+        file_offset += comp;
+        uncomp_offset += decomp;
+    }
+    
+    dict->mdx_ctx = ctx;
+    fseek(fh, orig_pos, SEEK_SET);
+}
+
+extern size_t convert_utf16le_to_utf8(const unsigned char *in_buf, size_t in_len, unsigned char *out_buf, size_t out_max);
+
+const char* mdx_get_definition_on_the_fly(DictMmap *dict, const FlatTreeEntry *entry, size_t *out_len, char **out_to_free) {
+    if (!dict || !dict->mdx_ctx || !entry) return NULL;
+    MdxContext *ctx = dict->mdx_ctx;
+    
+    if (out_len) *out_len = 0;
+    if (out_to_free) *out_to_free = NULL;
+    
+    uint64_t target_off = entry->d_off;
+    int l = 0, r = ctx->nrb - 1;
+    int block_idx = -1;
+    while (l <= r) {
+        int m = l + (r - l) / 2;
+        if (target_off >= ctx->rbs[m].uncomp_offset && 
+            target_off < ctx->rbs[m].uncomp_offset + ctx->rbs[m].decomp_size) {
+            block_idx = m;
+            break;
+        }
+        if (target_off < ctx->rbs[m].uncomp_offset) {
+            r = m - 1;
+        } else {
+            l = m + 1;
+        }
+    }
+    if (block_idx == -1) return NULL;
+    
+    unsigned char *comp = g_malloc(ctx->rbs[block_idx].comp_size);
+    if (pread(ctx->fd, comp, ctx->rbs[block_idx].comp_size, ctx->rbs[block_idx].file_offset) != ctx->rbs[block_idx].comp_size) {
+        g_free(comp);
+        return NULL;
+    }
+    
+    size_t dlen = 0;
+    unsigned char *data = mdx_block_decompress(comp, ctx->rbs[block_idx].comp_size, ctx->rbs[block_idx].decomp_size, &dlen);
+    g_free(comp);
+    if (!data) return NULL;
+    
+    uint64_t rel_off = target_off - ctx->rbs[block_idx].uncomp_offset;
+    uint64_t rec_len = entry->d_len;
+
+    if (rel_off + rec_len > dlen) rec_len = dlen - rel_off;
+    
+    const unsigned char *rec_ptr = data + rel_off;
+    char *utf8_def = NULL;
+    size_t def_len = 0;
+
+    if (ctx->is_utf16) {
+        size_t rlen = rec_len;
+        if (rlen >= 2 && rec_ptr[rlen-1] == 0 && rec_ptr[rlen-2] == 0) rlen -= 2;
+        size_t max_out = rlen * 2;
+        utf8_def = g_malloc(max_out + 1);
+        def_len = convert_utf16le_to_utf8(rec_ptr, rlen, (unsigned char*)utf8_def, max_out);
+        utf8_def[def_len] = '\0';
+    } else {
+        size_t rlen = rec_len;
+        if (rlen > 0 && rec_ptr[rlen-1] == 0) rlen--;
+        if (ctx->encoding) {
+            utf8_def = g_convert((const char*)rec_ptr, rlen, "UTF-8", ctx->encoding, NULL, &def_len, NULL);
+        } else {
+            utf8_def = g_strndup((const char*)rec_ptr, rlen);
+            def_len = rlen;
+        }
+    }
+    
+    g_free(data);
+    
+    if (out_len) *out_len = def_len;
+    if (out_to_free) *out_to_free = utf8_def;
+    return utf8_def;
+}
+
+void mdx_free_context(void *ctx_ptr) {
+    if (!ctx_ptr) return;
+    MdxContext *ctx = ctx_ptr;
+    if (ctx->fd >= 0) close(ctx->fd);
+    g_free(ctx->rbs);
+    g_free(ctx->encoding);
+    g_free(ctx);
+}
+
 DictMmap *parse_mdx_file(const char *path, volatile gint *cancel_flag, gint expected) {
     if (cancel_flag && g_atomic_int_get(cancel_flag) != expected) return NULL;
     if (!mdx_is_valid_header(path)) {
@@ -1336,8 +1491,13 @@ DictMmap *parse_mdx_file(const char *path, volatile gint *cancel_flag, gint expe
         }
 
         if (dict_cache_is_compressed(dict->data, dict->size)) {
-            dict->is_compressed = TRUE;
-            dict->chunk_reader = dict_chunk_reader_new(dict->data, dict->size, (const DictCacheHeader*)dict->data);
+            const DictCacheHeader *hdr = (const DictCacheHeader*)dict->data;
+            if (hdr->chunk_count > 0) {
+                dict->is_compressed = TRUE;
+                dict->chunk_reader = dict_chunk_reader_new(dict->data, dict->size, hdr);
+            } else {
+                mdx_init_context(dict, fh, is_v2, num_size, header_text_size, encoding_is_utf16, dict_encoding);
+            }
         }
 
         if (!(cancel_flag && g_atomic_int_get(cancel_flag) != expected)) {
@@ -1445,7 +1605,6 @@ rebuild_cache:
 
     FlatTreeEntry *tree_entries = g_malloc0_n(num_entries, sizeof(FlatTreeEntry));
     size_t valid_count = 0;
-    size_t valid_count_processed = 0;
 
     size_t kbi_dlen = 0;
     unsigned char *kbi_data = NULL;
@@ -1459,7 +1618,7 @@ rebuild_cache:
     }
 
     uint64_t internal_icon_id = (uint64_t)-1;
-    char *internal_icon_ext = NULL;
+
 
     if (kbi_data) {
         const unsigned char *ip = kbi_data, *ie = kbi_data + kbi_dlen;
@@ -1544,10 +1703,6 @@ rebuild_cache:
                             
                             if (found) {
                                 internal_icon_id = id;
-                                if (g_str_has_suffix(word, ".ico")) internal_icon_ext = "ico";
-                                else if (g_str_has_suffix(word, ".jpg") || g_str_has_suffix(word, ".jpeg")) internal_icon_ext = "jpg";
-                                else if (g_str_has_suffix(word, ".bmp")) internal_icon_ext = "bmp";
-                                else internal_icon_ext = "png";
                                 fprintf(stderr, "[MDX] Found internal icon entry: '%s' at record offset %" G_GUINT64_FORMAT "\n", word, id);
                             }
                             g_free(basename);
@@ -1591,92 +1746,21 @@ rebuild_cache:
         rbs[i].comp = read_num(&ppb, num_size);
         rbs[i].decomp = read_num(&ppb, num_size);
     }
-    /* Sort by d_off to ensure monotonic processing */
+    /* Sort by d_off to compute lengths */
     qsort(tree_entries, valid_count, sizeof(FlatTreeEntry), cmp_tree_entry_doff);
 
-    uint64_t current_decomp_offset = 0;
-    for (uint64_t j = 0; j < nrb; j++) {
-        if (cancel_flag && g_atomic_int_get(cancel_flag) != expected) break;
+    uint64_t total_decomp = 0;
+    for (uint64_t j = 0; j < nrb; j++) total_decomp += rbs[j].decomp;
 
-        unsigned char *comp = g_malloc(rbs[j].comp);
-        if (fread(comp, 1, rbs[j].comp, fh) == rbs[j].comp) {
-            size_t dlen = 0;
-            unsigned char *data = mdx_block_decompress(comp, rbs[j].comp, rbs[j].decomp, &dlen);
-            if (data) {
-                /* Map records to tree entries */
-                while (valid_count_processed < valid_count && 
-                       (uint64_t)tree_entries[valid_count_processed].d_off < current_decomp_offset + dlen) {
-                    
-                    size_t entry_idx = valid_count_processed;
-                    uint64_t rel_off = (uint64_t)tree_entries[entry_idx].d_off - current_decomp_offset;
-                    
-                    /* Find next entry to determine record length */
-                    uint64_t next_id = (uint64_t)-1;
-                    for (size_t k = entry_idx + 1; k < valid_count; k++) {
-                        if (tree_entries[k].d_off > tree_entries[entry_idx].d_off) {
-                            next_id = tree_entries[k].d_off;
-                            break;
-                        }
-                    }
-                    
-                    uint64_t rec_len;
-                    if (next_id != (uint64_t)-1 && next_id < current_decomp_offset + dlen) {
-                        rec_len = next_id - (uint64_t)tree_entries[entry_idx].d_off;
-                    } else {
-                        rec_len = dlen - rel_off;
-                    }
-
-                    const unsigned char *rec_ptr = data + rel_off;
-                    
-                    /* Extract internal icon */
-                    if ((uint64_t)tree_entries[entry_idx].d_off == internal_icon_id) {
-                        const char *res_dir = mdx_prepare_resource_dir(path, is_v2, num_size, encoding_is_utf16, encrypted, cancel_flag, expected, NULL);
-                        if (res_dir) {
-                            char *icon_filename = g_strdup_printf("mdx_icon.%s", internal_icon_ext);
-                            char *icon_path = g_build_filename(res_dir, icon_filename, NULL);
-                            g_file_set_contents(icon_path, (const char *)rec_ptr, (gssize)rec_len, NULL);
-                            g_free(icon_filename); g_free(icon_path);
-                        }
-                    }
-
-                    char *utf8_def = NULL;
-                    size_t def_len = 0;
-
-                    if (encoding_is_utf16) {
-                        size_t rlen = rec_len;
-                        if (rlen >= 2 && rec_ptr[rlen-1] == 0 && rec_ptr[rlen-2] == 0) rlen -= 2;
-                        utf8_def = g_convert((const char *)rec_ptr, rlen, "UTF-8", "UTF-16LE", NULL, &def_len, NULL);
-                    } else {
-                        size_t rlen = rec_len;
-                        if (rlen > 0 && rec_ptr[rlen-1] == 0) rlen--;
-                        if (dict_encoding) {
-                            utf8_def = g_convert((const char*)rec_ptr, rlen, "UTF-8", dict_encoding, NULL, &def_len, NULL);
-                        } else {
-                            utf8_def = g_strndup((const char*)rec_ptr, rlen);
-                            def_len = rlen;
-                        }
-                    }
-
-                    uint64_t def_off = 0;
-                    if (utf8_def) {
-                        dict_cache_builder_add_definition(builder, utf8_def, def_len, &def_off);
-                        tree_entries[entry_idx].d_len = def_len;
-                        g_free(utf8_def);
-                    } else {
-                        dict_cache_builder_add_definition(builder, (const char*)rec_ptr, rec_len, &def_off);
-                        tree_entries[entry_idx].d_len = rec_len;
-                    }
-
-                    tree_entries[entry_idx].d_off = (uint32_t)def_off;
-                    valid_count_processed++;
-                }
-                current_decomp_offset += dlen;
-                g_free(data);
-            }
+    for (size_t k = 0; k < valid_count; k++) {
+        uint64_t next_id = (k + 1 < valid_count) ? tree_entries[k+1].d_off : total_decomp;
+        if (next_id >= tree_entries[k].d_off) {
+            tree_entries[k].d_len = next_id - tree_entries[k].d_off;
+        } else {
+            tree_entries[k].d_len = 0;
         }
-        g_free(comp);
-        if ((j % 10) == 0) settings_scan_progress_notify(path, 40 + (int)(40 * j / nrb));
     }
+    
     g_free(rbs);
 
     /* Sort entries for binary search */
@@ -1697,7 +1781,7 @@ rebuild_cache:
     }
 
     settings_scan_progress_notify(path, 95);
-    dict_cache_builder_finalize(builder, tree_entries, (uint64_t)valid_count);
+    dict_cache_builder_finalize_index_only(builder, tree_entries, (uint64_t)valid_count, 0, NULL);
     
     if (valid_count == 0) {
         fprintf(stderr, "[MDX] Parsed zero entries for %s\n", path);

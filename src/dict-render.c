@@ -28,14 +28,7 @@ static void buf_append_str(StrBuf *b, const char *s) {
     buf_append(b, s, strlen(s));
 }
 
-static void buf_append_printf(StrBuf *b, const char *fmt, ...) {
-    va_list args;
-    va_start(args, fmt);
-    char *s = g_strdup_vprintf(fmt, args);
-    buf_append_str(b, s);
-    g_free(s);
-    va_end(args);
-}
+
 
 static char *normalize_color_name_key(const char *color_name) {
     GString *key = g_string_new("");
@@ -3061,7 +3054,12 @@ char* dsl_render_to_html(const char *dsl_text,
                     
                     /* Regular link - handle href */
                     char *processed_tag = process_html_tag_attribute(tag, "href", resource_dir, source_dir, dark_mode);
-                    char *final_tag = process_html_common_attributes(processed_tag, resource_dir, source_dir, dark_mode);
+                    char *final_tag;
+                    if (format == DICT_FORMAT_MDX) {
+                        final_tag = g_strdup(processed_tag);
+                    } else {
+                        final_tag = process_html_common_attributes(processed_tag, resource_dir, source_dir, dark_mode);
+                    }
                     g_free(processed_tag);
                     buf_append_str(&b, final_tag);
                     g_free(final_tag);
@@ -3070,7 +3068,12 @@ char* dsl_render_to_html(const char *dsl_text,
                     char *inlined_or_tag = inline_local_stylesheet_if_possible(tag, resource_dir, source_dir, dark_mode, scope_class);
                     if (strcmp(inlined_or_tag, tag) == 0) {
                         char *processed_tag = process_html_tag_attribute(tag, "href", resource_dir, source_dir, dark_mode);
-                        char *final_tag = process_html_common_attributes(processed_tag, resource_dir, source_dir, dark_mode);
+                        char *final_tag;
+                        if (format == DICT_FORMAT_MDX) {
+                            final_tag = g_strdup(processed_tag);
+                        } else {
+                            final_tag = process_html_common_attributes(processed_tag, resource_dir, source_dir, dark_mode);
+                        }
                         g_free(processed_tag);
                         buf_append_str(&b, final_tag);
                         g_free(final_tag);
@@ -3086,7 +3089,11 @@ char* dsl_render_to_html(const char *dsl_text,
                     g_free(img_tag);
                     char *with_srcset = process_html_srcset_attribute(processed_tag, resource_dir, source_dir);
                     g_free(processed_tag);
-                    processed_tag = process_html_common_attributes(with_srcset, resource_dir, source_dir, dark_mode);
+                    if (format == DICT_FORMAT_MDX) {
+                        processed_tag = g_strdup(with_srcset);
+                    } else {
+                        processed_tag = process_html_common_attributes(with_srcset, resource_dir, source_dir, dark_mode);
+                    }
                     g_free(with_srcset);
                     if (wiktionary_audio_url) {
                         char *sound_uri = build_remote_sound_uri(wiktionary_audio_url);
@@ -3162,7 +3169,12 @@ char* dsl_render_to_html(const char *dsl_text,
                 } else if (strcmp(tag_name, "source") == 0 || strcmp(tag_name, "audio") == 0 || strcmp(tag_name, "video") == 0) {
                     /* Media tags - handle src */
                     char *processed_tag = process_html_tag_attribute(tag, "src", resource_dir, source_dir, dark_mode);
-                    char *with_common = process_html_common_attributes(processed_tag, resource_dir, source_dir, dark_mode);
+                    char *with_common;
+                    if (format == DICT_FORMAT_MDX) {
+                        with_common = g_strdup(processed_tag);
+                    } else {
+                        with_common = process_html_common_attributes(processed_tag, resource_dir, source_dir, dark_mode);
+                    }
                     g_free(processed_tag);
                     processed_tag = with_common;
                     buf_append_str(&b, processed_tag);
@@ -3170,7 +3182,12 @@ char* dsl_render_to_html(const char *dsl_text,
                 } else if (strcmp(tag_name, "object") == 0) {
                     /* Object tags - handle data */
                     char *processed_tag = process_html_tag_attribute(tag, "data", resource_dir, source_dir, dark_mode);
-                    char *with_common = process_html_common_attributes(processed_tag, resource_dir, source_dir, dark_mode);
+                    char *with_common;
+                    if (format == DICT_FORMAT_MDX) {
+                        with_common = g_strdup(processed_tag);
+                    } else {
+                        with_common = process_html_common_attributes(processed_tag, resource_dir, source_dir, dark_mode);
+                    }
                     g_free(processed_tag);
                     processed_tag = with_common;
                     buf_append_str(&b, processed_tag);
@@ -3183,7 +3200,12 @@ char* dsl_render_to_html(const char *dsl_text,
                     // Do nothing, just drop the tag
                 } else {
                     /* Other tags - pass through */
-                    char *processed_tag = process_html_common_attributes(tag, resource_dir, source_dir, dark_mode);
+                    char *processed_tag;
+                    if (format == DICT_FORMAT_MDX) {
+                        processed_tag = g_strdup(tag);
+                    } else {
+                        processed_tag = process_html_common_attributes(tag, resource_dir, source_dir, dark_mode);
+                    }
                     buf_append_str(&b, processed_tag);
                     g_free(processed_tag);
                 }

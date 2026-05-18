@@ -1436,7 +1436,56 @@ static char *inline_local_stylesheet_if_possible(const char *tag, const char *re
         if (path && g_file_get_contents(path, &css, &css_len, NULL)) {
             char *with_urls = rewrite_css_urls(css, resource_dir, source_dir);
             char *with_theme = rewrite_stylesheet_for_theme(with_urls, dark_mode);
-            result = g_strdup_printf("<style data-diction-inline-css='1'>%s</style>", with_theme);
+
+            /* If the CSS hides elements until a JS class is added (e.g. Chambers
+             * Dictionary: `cb13 { display:none }` / `cb13.js_loaded { display:block }`),
+             * inject an override so the elements render without JavaScript. */
+            GString *override_buf = g_string_new("");
+            /* Find every rule of the form:  SELECTOR.js_loaded { display: ... }
+             * and emit a matching rule without the .js_loaded qualifier. */
+            const char *p = with_theme;
+            while (p && *p) {
+                const char *js_class = strstr(p, ".js_loaded");
+                if (!js_class) break;
+                /* Walk backwards to find start of selector */
+                const char *sel_start = js_class - 1;
+                while (sel_start > p && *sel_start != '}' && *sel_start != '{' &&
+                       *sel_start != '\n' && *sel_start != '\r' && *sel_start != ';')
+                    sel_start--;
+                if (*sel_start == '}' || *sel_start == '{' || *sel_start == ';'
+                        || *sel_start == '\n' || *sel_start == '\r')
+                    sel_start++;
+                while (*sel_start == ' ' || *sel_start == '\t') sel_start++;
+                /* Extract selector without .js_loaded */
+                size_t prefix_len = js_class - sel_start;
+                const char *suffix_after = js_class + strlen(".js_loaded");
+                /* Find opening brace of this rule */
+                const char *brace = strchr(suffix_after, '{');
+                if (brace) {
+                    const char *close = strchr(brace, '}');
+                    if (close && prefix_len > 0) {
+                        /* Build override: SELECTOR { display:block!important } */
+                        char *bare_sel = g_strndup(sel_start, prefix_len);
+                        g_strstrip(bare_sel);
+                        if (*bare_sel) {
+                            g_string_append_printf(override_buf,
+                                "%s{display:block!important}", bare_sel);
+                        }
+                        g_free(bare_sel);
+                    }
+                }
+                p = js_class + strlen(".js_loaded");
+            }
+
+            if (override_buf->len > 0) {
+                result = g_strdup_printf(
+                    "<style data-diction-inline-css='1'>%s</style>"
+                    "<style data-diction-js-override='1'>%s</style>",
+                    with_theme, override_buf->str);
+            } else {
+                result = g_strdup_printf("<style data-diction-inline-css='1'>%s</style>", with_theme);
+            }
+            g_string_free(override_buf, TRUE);
             g_free(with_theme);
             g_free(with_urls);
         }
@@ -2905,16 +2954,43 @@ char* dsl_render_to_html(const char *dsl_text,
                         continue;
                     }
                 } else if (strcmp(tag_name, "script") == 0) {
-                    /* Skip script tags with src */
-                    if (strstr(tag, "src=\"")) {
-                        /* Find matching closing script tag */
+                    /* For external scripts: try to inline from resource/source dir;
+                     * if the file doesn't exist, skip the tag entirely (no broken
+                     * network requests inside the sandboxed WebView). */
+                    char *js_src = get_html_attribute_value(tag, "src");
+                    if (js_src) {
+                        gboolean is_local_js = !(strstr(js_src, "://") ||
+                                                  g_str_has_prefix(js_src, "data:"));
+                        gboolean inlined = FALSE;
+                        if (is_local_js && (resource_dir || source_dir)) {
+                            char *js_path = resolve_local_resource_path(
+                                resource_dir, source_dir, js_src);
+                            char *js_content = NULL;
+                            gsize js_len = 0;
+                            if (js_path && g_file_get_contents(js_path, &js_content, &js_len, NULL) && js_len > 0) {
+                                buf_append_str(&b, "<script>");
+                                buf_append(&b, js_content, js_len);
+                                buf_append_str(&b, "</script>");
+                                inlined = TRUE;
+                            }
+                            g_free(js_content);
+                            g_free(js_path);
+                        }
+                        g_free(js_src);
+                        /* Skip the original tag + its closing </script> */
                         const char *close_script = strstr(dsl_text + head + tag_len, "</script>");
                         if (close_script) {
-                            head = (close_script - dsl_text) + 9; // Skip </script>
-                            g_free(tag);
-                            continue;
+                            head = (close_script - dsl_text) + 9;
+                        } else {
+                            head += tag_len;
                         }
+                        if (!inlined) {
+                            /* File not found — nothing to emit, already skipped */
+                        }
+                        g_free(tag);
+                        continue;
                     }
+                    g_free(js_src);
                     buf_append_str(&b, tag);
                 } else if (strcmp(tag_name, "source") == 0 || strcmp(tag_name, "audio") == 0 || strcmp(tag_name, "video") == 0) {
                     /* Media tags - handle src */

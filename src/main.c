@@ -2444,6 +2444,10 @@ static void on_decide_policy(WebKitWebView *v, WebKitPolicyDecision *d, WebKitPo
             char *unescaped = g_uri_unescape_string(uri + 7, NULL);
             fprintf(stderr, "[LINK CLICKED]: '%s'\n", unescaped ? unescaped : uri + 7);
             g_free(unescaped);
+        } else if (g_str_has_prefix(uri, "entry://") || g_str_has_prefix(uri, "bword://")) {
+            char *unescaped = g_uri_unescape_string(uri + 8, NULL);
+            fprintf(stderr, "[LINK CLICKED]: '%s'\n", unescaped ? unescaped : uri + 8);
+            g_free(unescaped);
         } else if (g_str_has_prefix(uri, "sound://")) {
             /* Keep existing audio logic or omit logging if not requested */
         } else if (is_media_url(uri) && (g_str_has_prefix(uri, "http://") || g_str_has_prefix(uri, "https://"))) {
@@ -2453,6 +2457,17 @@ static void on_decide_policy(WebKitWebView *v, WebKitPolicyDecision *d, WebKitPo
         }
         if (g_str_has_prefix(uri, "dict://")) {
             const char *word = uri + 7;
+            char *unescaped = g_uri_unescape_string(word, NULL);
+            char *clean_link = normalize_headword_for_search(unescaped ? unescaped : word, TRUE);
+            const char *final_word = clean_link ? clean_link : (unescaped ? unescaped : word);
+            gtk_editable_set_text(GTK_EDITABLE(user_data), final_word);
+            execute_search_now_for_query(final_word, TRUE);
+            g_free(clean_link);
+            g_free(unescaped);
+            webkit_policy_decision_ignore(d);
+            return;
+        } else if (g_str_has_prefix(uri, "entry://") || g_str_has_prefix(uri, "bword://")) {
+            const char *word = uri + 8;
             char *unescaped = g_uri_unescape_string(word, NULL);
             char *clean_link = normalize_headword_for_search(unescaped ? unescaped : word, TRUE);
             const char *final_word = clean_link ? clean_link : (unescaped ? unescaped : word);

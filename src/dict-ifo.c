@@ -648,8 +648,22 @@ DictMmap* parse_stardict(const char *ifo_path, volatile gint *cancel_flag, gint 
         return cached;
     }
 
-    unsigned char *dict_raw = NULL;
+    /* RAM-saving strategy:
+     * - Plain .dict  → mmap(MAP_PRIVATE) so the OS pages it lazily (zero heap cost).
+     * - .dict.dz files > STARDICT_INDEX_ONLY_DZ_THRESHOLD → index-only mode:
+     *   we store only headword offsets in the cache and open the .dz file via
+     *   dictzip random-access at runtime.  This avoids decompressing hundreds of
+     *   MB into RAM during a cold-cache rebuild.
+     * - .dict.dz files <= threshold → decompress fully as before (small dicts).
+     */
+#define STARDICT_INDEX_ONLY_DZ_THRESHOLD (64ULL * 1024ULL * 1024ULL)  /* 64 MB compressed */
+
+    const unsigned char *dict_raw = NULL;
     size_t dict_raw_len = 0;
+    int    dict_raw_fd  = -1;   /* valid when we mmap'd a plain .dict */
+    gboolean dict_is_heap = FALSE; /* TRUE when dict_raw was g_malloc'd (small .dz) */
+    gboolean index_only_mode = FALSE;
+
     unsigned char *idx_data = NULL;
     size_t idx_size = 0;
 
@@ -662,9 +676,77 @@ DictMmap* parse_stardict(const char *ifo_path, volatile gint *cancel_flag, gint 
         return NULL;
     }
 
-    if (!load_file_bytes_auto(dict_path, &dict_raw, &dict_raw_len) ||
-        !load_file_bytes_auto(idx_path, &idx_data, &idx_size)) {
-        fprintf(stderr, "[IFO] Failed reading .idx/.dict payloads\n");
+    /* Load .idx (always small enough to heap-load) */
+    if (!load_file_bytes_auto(idx_path, &idx_data, &idx_size)) {
+        fprintf(stderr, "[IFO] Failed reading .idx for %s\n", ifo_path);
+        g_free(bookname);
+        g_free(resource_dir);
+        g_free(cache_path);
+        g_free(idx_path);
+        g_free(dict_path);
+        return NULL;
+    }
+
+    /* Load .dict / .dict.dz as efficiently as possible */
+    gboolean dict_is_compressed = ends_with_ci(dict_path, ".dz") ||
+                                   ends_with_ci(dict_path, ".gz");
+    if (!dict_is_compressed) {
+        /* Plain .dict → mmap(MAP_PRIVATE), zero heap cost */
+        dict_raw_fd = open(dict_path, O_RDONLY);
+        if (dict_raw_fd >= 0) {
+            struct stat ds;
+            if (fstat(dict_raw_fd, &ds) == 0 && ds.st_size > 0) {
+                void *m = mmap(NULL, (size_t)ds.st_size, PROT_READ, MAP_PRIVATE,
+                               dict_raw_fd, 0);
+                if (m != MAP_FAILED) {
+                    dict_raw     = (const unsigned char *)m;
+                    dict_raw_len = (size_t)ds.st_size;
+                    /* Hint the kernel: sequential single-pass access during build */
+                    madvise((void*)dict_raw, dict_raw_len, MADV_SEQUENTIAL);
+                }
+            }
+            if (!dict_raw) {
+                close(dict_raw_fd);
+                dict_raw_fd = -1;
+            }
+        }
+        if (!dict_raw) {
+            /* Fallback: heap load */
+            unsigned char *tmp = NULL;
+            if (load_file_bytes_plain(dict_path, &tmp, &dict_raw_len)) {
+                dict_raw      = tmp;
+                dict_is_heap  = TRUE;
+            }
+        }
+    } else {
+        /* Compressed .dict.dz — check size before decompressing */
+        struct stat dz_st;
+        if (stat(dict_path, &dz_st) == 0 &&
+            (guint64)dz_st.st_size > STARDICT_INDEX_ONLY_DZ_THRESHOLD) {
+            /* Large compressed dict → index-only: store offsets only, open via
+             * dictzip at runtime.  dict_raw stays NULL intentionally. */
+            index_only_mode = TRUE;
+            fprintf(stderr,
+                    "[IFO] %s: .dict.dz is %.1f MB (> %.0f MB threshold) — "
+                    "using index-only mode (dictzip runtime access)\n",
+                    ifo_path,
+                    (double)dz_st.st_size / (1024.0 * 1024.0),
+                    (double)STARDICT_INDEX_ONLY_DZ_THRESHOLD / (1024.0 * 1024.0));
+            /* We need dict_raw_len so entry offset validation works. Approximate
+             * via wordcount × avg_entry_size heuristic, or read header. */
+            dict_raw_len = (size_t)dz_st.st_size * 5; /* conservative 5× expansion */
+        } else {
+            /* Small compressed dict → decompress to heap as before */
+            unsigned char *tmp = NULL;
+            if (load_file_bytes_gzip(dict_path, &tmp, &dict_raw_len)) {
+                dict_raw     = tmp;
+                dict_is_heap = TRUE;
+            }
+        }
+    }
+
+    if (!dict_raw && !index_only_mode) {
+        fprintf(stderr, "[IFO] Failed to load .dict for %s\n", ifo_path);
         g_free(bookname);
         g_free(resource_dir);
         g_free(cache_path);
@@ -741,7 +823,8 @@ DictMmap* parse_stardict(const char *ifo_path, volatile gint *cancel_flag, gint 
         g_free(cache_path);
         g_free(idx_path);
         g_free(dict_path);
-        g_free(dict_raw);
+        if (dict_raw_fd >= 0) { munmap((void*)dict_raw, dict_raw_len); close(dict_raw_fd); }
+        else if (dict_is_heap) g_free((void*)dict_raw);
         g_free(idx_data);
         return NULL;
     }
@@ -752,7 +835,8 @@ DictMmap* parse_stardict(const char *ifo_path, volatile gint *cancel_flag, gint 
         g_free(cache_path);
         g_free(idx_path);
         g_free(dict_path);
-        g_free(dict_raw);
+        if (dict_raw_fd >= 0) { munmap((void*)dict_raw, dict_raw_len); close(dict_raw_fd); }
+        else if (dict_is_heap) g_free((void*)dict_raw);
         g_free(idx_data);
         return NULL;
     }
@@ -767,19 +851,22 @@ DictMmap* parse_stardict(const char *ifo_path, volatile gint *cancel_flag, gint 
     if (built && entry_count > 0 && entries) {
         dict_cache_builder_flush(builder);
 
-        /* Read the data portion to use for sorting headwords */
-        FILE *rf = fopen(cache_path, "rb");
-        if (rf) {
+        /* Sort headwords using mmap(MAP_PRIVATE) of the partially-written cache —
+         * this avoids a full malloc+fread copy (fix for RAM bloat). */
+        int sort_fd = open(cache_path, O_RDONLY);
+        if (sort_fd >= 0) {
             struct stat sort_st;
-            int sort_fd = fileno(rf);
             if (fstat(sort_fd, &sort_st) == 0 && sort_st.st_size > 0) {
-                char *cache_data = malloc((size_t)sort_st.st_size);
-                if (cache_data && fread(cache_data, 1, (size_t)sort_st.st_size, rf) == (size_t)sort_st.st_size) {
-                    flat_index_sort_entries(entries, entry_count, cache_data, (size_t)sort_st.st_size);
+                void *sort_map = mmap(NULL, (size_t)sort_st.st_size, PROT_READ,
+                                     MAP_PRIVATE, sort_fd, 0);
+                if (sort_map != MAP_FAILED) {
+                    flat_index_sort_entries(entries, entry_count,
+                                           (const char *)sort_map,
+                                           (size_t)sort_st.st_size);
+                    munmap(sort_map, (size_t)sort_st.st_size);
                 }
-                free(cache_data);
             }
-            fclose(rf);
+            close(sort_fd);
         }
 
         dict_cache_builder_finalize_index_only(builder, entries, (uint64_t)entry_count, 0, sametypesequence);
@@ -788,7 +875,18 @@ DictMmap* parse_stardict(const char *ifo_path, volatile gint *cancel_flag, gint 
     dict_cache_sync_mtime(cache_path, sources, G_N_ELEMENTS(sources));
 
     g_free(entries);
-    g_free(dict_raw);
+
+    /* Release .dict source memory — method depends on how we loaded it */
+    if (dict_raw_fd >= 0) {
+        /* mmap'd plain .dict */
+        if (dict_raw) munmap((void*)dict_raw, dict_raw_len);
+        close(dict_raw_fd);
+    } else if (dict_is_heap) {
+        /* heap-alloc'd small .dz */
+        g_free((void*)dict_raw);
+    }
+    /* index_only_mode: dict_raw == NULL, nothing to free */
+
     g_free(idx_data);
     g_free(idx_path);
     g_free(dict_path);

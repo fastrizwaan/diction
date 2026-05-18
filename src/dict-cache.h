@@ -26,3 +26,7 @@ gboolean dict_cache_prepare_target_path(const char *target_path, guint64 bytes_n
 
 /* Set the mtime of cache_path to match the newest source. */
 void dict_cache_sync_mtime(const char *cache_path, const char **sources, int n_sources);
+
+/* Clean up any orphaned cache files in dicts and fts that do not correspond
+ * to any active dictionaries in active_paths. */
+void dict_cache_garbage_collect(const GPtrArray *active_paths);

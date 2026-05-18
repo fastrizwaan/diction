@@ -118,3 +118,111 @@ void dict_cache_sync_mtime(const char *cache_path, const char **sources, int n_s
         utime(cache_path, &times);
     }
 }
+
+#include <glib/gstdio.h>
+
+void dict_cache_garbage_collect(const GPtrArray *active_paths) {
+    if (!active_paths) return;
+
+    /* Build a set of all active cache hashes */
+    GHashTable *active_hashes = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    for (guint i = 0; i < active_paths->len; i++) {
+        const char *path = g_ptr_array_index(active_paths, i);
+        if (path) {
+            char *hash = g_compute_checksum_for_string(G_CHECKSUM_SHA1, path, -1);
+            g_hash_table_add(active_hashes, hash);
+        }
+    }
+
+    /* 1. Clean dict cache directory */
+    char *dir_path = dict_cache_dir_path();
+    GDir *dir = g_dir_open(dir_path, 0, NULL);
+    if (dir) {
+        const char *name = NULL;
+        guint64 freed_bytes = 0;
+        guint64 deleted_count = 0;
+        
+        while ((name = g_dir_read_name(dir)) != NULL) {
+            /* We only manage cache files that are SHA1 hashes (40-char hex string) */
+            if (strlen(name) == 40) {
+                gboolean is_hex = TRUE;
+                for (int j = 0; j < 40; j++) {
+                    char c = name[j];
+                    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
+                        is_hex = FALSE;
+                        break;
+                    }
+                }
+                if (is_hex) {
+                    if (!g_hash_table_contains(active_hashes, name)) {
+                        char *file_path = g_build_filename(dir_path, name, NULL);
+                        struct stat st;
+                        if (stat(file_path, &st) == 0) {
+                            freed_bytes += (guint64)st.st_size;
+                        }
+                        if (g_unlink(file_path) == 0) {
+                            deleted_count++;
+                        }
+                        g_free(file_path);
+                    }
+                }
+            }
+        }
+        g_dir_close(dir);
+        if (deleted_count > 0) {
+            fprintf(stderr, "[CACHE GC] Cleaned up %" G_GUINT64_FORMAT " orphaned dictionary cache files, freeing %" G_GUINT64_FORMAT " bytes.\n",
+                    deleted_count, freed_bytes);
+        }
+    }
+    g_free(dir_path);
+
+    /* 2. Clean fts database directory */
+    const char *base = dict_cache_base_dir();
+    char *fts_dir = g_build_filename(base, "diction", "fts", NULL);
+    GDir *fdir = g_dir_open(fts_dir, 0, NULL);
+    if (fdir) {
+        const char *name = NULL;
+        guint64 freed_bytes = 0;
+        guint64 deleted_count = 0;
+
+        while ((name = g_dir_read_name(fdir)) != NULL) {
+            /* We clean files starting with a 40-character SHA1 hash */
+            if (strlen(name) >= 40) {
+                gboolean is_hex = TRUE;
+                for (int j = 0; j < 40; j++) {
+                    char c = name[j];
+                    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
+                        is_hex = FALSE;
+                        break;
+                    }
+                }
+                if (is_hex) {
+                    /* Get the 40-char hash prefix */
+                    char hash_prefix[41];
+                    strncpy(hash_prefix, name, 40);
+                    hash_prefix[40] = '\0';
+
+                    if (!g_hash_table_contains(active_hashes, hash_prefix)) {
+                        char *file_path = g_build_filename(fts_dir, name, NULL);
+                        struct stat st;
+                        if (stat(file_path, &st) == 0) {
+                            freed_bytes += (guint64)st.st_size;
+                        }
+                        if (g_unlink(file_path) == 0) {
+                            deleted_count++;
+                        }
+                        g_free(file_path);
+                    }
+                }
+            }
+        }
+        g_dir_close(fdir);
+        if (deleted_count > 0) {
+            fprintf(stderr, "[CACHE GC] Cleaned up %" G_GUINT64_FORMAT " orphaned FTS SQLite database files, freeing %" G_GUINT64_FORMAT " bytes.\n",
+                    deleted_count, freed_bytes);
+        }
+    }
+    g_free(fts_dir);
+    
+    g_hash_table_unref(active_hashes);
+}

@@ -445,19 +445,20 @@ static GPtrArray *mdx_collect_mdd_paths(const char *mdx_path) {
     return paths;
 }
 
-typedef struct { uint64_t off; uint64_t end_off; char *name; } MDDRes;
-static int mdd_res_cmp(const void *a, const void *b) {
-    const char *na = ((MDDRes*)a)->name;
-    const char *nb = ((MDDRes*)b)->name;
-    return strcasecmp(na, nb);
-}
-
 typedef struct { 
     uint64_t comp; 
     uint64_t decomp; 
     uint64_t file_offset; 
     uint64_t decomp_offset; 
 } MDD_RBI;
+
+typedef struct {
+    uint64_t comp_size;
+    uint64_t decomp_size;
+    char *head_word;
+    char *tail_word;
+    uint64_t file_offset;
+} MDD_KBI;
 
 typedef struct {
     char *mdd_path;
@@ -472,14 +473,109 @@ typedef struct {
     uint64_t nrb;
     uint64_t total_decomp;
 
-    MDDRes *resources;
-    size_t res_count;
+    MDD_KBI *kbis;
+    size_t nkb;
 } MddFileState;
 
 typedef struct {
     MddFileState **files;
     size_t num_files;
 } MddBackend;
+
+static gboolean mdd_find_resource(MddFileState *fs, const char *query, uint64_t *out_start_off, uint64_t *out_end_off) {
+    if (!fs || !fs->kbis || fs->nkb == 0) return FALSE;
+    
+    int l = 0, r = (int)fs->nkb - 1;
+    int found_kb = -1;
+    while (l <= r) {
+        int m = l + (r - l) / 2;
+        int cmp_head = strcasecmp(query, fs->kbis[m].head_word);
+        int cmp_tail = strcasecmp(query, fs->kbis[m].tail_word);
+        
+        if (cmp_head >= 0 && cmp_tail <= 0) {
+            found_kb = m;
+            break;
+        } else if (cmp_head < 0) {
+            r = m - 1;
+        } else {
+            l = m + 1;
+        }
+    }
+    
+    if (found_kb < 0) return FALSE;
+    
+    FILE *f = fopen(fs->mdd_path, "rb");
+    if (!f) return FALSE;
+    
+    fseek(f, fs->kbis[found_kb].file_offset, SEEK_SET);
+    unsigned char *comp = g_malloc(fs->kbis[found_kb].comp_size);
+    if (!comp || fread(comp, 1, fs->kbis[found_kb].comp_size, f) != fs->kbis[found_kb].comp_size) {
+        g_free(comp); fclose(f); return FALSE;
+    }
+    
+    size_t dlen = 0;
+    unsigned char *data = mdx_block_decompress(comp, fs->kbis[found_kb].comp_size, fs->kbis[found_kb].decomp_size, &dlen);
+    g_free(comp);
+    if (!data) { fclose(f); return FALSE; }
+    
+    gboolean found = FALSE;
+    gboolean got_end = FALSE;
+    const unsigned char *hp = data, *he = data + dlen;
+    
+    while (hp < he) {
+        if (hp + fs->num_size > he) break;
+        uint64_t current_off = (fs->num_size == 8) ? ru64be(hp) : ru32be(hp);
+        hp += fs->num_size;
+        
+        char word[1024];
+        if (fs->encoding_is_utf16) {
+            const unsigned char *ws = hp;
+            while (hp + 1 < he && !(hp[0] == 0 && hp[1] == 0)) hp += 2;
+            utf16le_to_utf8(ws, hp - ws, word, sizeof(word)-1);
+            if (hp + 1 < he) hp += 2;
+        } else {
+            const unsigned char *ws = hp;
+            while (hp < he && *hp != '\0') hp++;
+            size_t wl = hp - ws; if (wl > 1023) wl = 1023;
+            memcpy(word, ws, wl); word[wl] = '\0';
+            if (hp < he) hp++;
+        }
+        mdx_normalize_resource_path(word);
+        
+        if (found) {
+            if (out_end_off) *out_end_off = current_off;
+            got_end = TRUE;
+            break;
+        }
+        
+        if (strcasecmp(query, word) == 0) {
+            found = TRUE;
+            if (out_start_off) *out_start_off = current_off;
+        }
+    }
+    g_free(data);
+    
+    if (found && !got_end) {
+        if (found_kb + 1 < fs->nkb) {
+            fseek(f, fs->kbis[found_kb + 1].file_offset, SEEK_SET);
+            unsigned char *next_comp = g_malloc(fs->kbis[found_kb + 1].comp_size);
+            if (next_comp && fread(next_comp, 1, fs->kbis[found_kb + 1].comp_size, f) == fs->kbis[found_kb + 1].comp_size) {
+                size_t ndlen = 0;
+                unsigned char *next_data = mdx_block_decompress(next_comp, fs->kbis[found_kb + 1].comp_size, fs->kbis[found_kb + 1].decomp_size, &ndlen);
+                if (next_data && ndlen >= (size_t)fs->num_size) {
+                    if (out_end_off) *out_end_off = (fs->num_size == 8) ? ru64be(next_data) : ru32be(next_data);
+                }
+                g_free(next_data);
+            }
+            g_free(next_comp);
+        } else {
+            if (out_end_off) *out_end_off = fs->total_decomp;
+        }
+    }
+    
+    fclose(f);
+    return found;
+}
 
 static char* mdd_get(ResourceReader *reader, const char *name) {
     if (!reader || !name) return NULL;
@@ -491,21 +587,9 @@ static char* mdd_get(ResourceReader *reader, const char *name) {
 
     for (size_t f = 0; f < mdd->num_files; f++) {
         MddFileState *fs = mdd->files[f];
-        int l = 0, r = (int)fs->res_count - 1;
-        int found = -1;
+        uint64_t start_off = 0, end_off = 0;
         
-        while (l <= r) {
-            int m = l + (r - l) / 2;
-            int c = strcasecmp(query, fs->resources[m].name);
-            if (c == 0) { found = m; break; }
-            else if (c < 0) r = m - 1;
-            else l = m + 1;
-        }
-
-        if (found >= 0) {
-            uint64_t start_off = fs->resources[found].off;
-            uint64_t end_off = fs->resources[found].end_off;
-            
+        if (mdd_find_resource(fs, query, &start_off, &end_off)) {
             char *dest_path = g_build_filename(resource_reader_get_dir(reader), query, NULL);
             if (g_file_test(dest_path, G_FILE_TEST_EXISTS)) {
                 g_free(query);
@@ -571,15 +655,10 @@ static gboolean mdd_has(ResourceReader *reader, const char *name) {
 
     for (size_t f = 0; f < mdd->num_files; f++) {
         MddFileState *fs = mdd->files[f];
-        int l = 0, r = (int)fs->res_count - 1;
-        while (l <= r) {
-            int m = l + (r - l) / 2;
-            int c = strcasecmp(query, fs->resources[m].name);
-            if (c == 0) { res = TRUE; break; }
-            else if (c < 0) r = m - 1;
-            else l = m + 1;
+        if (mdd_find_resource(fs, query, NULL, NULL)) {
+            res = TRUE;
+            break;
         }
-        if (res) break;
     }
     g_free(query);
     return res;
@@ -592,8 +671,13 @@ static void mdd_close(ResourceReader *reader) {
         MddFileState *fs = mdd->files[f];
         g_free(fs->mdd_path);
         g_free(fs->rbis);
-        for (size_t i = 0; i < fs->res_count; i++) g_free(fs->resources[i].name);
-        g_free(fs->resources);
+        if (fs->kbis) {
+            for (size_t i = 0; i < fs->nkb; i++) {
+                g_free(fs->kbis[i].head_word);
+                g_free(fs->kbis[i].tail_word);
+            }
+            g_free(fs->kbis);
+        }
         g_free(fs);
     }
     g_free(mdd->files);
@@ -640,12 +724,11 @@ static ResourceReader* mdx_open_mdd_reader(GPtrArray *mdd_paths, const char *ext
                             char *encoding = g_strndup(encoding_start + 1, strchr(encoding_start + 1, '"') - encoding_start - 1);
                             if (strlen(encoding) > 0) {
                                 mdd_encoding_is_utf16 = (g_ascii_strcasecmp(encoding, "UTF-16") == 0 || g_ascii_strcasecmp(encoding, "UTF16") == 0);
-                            } else {
-                                mdd_encoding_is_utf16 = mdd_is_v2 ? 1 : encoding_is_utf16;
                             }
                             g_free(encoding);
-                        } else mdd_encoding_is_utf16 = mdd_is_v2 ? 1 : encoding_is_utf16;
-                    } else mdd_encoding_is_utf16 = mdd_is_v2 ? 1 : encoding_is_utf16;
+                        }
+                    }
+                    mdd_encoding_is_utf16 = 1; // MDD keywords are ALWAYS UTF-16
                     char *xp = strstr(ascii_hdr, "Encrypted=\"");
                     if (xp) mdd_encrypted = atoi(xp + 11);
                     g_free(ascii_hdr);
@@ -674,11 +757,12 @@ static ResourceReader* mdx_open_mdd_reader(GPtrArray *mdd_paths, const char *ext
         if (!kbi_raw || fread(kbi_raw, 1, kbi_comp, f) != kbi_comp) { g_free(kbi_raw); fclose(f); continue; }
         
         long kb_data_pos = ftell(f);
-        typedef struct { uint64_t comp, decomp; } KBI;
-        KBI *kbis = g_malloc0_n(num_key_blocks, sizeof(KBI));
+        MDD_KBI *kbis = g_malloc0_n(num_key_blocks, sizeof(MDD_KBI));
         if (!kbis) { g_free(kbi_raw); fclose(f); continue; }
         
         size_t kbc = 0;
+        uint64_t current_file_offset = kb_data_pos;
+        
         if (mdd_is_v2) {
             if (mdd_encrypted & 2) mdx_decrypt_key_block_info(kbi_raw, kbi_comp);
             size_t dlen = 0;
@@ -688,13 +772,47 @@ static ResourceReader* mdx_open_mdd_reader(GPtrArray *mdd_paths, const char *ext
                 while (ip < ie && kbc < num_key_blocks) {
                     if (ip + mdd_num_size > ie) break;
                     ip += mdd_num_size;
+                    
                     uint32_t head_size = read_u8or16(&ip, 1);
+                    char *head_word = NULL;
+                    if (head_size > 0) {
+                        char word[1024];
+                        if (mdd_encoding_is_utf16) {
+                            utf16le_to_utf8(ip, head_size * 2, word, sizeof(word)-1);
+                        } else {
+                            size_t wl = head_size; if (wl > 1023) wl = 1023;
+                            memcpy(word, ip, wl); word[wl] = '\0';
+                        }
+                        mdx_normalize_resource_path(word);
+                        head_word = g_strdup(word);
+                    }
                     ip += (mdd_encoding_is_utf16 ? (head_size + 1) * 2 : (head_size + 1));
+                    
                     uint32_t tail_size = read_u8or16(&ip, 1);
+                    char *tail_word = NULL;
+                    if (tail_size > 0) {
+                        char word[1024];
+                        if (mdd_encoding_is_utf16) {
+                            utf16le_to_utf8(ip, tail_size * 2, word, sizeof(word)-1);
+                        } else {
+                            size_t wl = tail_size; if (wl > 1023) wl = 1023;
+                            memcpy(word, ip, wl); word[wl] = '\0';
+                        }
+                        mdx_normalize_resource_path(word);
+                        tail_word = g_strdup(word);
+                    }
                     ip += (mdd_encoding_is_utf16 ? (tail_size + 1) * 2 : (tail_size + 1));
-                    if (ip + mdd_num_size * 2 > ie) break;
-                    kbis[kbc].comp = read_num(&ip, mdd_num_size);
-                    kbis[kbc].decomp = read_num(&ip, mdd_num_size);
+                    
+                    if (ip + mdd_num_size * 2 > ie) {
+                        g_free(head_word); g_free(tail_word); break;
+                    }
+                    kbis[kbc].comp_size = read_num(&ip, mdd_num_size);
+                    kbis[kbc].decomp_size = read_num(&ip, mdd_num_size);
+                    kbis[kbc].head_word = head_word ? head_word : g_strdup("");
+                    kbis[kbc].tail_word = tail_word ? tail_word : g_strdup("");
+                    kbis[kbc].file_offset = current_file_offset;
+                    current_file_offset += kbis[kbc].comp_size;
+                    
                     kbc++;
                 }
                 g_free(data);
@@ -703,57 +821,52 @@ static ResourceReader* mdx_open_mdd_reader(GPtrArray *mdd_paths, const char *ext
             const unsigned char *ip = kbi_raw, *ie = kbi_raw + kbi_comp;
             while (ip < ie && kbc < num_key_blocks) {
                 ip += mdd_num_size;
+                
                 uint32_t head_size = read_u8or16(&ip, 0);
-                ip += head_size;
+                char *head_word = NULL;
+                if (head_size > 0) {
+                    char word[1024];
+                    if (mdd_encoding_is_utf16) {
+                        utf16le_to_utf8(ip, head_size * 2, word, sizeof(word)-1);
+                    } else {
+                        size_t wl = head_size; if (wl > 1023) wl = 1023;
+                        memcpy(word, ip, wl); word[wl] = '\0';
+                    }
+                    mdx_normalize_resource_path(word);
+                    head_word = g_strdup(word);
+                }
+                ip += head_size; // v1 doesn't have trailing NUL
+                
                 uint32_t tail_size = read_u8or16(&ip, 0);
-                ip += tail_size;
-                if (ip + mdd_num_size * 2 > ie) break;
-                kbis[kbc].comp = read_num(&ip, mdd_num_size);
-                kbis[kbc].decomp = read_num(&ip, mdd_num_size);
+                char *tail_word = NULL;
+                if (tail_size > 0) {
+                    char word[1024];
+                    if (mdd_encoding_is_utf16) {
+                        utf16le_to_utf8(ip, tail_size * 2, word, sizeof(word)-1);
+                    } else {
+                        size_t wl = tail_size; if (wl > 1023) wl = 1023;
+                        memcpy(word, ip, wl); word[wl] = '\0';
+                    }
+                    mdx_normalize_resource_path(word);
+                    tail_word = g_strdup(word);
+                }
+                ip += tail_size; // v1 doesn't have trailing NUL
+                
+                if (ip + mdd_num_size * 2 > ie) {
+                    g_free(head_word); g_free(tail_word); break;
+                }
+                kbis[kbc].comp_size = read_num(&ip, mdd_num_size);
+                kbis[kbc].decomp_size = read_num(&ip, mdd_num_size);
+                kbis[kbc].head_word = head_word ? head_word : g_strdup("");
+                kbis[kbc].tail_word = tail_word ? tail_word : g_strdup("");
+                kbis[kbc].file_offset = current_file_offset;
+                current_file_offset += kbis[kbc].comp_size;
+                
                 kbc++;
             }
         }
         g_free(kbi_raw);
         
-        MDDRes *resources = g_malloc0_n(num_entries, sizeof(MDDRes));
-        if (!resources) { g_free(kbis); fclose(f); continue; }
-        
-        size_t res_count = 0;
-        fseek(f, kb_data_pos, SEEK_SET);
-        for (size_t bi = 0; bi < kbc; bi++) {
-            if (cancel_flag && g_atomic_int_get(cancel_flag) != expected) break;
-            unsigned char *comp = g_malloc(kbis[bi].comp);
-            if (!comp || fread(comp, 1, kbis[bi].comp, f) != kbis[bi].comp) { g_free(comp); continue; }
-            
-            size_t dlen = 0;
-            unsigned char *data = mdx_block_decompress(comp, kbis[bi].comp, kbis[bi].decomp, &dlen);
-            g_free(comp);
-            if (!data) continue;
-            
-            const unsigned char *hp = data, *he = data + dlen;
-            while (hp < he && res_count < num_entries) {
-                if (hp + mdd_num_size > he) break;
-                resources[res_count].off = (mdd_num_size == 8) ? ru64be(hp) : ru32be(hp);
-                hp += mdd_num_size;
-                char word[1024];
-                if (mdd_encoding_is_utf16) {
-                    const unsigned char *ws = hp;
-                    while (hp + 1 < he && !(hp[0] == 0 && hp[1] == 0)) hp += 2;
-                    utf16le_to_utf8(ws, hp - ws, word, sizeof(word)-1);
-                    if (hp + 1 < he) hp += 2;
-                } else {
-                    const unsigned char *ws = hp;
-                    while (hp < he && *hp != '\0') hp++;
-                    size_t wl = hp - ws; if (wl > 1023) wl = 1023;
-                    memcpy(word, ws, wl); word[wl] = '\0';
-                    if (hp < he) hp++;
-                }
-                mdx_normalize_resource_path(word);
-                resources[res_count].name = g_strdup(word);
-                res_count++;
-            }
-            g_free(data);
-        }
         fseek(f, kb_data_pos + kb_data_size, SEEK_SET);
         unsigned char rbh[64]; if(fread(rbh, 1, mdd_num_size * 4, f) != (size_t)(mdd_num_size * 4)) {}
         const unsigned char *rp = rbh;
@@ -778,11 +891,6 @@ static ResourceReader* mdx_open_mdd_reader(GPtrArray *mdd_paths, const char *ext
                 current_decomp_offset += rbis[i].decomp;
             }
             
-            for (size_t i = 0; i < res_count; i++) {
-                resources[i].end_off = (i + 1 < res_count) ? resources[i+1].off : current_decomp_offset;
-            }
-            qsort(resources, res_count, sizeof(MDDRes), mdd_res_cmp);
-            
             MddFileState *fs = g_new0(MddFileState, 1);
             fs->mdd_path = g_strdup(mdd_path);
             fs->is_v2 = mdd_is_v2;
@@ -794,16 +902,17 @@ static ResourceReader* mdx_open_mdd_reader(GPtrArray *mdd_paths, const char *ext
             fs->rbis = rbis;
             fs->nrb = nrb;
             fs->total_decomp = current_decomp_offset;
-            fs->resources = resources;
-            fs->res_count = res_count;
+            fs->kbis = kbis;
+            fs->nkb = kbc;
             
             mdd->files[mdd->num_files++] = fs;
         } else {
-            for(size_t i=0; i<res_count; i++) g_free(resources[i].name);
-            g_free(resources);
+            for(size_t i=0; i<kbc; i++) {
+                g_free(kbis[i].head_word);
+                g_free(kbis[i].tail_word);
+            }
+            g_free(kbis);
         }
-        
-        g_free(kbis);
         fclose(f);
     }
     
@@ -944,9 +1053,93 @@ static void mdx_detect_icon(DictMmap *dict, const char *path) {
     }
 }
 
+static int cmp_tree_entry_doff(const void *a, const void *b) {
+    const FlatTreeEntry *ea = a;
+    const FlatTreeEntry *eb = b;
+    if (ea->d_off < eb->d_off) return -1;
+    if (ea->d_off > eb->d_off) return 1;
+    return 0;
+}
+
+static gboolean mdx_is_valid_header(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return FALSE;
+
+    struct stat st;
+    if (fstat(fileno(f), &st) != 0) {
+        fclose(f);
+        return FALSE;
+    }
+
+    unsigned char buf4[4];
+    if (fread(buf4, 1, 4, f) != 4) {
+        fclose(f);
+        return FALSE;
+    }
+
+    uint32_t header_text_size = ((uint32_t)buf4[0] << 24) | ((uint32_t)buf4[1] << 16) |
+                               ((uint32_t)buf4[2] << 8) | buf4[3];
+
+    if (header_text_size < 10 || header_text_size > 10 * 1024 * 1024) {
+        fclose(f);
+        return FALSE;
+    }
+
+    if ((guint64)st.st_size < 4 + (guint64)header_text_size + 4) {
+        fclose(f);
+        return FALSE;
+    }
+
+    unsigned char *header_raw = g_malloc(header_text_size);
+    if (!header_raw) {
+        fclose(f);
+        return FALSE;
+    }
+
+    if (fread(header_raw, 1, header_text_size, f) != header_text_size) {
+        g_free(header_raw);
+        fclose(f);
+        return FALSE;
+    }
+
+    fclose(f);
+
+    char *utf8_hdr = NULL;
+    GError *err = NULL;
+    utf8_hdr = g_convert((const char*)header_raw, header_text_size, "UTF-8", "UTF-16LE", NULL, NULL, &err);
+    if (!utf8_hdr || !strstr(utf8_hdr, "Encoding=")) {
+        if (err) { g_error_free(err); err = NULL; }
+        g_free(utf8_hdr);
+        if (g_utf8_validate((const char*)header_raw, header_text_size, NULL)) {
+            utf8_hdr = g_strndup((const char*)header_raw, header_text_size);
+        } else {
+            utf8_hdr = g_convert((const char*)header_raw, header_text_size, "UTF-8", "ISO-8859-1", NULL, NULL, &err);
+        }
+    }
+    if (err) g_error_free(err);
+    g_free(header_raw);
+
+    if (!utf8_hdr) {
+        return FALSE;
+    }
+
+    char *v_ver = extract_header_attribute(utf8_hdr, "GeneratedByEngineVersion");
+    char *title = extract_header_attribute(utf8_hdr, "Title");
+    gboolean has_dict_tag = (strstr(utf8_hdr, "<Dictionary") != NULL || strstr(utf8_hdr, "<dictionary") != NULL);
+    gboolean is_valid = has_dict_tag && (v_ver != NULL || title != NULL);
+    g_free(v_ver);
+    g_free(title);
+    g_free(utf8_hdr);
+
+    return is_valid;
+}
 
 DictMmap *parse_mdx_file(const char *path, volatile gint *cancel_flag, gint expected) {
     if (cancel_flag && g_atomic_int_get(cancel_flag) != expected) return NULL;
+    if (!mdx_is_valid_header(path)) {
+        fprintf(stderr, "[MDX] Ignoring invalid/non-dictionary MDX file: %s\n", path);
+        return NULL;
+    }
     dict_cache_ensure_dir();
 
     char *cache_path = dict_cache_path_for(path);
@@ -1000,13 +1193,21 @@ DictMmap *parse_mdx_file(const char *path, volatile gint *cancel_flag, gint expe
                     if (title) {
                         char *stripped = strip_html_tags(title);
                         g_free(title);
-                        if (stripped && (strcmp(stripped, "Title (No HTML code allowed)") == 0 || strlen(stripped) == 0)) {
+                        if (!stripped || strcmp(stripped, "Title (No HTML code allowed)") == 0 || strlen(stripped) == 0) {
                             g_free(stripped);
                             title = NULL;
                         } else {
                             title = stripped;
                             fprintf(stderr, "[MDX DEBUG] Title: '%s'\n", title);
                         }
+                    }
+
+                    if (!title) {
+                        char *basename = g_path_get_basename(path);
+                        char *dot = strrchr(basename, '.');
+                        if (dot) *dot = '\0';
+                        title = basename;
+                        fprintf(stderr, "[MDX DEBUG] Fallback Title from filename: '%s'\n", title);
                     }
 
                     char *v_ver = extract_header_attribute(utf8_hdr, "GeneratedByEngineVersion");
@@ -1051,10 +1252,39 @@ DictMmap *parse_mdx_file(const char *path, volatile gint *cancel_flag, gint expe
                     }
 
                     g_free(utf8_hdr);
+                } else {
+                    g_free(header_raw);
+                    if (fh) fclose(fh);
+                    if (cancel_flag) g_atomic_int_set(cancel_flag, expected - 1);
+                    return NULL;
                 }
                 g_free(header_raw);
+            } else {
+                g_free(header_raw);
+                if (fh) fclose(fh);
+                if (cancel_flag) g_atomic_int_set(cancel_flag, expected - 1);
+                return NULL;
             }
+        } else {
+            if (fh) fclose(fh);
+            if (cancel_flag) g_atomic_int_set(cancel_flag, expected - 1);
+            return NULL;
         }
+    } else {
+        if (fh) fclose(fh);
+        if (cancel_flag) g_atomic_int_set(cancel_flag, expected - 1);
+        return NULL;
+    }
+
+    if (!title || (!is_v2 && num_size != 4 && num_size != 8)) {
+        // Not a valid MDict MDX file (e.g. React Markdown .mdx)
+        g_free(title);
+        g_free(stylesheet);
+        g_free(s_lang);
+        g_free(t_lang);
+        if (fh) fclose(fh);
+        if (cancel_flag) g_atomic_int_set(cancel_flag, expected - 1);
+        return NULL;
     }
 
     /* ───────────────────────────── */
@@ -1147,7 +1377,18 @@ rebuild_cache:
 
     int kbh_size = is_v2 ? (num_size * 5) : (num_size * 4);
     unsigned char *kbh = g_malloc(kbh_size);
-    fread(kbh, 1, kbh_size, fh);
+    if (fread(kbh, 1, kbh_size, fh) != (size_t)kbh_size) {
+        g_free(kbh);
+        if (fh) fclose(fh);
+        g_free(cache_path);
+        g_free(stylesheet);
+        g_free(title);
+        g_free(s_lang);
+        g_free(t_lang);
+        g_free(source_dir);
+        g_free(dict_encoding);
+        return NULL;
+    }
 
     const unsigned char *kp = kbh;
     uint64_t num_key_blocks = read_num(&kp, num_size);
@@ -1157,6 +1398,19 @@ rebuild_cache:
     uint64_t kbi_comp = read_num(&kp, num_size);
     uint64_t kb_data_size = read_num(&kp, num_size);
     g_free(kbh);
+    
+    // Sanity check num_entries to prevent 50+ GB allocations
+    if (num_entries > 100000000) {
+        if (fh) fclose(fh);
+        g_free(cache_path);
+        g_free(stylesheet);
+        g_free(title);
+        g_free(s_lang);
+        g_free(t_lang);
+        g_free(source_dir);
+        g_free(dict_encoding);
+        return NULL;
+    }
 
 #include "dict-cache-builder.h"
 
@@ -1164,12 +1418,30 @@ rebuild_cache:
     if (!builder) {
         if (fh) fclose(fh);
         g_free(cache_path);
+        g_free(stylesheet);
+        g_free(title);
+        g_free(s_lang);
+        g_free(t_lang);
+        g_free(source_dir);
+        g_free(dict_encoding);
         return NULL;
     }
 
     if (is_v2) fseek(fh, 4, SEEK_CUR);
     unsigned char *kbi_raw = g_malloc(kbi_comp);
-    fread(kbi_raw, 1, kbi_comp, fh);
+    if (fread(kbi_raw, 1, kbi_comp, fh) != kbi_comp) {
+        g_free(kbi_raw);
+        dict_cache_builder_free(builder);
+        if (fh) fclose(fh);
+        g_free(cache_path);
+        g_free(stylesheet);
+        g_free(title);
+        g_free(s_lang);
+        g_free(t_lang);
+        g_free(source_dir);
+        g_free(dict_encoding);
+        return NULL;
+    }
 
     FlatTreeEntry *tree_entries = g_malloc0_n(num_entries, sizeof(FlatTreeEntry));
     size_t valid_count = 0;
@@ -1192,15 +1464,26 @@ rebuild_cache:
     if (kbi_data) {
         const unsigned char *ip = kbi_data, *ie = kbi_data + kbi_dlen;
         while (ip < ie && valid_count < num_entries) {
+            if (ip + num_size > ie) break;
             ip += num_size;
+            
+            if (ip >= ie) break;
             uint32_t head_size = read_u8or16(&ip, is_v2);
-            ip += (encoding_is_utf16
-                       ? (head_size + (is_v2 ? 1 : 0)) * 2
-                       : head_size + (is_v2 ? 1 : 0));
+            size_t head_bytes = (encoding_is_utf16
+                                 ? (head_size + (is_v2 ? 1 : 0)) * 2
+                                 : head_size + (is_v2 ? 1 : 0));
+            if (ip + head_bytes > ie) break;
+            ip += head_bytes;
+            
+            if (ip >= ie) break;
             uint32_t tail_size = read_u8or16(&ip, is_v2);
-            ip += (encoding_is_utf16
-                       ? (tail_size + (is_v2 ? 1 : 0)) * 2
-                       : tail_size + (is_v2 ? 1 : 0));
+            size_t tail_bytes = (encoding_is_utf16
+                                 ? (tail_size + (is_v2 ? 1 : 0)) * 2
+                                 : tail_size + (is_v2 ? 1 : 0));
+            if (ip + tail_bytes > ie) break;
+            ip += tail_bytes;
+            
+            if (ip + num_size * 2 > ie) break;
             uint64_t comp_size = read_num(&ip, num_size);
             uint64_t decomp_size = read_num(&ip, num_size);
 
@@ -1212,6 +1495,7 @@ rebuild_cache:
                 if (kb_data) {
                     const unsigned char *kp_ent = kb_data, *ke_ent = kb_data + kb_dlen;
                     while (kp_ent < ke_ent && valid_count < num_entries) {
+                        if (kp_ent + num_size > ke_ent) break;
                         uint64_t id = read_num(&kp_ent, num_size);
                         char word[1024];
                         if (encoding_is_utf16) {
@@ -1307,6 +1591,8 @@ rebuild_cache:
         rbs[i].comp = read_num(&ppb, num_size);
         rbs[i].decomp = read_num(&ppb, num_size);
     }
+    /* Sort by d_off to ensure monotonic processing */
+    qsort(tree_entries, valid_count, sizeof(FlatTreeEntry), cmp_tree_entry_doff);
 
     uint64_t current_decomp_offset = 0;
     for (uint64_t j = 0; j < nrb; j++) {
@@ -1325,7 +1611,13 @@ rebuild_cache:
                     uint64_t rel_off = (uint64_t)tree_entries[entry_idx].d_off - current_decomp_offset;
                     
                     /* Find next entry to determine record length */
-                    uint64_t next_id = (entry_idx + 1 < valid_count) ? (uint64_t)tree_entries[entry_idx + 1].d_off : (uint64_t)-1;
+                    uint64_t next_id = (uint64_t)-1;
+                    for (size_t k = entry_idx + 1; k < valid_count; k++) {
+                        if (tree_entries[k].d_off > tree_entries[entry_idx].d_off) {
+                            next_id = tree_entries[k].d_off;
+                            break;
+                        }
+                    }
                     
                     uint64_t rec_len;
                     if (next_id != (uint64_t)-1 && next_id < current_decomp_offset + dlen) {

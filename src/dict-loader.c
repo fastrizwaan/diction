@@ -28,6 +28,7 @@ static size_t convert_utf16le_to_utf8(const unsigned char *in_buf, size_t in_len
                 wc = 0x10000 + ((wc & 0x3FF) << 10) + (wc2 & 0x3FF);
             }
         }
+        if (wc >= 0xD800 && wc <= 0xDFFF) { wc = 0xFFFD; }
         if (wc < 0x80) { out_buf[out++] = wc; }
         else if (wc < 0x800) {
             out_buf[out++] = 0xC0 | (wc >> 6);
@@ -58,6 +59,7 @@ static size_t convert_utf16be_to_utf8(const unsigned char *in_buf, size_t in_len
                 wc = 0x10000 + ((wc & 0x3FF) << 10) + (wc2 & 0x3FF);
             }
         }
+        if (wc >= 0xD800 && wc <= 0xDFFF) { wc = 0xFFFD; }
         if (wc < 0x80) { out_buf[out++] = wc; }
         else if (wc < 0x800) {
             out_buf[out++] = 0xC0 | (wc >> 6);
@@ -76,7 +78,7 @@ static size_t convert_utf16be_to_utf8(const unsigned char *in_buf, size_t in_len
     return out;
 }
 
-const char* dict_get_definition(DictMmap *dict, const FlatTreeEntry *entry, size_t *out_len, char **out_to_free) {
+static const char* dict_get_definition_raw(DictMmap *dict, const FlatTreeEntry *entry, size_t *out_len, char **out_to_free) {
     if (!dict || !entry) return NULL;
     if (out_len) *out_len = entry->d_len;
     if (out_to_free) *out_to_free = NULL;
@@ -151,6 +153,33 @@ const char* dict_get_definition(DictMmap *dict, const FlatTreeEntry *entry, size
     /* 4. Fallback (if using old in-memory ->data logic) */
     return dict->data + entry->d_off;
 }
+
+const char* dict_get_definition(DictMmap *dict, const FlatTreeEntry *entry, size_t *out_len, char **out_to_free) {
+    size_t raw_len = 0;
+    char *raw_to_free = NULL;
+    const char *raw_ptr = dict_get_definition_raw(dict, entry, &raw_len, &raw_to_free);
+    
+    if (!raw_ptr) {
+        if (out_len) *out_len = 0;
+        if (out_to_free) *out_to_free = NULL;
+        return NULL;
+    }
+    
+    if (g_utf8_validate(raw_ptr, raw_len, NULL)) {
+        if (out_len) *out_len = raw_len;
+        if (out_to_free) *out_to_free = raw_to_free;
+        return raw_ptr;
+    }
+    
+    /* Enforce valid UTF-8 to prevent WebKit and SQLite crashes */
+    char *valid_str = g_utf8_make_valid(raw_ptr, raw_len);
+    if (raw_to_free) g_free(raw_to_free);
+    
+    if (out_len) *out_len = strlen(valid_str);
+    if (out_to_free) *out_to_free = valid_str;
+    return valid_str;
+}
+
 
 size_t dict_search_fts(DictMmap *dict, const char *dict_path,
                        const char *query, GRegex *regex,
@@ -640,6 +669,7 @@ DictEntry* dict_loader_scan_directory(const char *dirpath) {
             DictEntry *entry = g_new0(DictEntry, 1);
             entry->name = g_strdup(loaded->name && *loaded->name ? loaded->name : c->name);
             entry->path = g_strdup(c->path);
+            entry->dict_id = settings_make_dictionary_id(entry->path);
             entry->format = c->format;
             entry->dict = loaded;
             entry->ref_count = 1; entry->magic = 0xDEADC0DE;
@@ -712,6 +742,7 @@ void dict_loader_scan_directory_streaming(const char *dirpath, DictLoaderCallbac
             DictEntry *entry = g_new0(DictEntry, 1);
             entry->name = g_strdup(loaded->name && *loaded->name ? loaded->name : c->name);
             entry->path = g_strdup(c->path);
+            entry->dict_id = settings_make_dictionary_id(entry->path);
             entry->format = c->format;
             entry->dict = loaded;
             entry->ref_count = 1; entry->magic = 0xDEADC0DE;

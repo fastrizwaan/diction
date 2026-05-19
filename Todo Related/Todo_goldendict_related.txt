@@ -1,0 +1,15 @@
+migrate from goldendict(-ng)
+both from flatpak/system 
+
+need to have read access to goldendict configurations
+
+1. create dictionaries cache from goldendict/goldendict-ng
+2. create groups based on on goldendict/gd-ng
+3. Dictionary groups are to be migrated from Goldendict / Goldendict-ng
+
+like WineCharm does with WineZGUI.
+
+Full Text Search, add additional options to Match case, Exact Match, Substring, Regex
+How to search for entries containing "love" but not "lover" 
+
+

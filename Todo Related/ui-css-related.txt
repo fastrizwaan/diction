@@ -1,0 +1,16 @@
+'Goria, Giovanni Giuseppe' -> Wikitionary mdx. not loading 
+goria
+📘 Wiktionary
+" id="zyfq0" onclick="zyfq_t(this)">★◀▶
+
+
+
+'Dates\ of\ 2004'
+'China:\ Asia's\ Emerging\ Superpower'
+
+
+could we add 'Card Styles' and this as "Goldendict"
+
+article-style.css?
+
+also you see that clicking on the arrow hids/show the definition container.

@@ -1,8 +1,8 @@
-# Diction-C
+# Diction
 
 **A high-performance, multi-format offline dictionary.**
 
-Diction-C is a fast, lightweight, and feature-rich dictionary application built in C using GTK4, Libadwaita, and WebKitGTK. It provides a seamless and beautiful user interface for looking up words across multiple offline dictionary formats.
+Diction is a fast, lightweight, and feature-rich dictionary application built in C using GTK4, Libadwaita, and WebKitGTK. It provides a seamless and beautiful user interface for looking up words across multiple offline dictionary formats.
 
 ## Features
 

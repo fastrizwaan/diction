@@ -2183,7 +2183,8 @@ static guint rebuild_dict_entries_from_settings(void) {
             }
 
             DictEntry *entry = NULL;
-            for (DictEntry *curr = old_head; curr; curr = curr->next) {
+            for (guint j = 0; j < old_entries->len; j++) {
+                DictEntry *curr = g_ptr_array_index(old_entries, j);
                 if (curr->path && paths_are_equivalent(curr->path, cfg->path)) {
                     entry = curr;
                     break;
@@ -3483,7 +3484,7 @@ static int append_exact_matches_html(GString *html_res, const char *query, gbool
             continue;
         }
 
-        size_t pos = flat_index_search_fast(e->dict->index, query);
+        size_t pos = flat_index_search(e->dict->index, query);
         while (pos != (size_t)-1) {
             const FlatTreeEntry *res = flat_index_get(e->dict->index, pos);
             if (!res) break;
@@ -3772,45 +3773,20 @@ static void append_rendered_word_html_impl(const char *raw_word, gboolean push_h
                                 query_requests_full_text_search(current_search_query, current_tab_is_full_text_search()));
         }
 
-        char *b64_html = g_base64_encode((const guchar *)html_res->str, html_res->len);
-        char *b64_word = g_base64_encode((const guchar *)query, strlen(query));
-
         WebKitWebView *wv = get_current_web_view();
         if (wv) {
             queue_fts_highlight_for_web_view(wv,
                                              should_highlight_fts ? fts_highlight_query : NULL);
-            webkit_web_view_load_html(wv, html_res->str, "file:///");
+            GString *full_html = g_string_new("<html><body>");
+            char *escaped_query_attr = safe_markup_escape_n(query, -1);
+            g_string_append_printf(full_html, "<div class='word-group' data-word='%s'>", escaped_query_attr);
+            g_free(escaped_query_attr);
+            g_string_append(full_html, html_res->str);
+            g_string_append(full_html, "</div></body></html>");
+
+            webkit_web_view_load_html(wv, full_html->str, "file:///");
+            g_string_free(full_html, TRUE);
         }
-
-        char *js = g_strdup_printf(
-            "var decWord = atob('%s');"
-            "var bytesWord = new Uint8Array(decWord.length);"
-            "for(var i=0; i<decWord.length; i++) bytesWord[i] = decWord.charCodeAt(i);"
-            "var word = new TextDecoder('utf-8').decode(bytesWord);"
-
-            "var b64Html = '%s';"
-
-            "var existing = document.querySelector(\".word-group[data-word='\" + CSS.escape(word) + \"']\");"
-            "if (existing) {"
-            "    existing.scrollIntoView({behavior: 'smooth', block: 'start'});"
-            "} else {"
-            "    var wrapper = document.createElement('div');"
-            "    wrapper.className = 'word-group';"
-            "    wrapper.setAttribute('data-word', word);"
-            "    var dec = atob(b64Html);"
-            "    var bytes = new Uint8Array(dec.length);"
-            "    for (var i = 0; i < dec.length; i++) bytes[i] = dec.charCodeAt(i);"
-            "    wrapper.innerHTML = new TextDecoder('utf-8').decode(bytes);"
-            "    document.body.insertBefore(wrapper, document.body.firstChild);"
-            "    wrapper.scrollIntoView({behavior: 'smooth', block: 'start'});"
-            "}",
-            b64_word, b64_html);
-            
-        webkit_web_view_evaluate_javascript(web_view, js, -1, NULL, NULL, NULL, NULL, NULL);
-
-        g_free(js);
-        g_free(b64_word);
-        g_free(b64_html);
     }
     
     g_free(display_title);
@@ -6464,7 +6440,7 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
 
     apply_font_to_webview(NULL);
 
-    gboolean needs_async_load = discover_from_dirs || (!all_dicts && !had_cached_entries);
+    gboolean needs_async_load = discover_from_dirs || had_cached_entries;
     render_idle_page_to_webview(
         web_view,
         needs_async_load ? "Loading dictionaries..." : "Diction",
@@ -6476,17 +6452,12 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
         startup_random_word_pending = (!search_entry ||
                                        strlen(gtk_editable_get_text(GTK_EDITABLE(search_entry))) == 0);
         if (start_async_dict_loading(discover_from_dirs)) {
-            if (discover_from_dirs || !had_cached_entries) {
-                startup_splash_show(app, main_window, G_CALLBACK(request_loader_cancel));
-            }
+            startup_splash_show(app, main_window, G_CALLBACK(request_loader_cancel));
         } else {
             startup_random_word_pending = FALSE;
             finalize_dictionary_loading(TRUE, discover_from_dirs);
             gtk_window_present(GTK_WINDOW(window));
         }
-    } else if (had_cached_entries) {
-        startup_random_word_pending = FALSE;
-        gtk_window_present(GTK_WINDOW(window));
     } else {
         startup_random_word_pending = FALSE;
         // CLI-mode: dicts already loaded synchronously, just populate
@@ -6579,9 +6550,43 @@ static int run_cli_search(const char *query, const char *in_dict) {
         }
     }
 
+    /* 1b. Load manually configured dictionaries */
+    if (app_settings && app_settings->dictionaries) {
+        for (guint i = 0; i < app_settings->dictionaries->len; i++) {
+            DictConfig *cfg = g_ptr_array_index(app_settings->dictionaries, i);
+            if (!cfg || !cfg->enabled || !cfg->path || !*cfg->path) continue;
+
+            gboolean already_loaded = FALSE;
+            for (DictEntry *e = all_dicts; e; e = e->next) {
+                if (g_strcmp0(e->path, cfg->path) == 0) {
+                    already_loaded = TRUE;
+                    break;
+                }
+            }
+            if (!already_loaded) {
+                DictFormat fmt = dict_detect_format(cfg->path);
+                DictMmap *d = dict_load_any(cfg->path, fmt, NULL, 0);
+                if (d) {
+                    DictEntry *e = g_new0(DictEntry, 1);
+                    e->magic = 0xDEADC0DE;
+                    e->ref_count = 1;
+                    e->name = g_strdup(cfg->name ? cfg->name : "dictionary");
+                    e->path = g_strdup(cfg->path);
+                    e->format = fmt;
+                    e->dict = d;
+                    e->next = all_dicts;
+                    all_dicts = e;
+                }
+            }
+        }
+    }
+
     /* 2. If in_dict is a path to a file, load it specifically if not present */
     if (in_dict && (g_str_has_suffix(in_dict, ".dsl") || g_str_has_suffix(in_dict, ".dz") || 
-                    g_str_has_suffix(in_dict, ".mdx") || g_str_has_suffix(in_dict, ".bgl"))) {
+                    g_str_has_suffix(in_dict, ".mdx") || g_str_has_suffix(in_dict, ".bgl") ||
+                    g_str_has_suffix(in_dict, ".slob") || g_str_has_suffix(in_dict, ".xdxf") ||
+                    g_str_has_suffix(in_dict, ".xdxf.dz") || g_str_has_suffix(in_dict, ".index") ||
+                    g_str_has_suffix(in_dict, ".dct"))) {
         struct stat st;
         if (stat(in_dict, &st) == 0 && S_ISREG(st.st_mode)) {
             gboolean already_loaded = FALSE;

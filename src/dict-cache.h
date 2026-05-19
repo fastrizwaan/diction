@@ -27,6 +27,12 @@ gboolean dict_cache_prepare_target_path(const char *target_path, guint64 bytes_n
 /* Set the mtime of cache_path to match the newest source. */
 void dict_cache_sync_mtime(const char *cache_path, const char **sources, int n_sources);
 
+/* Remember a failed cache build for the current source mtime, so startup does
+ * not repeatedly rebuild dictionaries that cannot currently be indexed. */
+gboolean dict_cache_failure_is_current(const char *cache_path, const char *original_path);
+void dict_cache_mark_failure(const char *cache_path, const char **sources, int n_sources);
+void dict_cache_clear_failure(const char *cache_path);
+
 /* Clean up any orphaned cache files in dicts and fts that do not correspond
  * to any active dictionaries in active_paths. */
 void dict_cache_garbage_collect(const GPtrArray *active_paths);

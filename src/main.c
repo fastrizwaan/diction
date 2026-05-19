@@ -240,6 +240,7 @@ static void queue_fts_highlight_for_web_view(WebKitWebView *wv, const char *quer
 
 #define BUCKET_COUNT 6
 #define MAX_FTS_DICTIONARIES 30
+#define MAX_EXACT_RENDERED_MATCHES 24
 
 typedef struct {
     char *query;
@@ -259,6 +260,7 @@ typedef struct {
     size_t current_pos;  /* position in flat index */
     gboolean has_current_pos;
     gboolean list_started;
+    gboolean prefix_only;
     volatile gint cancelled;
     gint ref_count;
     GPtrArray *global_bucket_labels[BUCKET_COUNT];
@@ -1074,7 +1076,7 @@ static gpointer sidebar_search_thread_func(gpointer user_data) {
         for (guint idx = 0; state->search_entries && idx < state->search_entries->len && added < max_seed_rows; idx++) {
             if (g_atomic_int_get(&state->cancelled)) break;
             DictEntry *entry = g_ptr_array_index(state->search_entries, idx);
-            size_t pos = flat_index_search_prefix(entry->dict->index, state->query);
+            size_t pos = flat_index_search_prefix_fast(entry->dict->index, state->query);
             
             while (pos != (size_t)-1 && added < max_seed_rows) {
                 if (g_atomic_int_get(&state->cancelled)) break;
@@ -1158,6 +1160,18 @@ static gpointer sidebar_search_thread_func(gpointer user_data) {
             sidebar_search_state_unref(seed_msg->state);
             g_free(seed_msg);
         }
+    }
+
+    if (state->prefix_only) {
+        if (added == 0 && !g_atomic_int_get(&state->cancelled)) {
+            SearchBatchMsg *final_msg = g_new0(SearchBatchMsg, 1);
+            final_msg->state = sidebar_search_state_ref(state);
+            final_msg->is_finished = TRUE;
+            final_msg->status_title = g_strdup("No results");
+            g_idle_add(sidebar_search_idle_cb, final_msg);
+        }
+        sidebar_search_state_unref(state);
+        return NULL;
     }
 
     if (g_atomic_int_get(&state->cancelled)) {
@@ -1433,6 +1447,8 @@ static void populate_search_sidebar_with_mode(const char *query, gboolean force_
     sidebar_search_state->query_compact_key = collapse_search_separators(sidebar_search_state->query_key);
     sidebar_search_state->query_compact_len = utf8_length_or_bytes(sidebar_search_state->query_compact_key);
     sidebar_search_state->skip_fast_prefilter = search_query_needs_literal_prefilter_bypass(sidebar_search_state->query);
+    sidebar_search_state->prefix_only = !sidebar_search_state->is_fts &&
+        sidebar_search_state->query_len <= 3;
     
     if (sidebar_search_state->is_fts && strlen(sidebar_search_state->query) > 0) {
         GError *err = NULL;
@@ -1775,6 +1791,35 @@ static char *strip_dict_extensions(const char *path) {
     return p;
 }
 
+static gboolean identity_path_ends_with_ci(const char *path, const char *suffix) {
+    gsize path_len = path ? strlen(path) : 0;
+    gsize suffix_len = suffix ? strlen(suffix) : 0;
+    return path && suffix && path_len >= suffix_len &&
+        g_ascii_strcasecmp(path + path_len - suffix_len, suffix) == 0;
+}
+
+static gboolean paths_can_share_dictionary_identity(const char *path1, const char *path2) {
+    if (!path1 || !path2) return FALSE;
+
+    gboolean dsl1 = identity_path_ends_with_ci(path1, ".dsl") || identity_path_ends_with_ci(path1, ".dsl.dz");
+    gboolean dsl2 = identity_path_ends_with_ci(path2, ".dsl") || identity_path_ends_with_ci(path2, ".dsl.dz");
+    if (dsl1 || dsl2) return dsl1 && dsl2;
+
+    gboolean dictd1 = identity_path_ends_with_ci(path1, ".index") ||
+                      identity_path_ends_with_ci(path1, ".dict") ||
+                      identity_path_ends_with_ci(path1, ".dict.dz");
+    gboolean dictd2 = identity_path_ends_with_ci(path2, ".index") ||
+                      identity_path_ends_with_ci(path2, ".dict") ||
+                      identity_path_ends_with_ci(path2, ".dict.dz");
+    if (dictd1 || dictd2) return dictd1 && dictd2;
+
+    gboolean xdxf1 = identity_path_ends_with_ci(path1, ".xdxf") || identity_path_ends_with_ci(path1, ".xdxf.dz");
+    gboolean xdxf2 = identity_path_ends_with_ci(path2, ".xdxf") || identity_path_ends_with_ci(path2, ".xdxf.dz");
+    if (xdxf1 || xdxf2) return xdxf1 && xdxf2;
+
+    return FALSE;
+}
+
 static gboolean paths_are_equivalent(const char *path1, const char *path2) {
     if (!path1 || !path2) return FALSE;
     if (strcmp(path1, path2) == 0) return TRUE;
@@ -1793,6 +1838,12 @@ static gboolean paths_are_equivalent(const char *path1, const char *path2) {
         return TRUE;
     }
     
+    if (!paths_can_share_dictionary_identity(c1, c2)) {
+        g_free(c1);
+        g_free(c2);
+        return FALSE;
+    }
+
     char *s1 = strip_dict_extensions(c1);
     char *s2 = strip_dict_extensions(c2);
     gboolean eq = (strcmp(s1, s2) == 0);
@@ -3413,9 +3464,10 @@ static void exact_match_free(gpointer data) {
     g_free(m);
 }
 
-static int append_exact_matches_html(GString *html_res, const char *query) {
+static int append_exact_matches_html(GString *html_res, const char *query, gboolean *limited) {
     int found_count = 0;
     GPtrArray *matches = g_ptr_array_new_with_free_func(exact_match_free);
+    if (limited) *limited = FALSE;
 
     g_mutex_lock(&dict_loader_mutex);
     DictEntry *e = all_dicts;
@@ -3431,7 +3483,7 @@ static int append_exact_matches_html(GString *html_res, const char *query) {
             continue;
         }
 
-        size_t pos = flat_index_search(e->dict->index, query);
+        size_t pos = flat_index_search_fast(e->dict->index, query);
         while (pos != (size_t)-1) {
             const FlatTreeEntry *res = flat_index_get(e->dict->index, pos);
             if (!res) break;
@@ -3447,6 +3499,10 @@ static int append_exact_matches_html(GString *html_res, const char *query) {
             m->display_hw = normalize_headword_for_render(m->raw_hw, strlen(m->raw_hw), FALSE);
             
             g_ptr_array_add(matches, m);
+            if (matches->len >= MAX_EXACT_RENDERED_MATCHES) {
+                if (limited) *limited = TRUE;
+                break;
+            }
             pos++;
             if (pos >= flat_index_count(e->dict->index)) break;
         }
@@ -3455,8 +3511,9 @@ static int append_exact_matches_html(GString *html_res, const char *query) {
         DictEntry *next = e->next;
         dict_entry_unref(e);
         e = next;
+        if (limited && *limited) break;
     }
-    if (e == NULL) g_mutex_unlock(&dict_loader_mutex);
+    g_mutex_unlock(&dict_loader_mutex);
 
     if (matches->len == 0) {
         g_ptr_array_unref(matches);
@@ -3472,6 +3529,7 @@ static int append_exact_matches_html(GString *html_res, const char *query) {
         ExactMatch *m = g_ptr_array_index(matches, i);
         char *rendered = render_entry_def_to_html(m->dict, m->entry);
         if (rendered) {
+            m->dict->has_matches = TRUE;
             char *escaped_hw = safe_markup_escape_n(m->display_hw, -1);
             char *escaped_dn = g_markup_escape_text(m->dict->name, -1);
             const char *emoji = dict_format_emoji(m->dict->format);
@@ -3494,6 +3552,13 @@ static int append_exact_matches_html(GString *html_res, const char *query) {
             g_free(rendered);
             found_count++;
         }
+    }
+
+    if (limited && *limited) {
+        g_string_append_printf(
+            html_res,
+            "<p style='opacity:.72;font-size:.92em;margin:12px 8px;'>Showing first %d matching dictionaries. Narrow the search or choose a dictionary scope for more.</p>",
+            MAX_EXACT_RENDERED_MATCHES);
     }
 
     g_ptr_array_unref(matches);
@@ -3532,12 +3597,14 @@ static void render_query_to_webview(const char *query_raw, WebKitWebView *target
     for (DictEntry *e = all_dicts; e; e = e->next) e->has_matches = FALSE;
     g_mutex_unlock(&dict_loader_mutex);
 
-    int found_count = append_exact_matches_html(html_res, query);
+    gboolean exact_limited = FALSE;
+    int found_count = append_exact_matches_html(html_res, query, &exact_limited);
     if (found_count == 0) {
         char *fallback_query = exact_lookup_definite_article_variant(query);
         if (fallback_query) {
             g_string_truncate(html_res, html_prefix_len);
-            found_count = append_exact_matches_html(html_res, fallback_query);
+            exact_limited = FALSE;
+            found_count = append_exact_matches_html(html_res, fallback_query, &exact_limited);
             g_free(fallback_query);
         }
     }
@@ -3677,12 +3744,14 @@ static void append_rendered_word_html_impl(const char *raw_word, gboolean push_h
     char *display_title = normalize_headword_for_render(raw_word, raw_word ? strlen(raw_word) : 0, FALSE);
 
     GString *html_res = g_string_new("");
-    int found_count = append_exact_matches_html(html_res, query);
+    gboolean exact_limited = FALSE;
+    int found_count = append_exact_matches_html(html_res, query, &exact_limited);
     if (found_count == 0) {
         char *fallback_query = exact_lookup_definite_article_variant(query);
         if (fallback_query) {
             g_string_truncate(html_res, 0);
-            found_count = append_exact_matches_html(html_res, fallback_query);
+            exact_limited = FALSE;
+            found_count = append_exact_matches_html(html_res, fallback_query, &exact_limited);
             g_free(fallback_query);
         }
     }
@@ -5214,7 +5283,10 @@ static void queue_loader_idle(LoadIdleKind kind,
     ld->status_text = status_text ? g_strdup(status_text) : NULL;
     ld->entry = entry;
     ld->sync_settings = sync_settings;
-    g_idle_add(on_dict_loaded_idle, ld);
+    g_idle_add_full(kind == LOAD_IDLE_DONE ? G_PRIORITY_LOW : G_PRIORITY_DEFAULT_IDLE,
+                    on_dict_loaded_idle,
+                    ld,
+                    NULL);
 }
 
 static char* sample_dict_and_detect_lang(DictEntry *entry) {
@@ -5226,9 +5298,10 @@ static char* sample_dict_and_detect_lang(DictEntry *entry) {
     GString *hw_samples = g_string_new("");
     GString *def_samples = g_string_new("");
 
-    int count = total < 50 ? (int)total : 50;
+    int count = total < 12 ? (int)total : 12;
+    gboolean sample_definitions = !(entry->dict->source_dz || entry->dict->mdx_ctx);
     for (int i = 0; i < count; i++) {
-        size_t idx = rand() % total;
+        size_t idx = count == 1 ? 0 : ((size_t)i * (total - 1)) / (size_t)(count - 1);
         const FlatTreeEntry *node = flat_index_get(entry->dict->index, idx);
         if (!node) continue;
 
@@ -5236,9 +5309,14 @@ static char* sample_dict_and_detect_lang(DictEntry *entry) {
         char *hw = g_strndup(data_ptr + node->h_off, node->h_len);
         
         char *to_free = NULL;
-        size_t def_len = 0;
-        const char *def_ptr = dict_get_definition(entry->dict, node, &def_len, &to_free);
-        char *def = def_ptr ? g_strndup(def_ptr, def_len) : NULL;
+        char *def = NULL;
+        if (sample_definitions && i < 4) {
+            size_t def_len = 0;
+            const char *def_ptr = dict_get_definition(entry->dict, node, &def_len, &to_free);
+            if (def_ptr) {
+                def = g_strndup(def_ptr, MIN(def_len, (size_t)4096));
+            }
+        }
         
         if (hw) g_string_append_printf(hw_samples, " %s ", hw);
         if (def) g_string_append_printf(def_samples, " %s ", def);
@@ -6386,16 +6464,19 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
 
     apply_font_to_webview(NULL);
 
-    render_idle_page_to_webview(web_view, "Loading dictionaries...", "Please wait.");
+    gboolean needs_async_load = discover_from_dirs || (!all_dicts && !had_cached_entries);
+    render_idle_page_to_webview(
+        web_view,
+        needs_async_load ? "Loading dictionaries..." : "Diction",
+        needs_async_load ? "Please wait." : "Start typing to search...");
 
-    // Start async loading if we have settings-based dirs
-    if (!all_dicts || had_cached_entries) {
+    // Start async loading for configured directories so startup scan/progress
+    // remains visible. The loaders should hit valid caches instead of rebuilding.
+    if (needs_async_load) {
         startup_random_word_pending = (!search_entry ||
                                        strlen(gtk_editable_get_text(GTK_EDITABLE(search_entry))) == 0);
         if (start_async_dict_loading(discover_from_dirs)) {
-            if (had_cached_entries && !discover_from_dirs) {
-                gtk_window_present(GTK_WINDOW(window));
-            } else {
+            if (discover_from_dirs || !had_cached_entries) {
                 startup_splash_show(app, main_window, G_CALLBACK(request_loader_cancel));
             }
         } else {
@@ -6403,6 +6484,9 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
             finalize_dictionary_loading(TRUE, discover_from_dirs);
             gtk_window_present(GTK_WINDOW(window));
         }
+    } else if (had_cached_entries) {
+        startup_random_word_pending = FALSE;
+        gtk_window_present(GTK_WINDOW(window));
     } else {
         startup_random_word_pending = FALSE;
         // CLI-mode: dicts already loaded synchronously, just populate

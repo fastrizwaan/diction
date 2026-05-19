@@ -1809,6 +1809,8 @@ rebuild_cache:
     MdxContext *mdx_ctx = mdx_init_context(fh, is_v2, num_size, header_text_size, encoding_is_utf16, dict_encoding);
 
     dict_cache_builder_free(builder);
+    const char *sources[] = { path };
+    dict_cache_sync_mtime(cache_path, sources, 1);
     fclose(fh);
     g_free(dict_encoding);
 
@@ -1866,5 +1868,4 @@ rebuild_cache:
 
     return dict;
 }
-
 

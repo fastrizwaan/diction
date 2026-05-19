@@ -196,6 +196,35 @@ static char *settings_strip_extensions(const char *path) {
     return p;
 }
 
+static gboolean settings_path_ends_with_ci(const char *path, const char *suffix) {
+    gsize path_len = path ? strlen(path) : 0;
+    gsize suffix_len = suffix ? strlen(suffix) : 0;
+    return path && suffix && path_len >= suffix_len &&
+        g_ascii_strcasecmp(path + path_len - suffix_len, suffix) == 0;
+}
+
+static gboolean settings_paths_can_share_dictionary_identity(const char *path1, const char *path2) {
+    if (!path1 || !path2) return FALSE;
+
+    gboolean dsl1 = settings_path_ends_with_ci(path1, ".dsl") || settings_path_ends_with_ci(path1, ".dsl.dz");
+    gboolean dsl2 = settings_path_ends_with_ci(path2, ".dsl") || settings_path_ends_with_ci(path2, ".dsl.dz");
+    if (dsl1 || dsl2) return dsl1 && dsl2;
+
+    gboolean dictd1 = settings_path_ends_with_ci(path1, ".index") ||
+                      settings_path_ends_with_ci(path1, ".dict") ||
+                      settings_path_ends_with_ci(path1, ".dict.dz");
+    gboolean dictd2 = settings_path_ends_with_ci(path2, ".index") ||
+                      settings_path_ends_with_ci(path2, ".dict") ||
+                      settings_path_ends_with_ci(path2, ".dict.dz");
+    if (dictd1 || dictd2) return dictd1 && dictd2;
+
+    gboolean xdxf1 = settings_path_ends_with_ci(path1, ".xdxf") || settings_path_ends_with_ci(path1, ".xdxf.dz");
+    gboolean xdxf2 = settings_path_ends_with_ci(path2, ".xdxf") || settings_path_ends_with_ci(path2, ".xdxf.dz");
+    if (xdxf1 || xdxf2) return xdxf1 && xdxf2;
+
+    return FALSE;
+}
+
 static gboolean settings_paths_are_equivalent(const char *path1, const char *path2) {
     if (!path1 || !path2) return FALSE;
     if (strcmp(path1, path2) == 0) return TRUE;
@@ -214,6 +243,12 @@ static gboolean settings_paths_are_equivalent(const char *path1, const char *pat
         return TRUE;
     }
     
+    if (!settings_paths_can_share_dictionary_identity(c1, c2)) {
+        g_free(c1);
+        g_free(c2);
+        return FALSE;
+    }
+
     char *s1 = settings_strip_extensions(c1);
     char *s2 = settings_strip_extensions(c2);
     gboolean eq = (strcmp(s1, s2) == 0);
@@ -911,6 +946,9 @@ void settings_prune_directory_dictionaries(AppSettings *settings, GHashTable *lo
             continue;
         }
         if (loaded_paths && g_hash_table_contains(loaded_paths, cfg->path)) {
+            continue;
+        }
+        if (cfg->path && g_file_test(cfg->path, G_FILE_TEST_EXISTS)) {
             continue;
         }
 

@@ -378,7 +378,9 @@ void flat_index_close(FlatIndex *idx) {
     g_free(idx); /* entries are mmap'd, not heap-allocated */
 }
 
-size_t flat_index_search(const FlatIndex *idx, const char *query) {
+static size_t flat_index_search_impl(const FlatIndex *idx,
+                                     const char *query,
+                                     gboolean alias_fallback) {
     if (!idx || !idx->entries || idx->count == 0 || !query)
         return (size_t)-1;
 
@@ -399,7 +401,7 @@ size_t flat_index_search(const FlatIndex *idx, const char *query) {
         }
     }
 
-    if (result == (size_t)-1) {
+    if (result == (size_t)-1 && alias_fallback) {
         for (size_t i = 0; i < idx->count; i++) {
             if (raw_headword_matches_alias_segment(idx->mmap_data + idx->entries[i].h_off,
                                                    idx->entries[i].h_len,
@@ -412,7 +414,17 @@ size_t flat_index_search(const FlatIndex *idx, const char *query) {
     return result;
 }
 
-size_t flat_index_search_prefix(const FlatIndex *idx, const char *prefix) {
+size_t flat_index_search(const FlatIndex *idx, const char *query) {
+    return flat_index_search_impl(idx, query, TRUE);
+}
+
+size_t flat_index_search_fast(const FlatIndex *idx, const char *query) {
+    return flat_index_search_impl(idx, query, FALSE);
+}
+
+static size_t flat_index_search_prefix_impl(const FlatIndex *idx,
+                                            const char *prefix,
+                                            gboolean alias_fallback) {
     if (!idx || !idx->entries || idx->count == 0 || !prefix)
         return (size_t)-1;
 
@@ -435,7 +447,7 @@ size_t flat_index_search_prefix(const FlatIndex *idx, const char *prefix) {
         }
     }
 
-    if (result == (size_t)-1) {
+    if (result == (size_t)-1 && alias_fallback) {
         for (size_t i = 0; i < idx->count; i++) {
             if (raw_headword_matches_alias_segment(idx->mmap_data + idx->entries[i].h_off,
                                                    idx->entries[i].h_len,
@@ -446,6 +458,14 @@ size_t flat_index_search_prefix(const FlatIndex *idx, const char *prefix) {
     }
 
     return result;
+}
+
+size_t flat_index_search_prefix(const FlatIndex *idx, const char *prefix) {
+    return flat_index_search_prefix_impl(idx, prefix, TRUE);
+}
+
+size_t flat_index_search_prefix_fast(const FlatIndex *idx, const char *prefix) {
+    return flat_index_search_prefix_impl(idx, prefix, FALSE);
 }
 
 

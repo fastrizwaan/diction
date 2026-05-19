@@ -140,6 +140,11 @@ DictMmap* dict_mmap_open(const char *path, volatile gint *cancel_flag, gint expe
     char *cache_path = dict_cache_path_for(path);
     gboolean cache_exists = (access(cache_path, F_OK) == 0);
     gboolean cache_valid = cache_exists && dict_cache_is_valid(cache_path, path);
+    if (!cache_valid && dict_cache_failure_is_current(cache_path, path)) {
+        fprintf(stderr, "[DSL] Skipping cached index failure for %s\n", path);
+        g_free(cache_path);
+        return NULL;
+    }
 
     DictMmap *dict = g_new0(DictMmap, 1);
     dict->fd = -1;
@@ -153,6 +158,9 @@ DictMmap* dict_mmap_open(const char *path, volatile gint *cancel_flag, gint expe
         
         if (!build_dsl_index_only_cache(path, tmp_cache)) {
             fprintf(stderr, "[DSL] Failed to build index cache for %s\n", path);
+            const char *sources[] = { path };
+            dict_cache_mark_failure(cache_path, sources, 1);
+            unlink(tmp_cache);
             g_free(tmp_cache);
             g_free(cache_path);
             g_free(dict->source_dir);
@@ -177,6 +185,9 @@ DictMmap* dict_mmap_open(const char *path, volatile gint *cancel_flag, gint expe
             g_free(dict);
             return NULL;
         }
+        const char *sources[] = { path };
+        dict_cache_sync_mtime(cache_path, sources, 1);
+        dict_cache_clear_failure(cache_path);
         g_free(tmp_cache);
     } else {
         printf("Loading Dictionary from cache: %s\n", cache_path);

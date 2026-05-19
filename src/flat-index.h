@@ -39,9 +39,14 @@ void flat_index_close(FlatIndex *idx);
  * position of the first match, or (size_t)-1 if not found. */
 size_t flat_index_search(const FlatIndex *idx, const char *query);
 
+/* Fast binary-only variants for UI fan-out across many dictionaries. These
+ * skip the expensive alias fallback scan used by flat_index_search(). */
+size_t flat_index_search_fast(const FlatIndex *idx, const char *query);
+
 /* Search for the first entry whose headword starts with `prefix`
  * (case-insensitive). Returns position or (size_t)-1. */
 size_t flat_index_search_prefix(const FlatIndex *idx, const char *prefix);
+size_t flat_index_search_prefix_fast(const FlatIndex *idx, const char *prefix);
 
 /* Get entry at position `pos`. Returns NULL if out of range. */
 const FlatTreeEntry* flat_index_get(const FlatIndex *idx, size_t pos);

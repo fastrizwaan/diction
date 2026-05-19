@@ -1082,7 +1082,8 @@ static gpointer sidebar_search_thread_func(gpointer user_data) {
                 const FlatTreeEntry *node = flat_index_get(entry->dict->index, pos);
                 if (!node) break;
 
-                char *raw_word = g_strndup(entry->dict->data + node->h_off, node->h_len);
+                const char *data_ptr = entry->dict->data ? entry->dict->data : entry->dict->index->mmap_data;
+                char *raw_word = g_strndup(data_ptr + node->h_off, node->h_len);
                 char *clean_word = normalize_headword_for_search(raw_word, TRUE);
 
                 if (!clean_word || text_has_replacement_char(clean_word)) {
@@ -1280,13 +1281,15 @@ static gpointer sidebar_search_thread_func(gpointer user_data) {
             state->current_pos++;
             if (state->current_pos >= state->current_dict_count) state->has_current_pos = FALSE;
 
+            const char *data_ptr = state->current_dict->dict->data ? state->current_dict->dict->data : state->current_dict->dict->index->mmap_data;
             if (!state->skip_fast_prefilter &&
-                !fast_strncasestr(state->current_dict->dict->data + node->h_off, node->h_len, state->query)) {
+                !fast_strncasestr(data_ptr + node->h_off, node->h_len, state->query)) {
                 continue;
             }
         }
 
-        char *word = g_strndup(state->current_dict->dict->data + node->h_off, node->h_len);
+        const char *data_ptr = state->current_dict->dict->data ? state->current_dict->dict->data : state->current_dict->dict->index->mmap_data;
+        char *word = g_strndup(data_ptr + node->h_off, node->h_len);
         char *clean_word = normalize_headword_for_search(word, TRUE);
         if (!clean_word || text_has_replacement_char(clean_word)) {
             g_free(word);
@@ -1385,8 +1388,18 @@ static void populate_search_sidebar_with_mode(const char *query, gboolean force_
     cancel_sidebar_search();
 
     char *clean = normalize_headword_for_search(query, FALSE);
-    // If clean is NULL, it means the query is empty or whitespace-only.
-    // We allow this to show all headwords.
+    if (!clean) {
+        if (force_fts) {
+            populate_search_sidebar_status(
+                "Full Text Search",
+                "Type a word or phrase to search definitions in this scope.");
+        } else {
+            populate_search_sidebar_status(
+                "Type to search dictionaries…",
+                NULL);
+        }
+        return;
+    }
 
     sidebar_search_state = g_new0(SidebarSearchState, 1);
     sidebar_search_state->ref_count = 1;
@@ -3038,9 +3051,10 @@ static char* render_entry_def_to_html(DictEntry *entry, const FlatTreeEntry *res
 
     dict_render_set_resource_reader(entry->dict->resource_reader);
 
+    const char *hw_data_ptr = entry->dict->data ? entry->dict->data : entry->dict->index->mmap_data;
     char *html = dsl_render_to_html(
         def_ptr, def_len,
-        entry->dict->data + res->h_off, res->h_len,
+        hw_data_ptr + res->h_off, res->h_len,
         entry->format, entry->dict->resource_dir, entry->dict->source_dir, entry->dict->mdx_stylesheet, dark_mode,
         app_settings ? app_settings->color_theme : "default",
         render_style,
@@ -3354,13 +3368,14 @@ static int append_exact_matches_html(GString *html_res, const char *query) {
         while (pos != (size_t)-1) {
             const FlatTreeEntry *res = flat_index_get(e->dict->index, pos);
             if (!res) break;
-            if (!flat_index_entry_matches_query(e->dict->data, res, query, strlen(query))) break;
+            const char *data_ptr = e->dict->data ? e->dict->data : e->dict->index->mmap_data;
+            if (!flat_index_entry_matches_query(data_ptr, res, query, strlen(query))) break;
 
             ExactMatch *m = g_new0(ExactMatch, 1);
             m->dict = e;
             dict_entry_ref(e);
             m->entry = res;
-            m->raw_hw = g_strndup(e->dict->data + res->h_off, res->h_len);
+            m->raw_hw = g_strndup(data_ptr + res->h_off, res->h_len);
             m->clean_hw = normalize_headword_for_search(m->raw_hw, TRUE);
             m->display_hw = normalize_headword_for_render(m->raw_hw, strlen(m->raw_hw), FALSE);
             
@@ -3829,7 +3844,8 @@ static gpointer random_word_thread_worker(gpointer data) {
             if (!node) break;
 
             /* This read might block on disk I/O, which is why we are in a background thread */
-            const char *raw_data = target_e->dict->data + node->h_off;
+            const char *data_ptr = target_e->dict->data ? target_e->dict->data : target_e->dict->index->mmap_data;
+            const char *raw_data = data_ptr + node->h_off;
             found_word = g_strndup(raw_data, node->h_len);
             clean_hw = normalize_headword_for_render(found_word, node->h_len, FALSE);
 
@@ -5173,7 +5189,8 @@ static char* sample_dict_and_detect_lang(DictEntry *entry) {
         const FlatTreeEntry *node = flat_index_get(entry->dict->index, idx);
         if (!node) continue;
 
-        char *hw = (entry->dict->data) ? g_strndup(entry->dict->data + node->h_off, node->h_len) : NULL;
+        const char *data_ptr = entry->dict->data ? entry->dict->data : entry->dict->index->mmap_data;
+        char *hw = g_strndup(data_ptr + node->h_off, node->h_len);
         
         char *to_free = NULL;
         size_t def_len = 0;
@@ -6489,14 +6506,15 @@ static int run_cli_search(const char *query, const char *in_dict) {
         while (pos != (size_t)-1) {
             const FlatTreeEntry *res = flat_index_get(e->dict->index, pos);
             if (!res) break;
-            if (!flat_index_entry_matches_query(e->dict->data, res, normalized_query, strlen(normalized_query))) break;
+            const char *data_ptr = e->dict->data ? e->dict->data : e->dict->index->mmap_data;
+            if (!flat_index_entry_matches_query(data_ptr, res, normalized_query, strlen(normalized_query))) break;
 
             if (!dict_header_printed) {
                 g_print("\n--- From: %s (%s) ---\n", e->name, dict_format_to_str(e->format));
                 dict_header_printed = TRUE;
             }
 
-            char *raw_hw = g_strndup(e->dict->data + res->h_off, res->h_len);
+            char *raw_hw = g_strndup(data_ptr + res->h_off, res->h_len);
             g_print("Headword: %s\n", raw_hw);
             g_free(raw_hw);
 

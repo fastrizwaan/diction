@@ -24,6 +24,7 @@ void dict_mmap_close(DictMmap *dict) {
     if (dict) {
         flat_index_close(dict->index);
         resource_reader_close(dict->resource_reader);
+        if (dict->mdx_ctx) mdx_free_context(dict->mdx_ctx);
         if (dict->chunk_reader) dict_chunk_reader_free(dict->chunk_reader);
         if (dict->data) munmap((void*)dict->data, dict->size);
         if (dict->source_mmap) munmap((void*)dict->source_mmap, dict->source_size);

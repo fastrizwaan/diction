@@ -143,6 +143,10 @@ static const char* dict_get_definition_raw(DictMmap *dict, const FlatTreeEntry *
         return (char*)raw;
     }
 
+    if (dict->mdx_ctx) {
+        return mdx_get_definition_on_the_fly(dict, entry, out_len, out_to_free);
+    }
+
     /* 3. Chunked self-contained format (DCMP) */
     if (dict->is_compressed && dict->chunk_reader) {
         char *decomp = dict_chunk_reader_get_definition(dict->chunk_reader, (uint64_t)entry->d_off, (uint64_t)entry->d_len);

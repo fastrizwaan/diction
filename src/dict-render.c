@@ -2718,6 +2718,7 @@ char* dsl_render_to_html(const char *dsl_text,
     buf_append_str(&b, "ol.sense{list-style-type:upper-roman;}");
     buf_append_str(&b, "ol.cit{list-style-type:decimal;}");
     buf_append_str(&b, ".k, .headword, .word, .hw, .head, .entry-header, .entry-headword, .slobdict_headword, .slobdict_headwords { display: none; }");
+    buf_append_str(&b, "a .hw, a .headword, a .word, a .k, .scroller .hw, .scroller .headword, .scroller .word, .scroller .k, .smartt .hw, .smartt .headword, .smartt .word, .smartt .k { display: inline !important; }");
     buf_append_str(&b, ".slobdict .form:first-child .orth { display: none; }");
     buf_append_str(&b, ".orth { font-weight: bold; display: inline-block; padding-right: 0.5rem; }");
     buf_append_str(&b, "</style><script>");
@@ -2989,11 +2990,12 @@ char* dsl_render_to_html(const char *dsl_text,
         }
 
         if (treat_as_html || format == DICT_FORMAT_XDXF) {
+            g_print("[DEBUG] Entering treat_as_html block. length = %zu\n", length);
             /* Comprehensive HTML attribute rewriting for MDX */
             size_t head = 0;
             while (head < length) {
-                /* Find HTML tags */
-                const char *tag_start = strchr(dsl_text + head, '<');
+                /* Find HTML tags safely within the entry length */
+                const char *tag_start = memchr(dsl_text + head, '<', length - head);
                 if (!tag_start) {
                     buf_append(&b, dsl_text + head, length - head);
                     break;
@@ -3003,8 +3005,8 @@ char* dsl_render_to_html(const char *dsl_text,
                 buf_append(&b, dsl_text + head, tag_start - (dsl_text + head));
                 head = tag_start - dsl_text;
                 
-                /* Parse tag */
-                const char *tag_end = strchr(dsl_text + head, '>');
+                /* Parse tag safely within the entry length */
+                const char *tag_end = memchr(dsl_text + head, '>', length - head);
                 if (!tag_end) {
                     buf_append(&b, dsl_text + head, length - head);
                     break;
@@ -3152,7 +3154,7 @@ char* dsl_render_to_html(const char *dsl_text,
                         }
                         g_free(js_src);
                         /* Skip the original tag + its closing </script> */
-                        const char *close_script = strstr(dsl_text + head + tag_len, "</script>");
+                        const char *close_script = g_strstr_len(dsl_text + head + tag_len, length - head - tag_len, "</script>");
                         if (close_script) {
                             head = (close_script - dsl_text) + 9;
                         } else {

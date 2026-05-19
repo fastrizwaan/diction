@@ -6,6 +6,7 @@
 #include "dict-mmap.h"
 #include "dict-cache-builder.h"
 #include "langpair.h"
+#include "text-utils.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1208,10 +1209,10 @@ static void mdx_init_context(DictMmap *dict, FILE *fh, int is_v2, int num_size, 
     fseek(fh, orig_pos, SEEK_SET);
 }
 
-extern size_t convert_utf16le_to_utf8(const unsigned char *in_buf, size_t in_len, unsigned char *out_buf, size_t out_max);
-
 const char* mdx_get_definition_on_the_fly(DictMmap *dict, const FlatTreeEntry *entry, size_t *out_len, char **out_to_free) {
-    if (!dict || !dict->mdx_ctx || !entry) return NULL;
+    if (!dict || !dict->mdx_ctx || !entry) {
+        return NULL;
+    }
     MdxContext *ctx = dict->mdx_ctx;
     
     if (out_len) *out_len = 0;
@@ -1236,7 +1237,8 @@ const char* mdx_get_definition_on_the_fly(DictMmap *dict, const FlatTreeEntry *e
     if (block_idx == -1) return NULL;
     
     unsigned char *comp = g_malloc(ctx->rbs[block_idx].comp_size);
-    if (pread(ctx->fd, comp, ctx->rbs[block_idx].comp_size, ctx->rbs[block_idx].file_offset) != ctx->rbs[block_idx].comp_size) {
+    ssize_t bytes_read = pread(ctx->fd, comp, ctx->rbs[block_idx].comp_size, ctx->rbs[block_idx].file_offset);
+    if (bytes_read != (ssize_t)ctx->rbs[block_idx].comp_size) {
         g_free(comp);
         return NULL;
     }
@@ -1249,6 +1251,10 @@ const char* mdx_get_definition_on_the_fly(DictMmap *dict, const FlatTreeEntry *e
     uint64_t rel_off = target_off - ctx->rbs[block_idx].uncomp_offset;
     uint64_t rec_len = entry->d_len;
 
+    if (rel_off >= dlen) {
+        g_free(data);
+        return NULL;
+    }
     if (rel_off + rec_len > dlen) rec_len = dlen - rel_off;
     
     const unsigned char *rec_ptr = data + rel_off;
@@ -1260,7 +1266,7 @@ const char* mdx_get_definition_on_the_fly(DictMmap *dict, const FlatTreeEntry *e
         if (rlen >= 2 && rec_ptr[rlen-1] == 0 && rec_ptr[rlen-2] == 0) rlen -= 2;
         size_t max_out = rlen * 2;
         utf8_def = g_malloc(max_out + 1);
-        def_len = convert_utf16le_to_utf8(rec_ptr, rlen, (unsigned char*)utf8_def, max_out);
+        def_len = convert_utf16le_to_utf8(rec_ptr, rlen, (unsigned char*)utf8_def, NULL);
         utf8_def[def_len] = '\0';
     } else {
         size_t rlen = rec_len;

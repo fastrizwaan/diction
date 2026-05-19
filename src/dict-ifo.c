@@ -889,9 +889,9 @@ DictMmap* parse_stardict(const char *ifo_path, volatile gint *cancel_flag, gint 
 
     g_free(idx_data);
     g_free(idx_path);
-    g_free(dict_path);
 
     if (!built) {
+        g_free(dict_path);
         g_free(bookname);
         g_free(resource_dir);
         g_free(cache_path);
@@ -899,6 +899,7 @@ DictMmap* parse_stardict(const char *ifo_path, volatile gint *cancel_flag, gint 
     }
 
     DictMmap *dict = open_cached_stardict(cache_path, bookname, resource_dir, dict_path);
+    g_free(dict_path);
     g_free(cache_path);
     settings_scan_progress_notify(ifo_path, 100);
     return dict;

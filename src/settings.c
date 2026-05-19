@@ -918,8 +918,20 @@ gboolean settings_set_dictionary_enabled_by_id(AppSettings *settings, const char
 void settings_upsert_dictionary(AppSettings *settings, const char *name, const char *path, const char *source) {
     if (!settings || !path) return;
 
+    /* If given a plain .dsl path, prefer the .dsl.dz sibling when it exists. */
+    char *preferred_path = NULL;
+    if (ends_with_ci(path, ".dsl") && !ends_with_ci(path, ".dsl.dz")) {
+        char *compressed = g_strconcat(path, ".dz", NULL);
+        if (g_file_test(compressed, G_FILE_TEST_EXISTS)) {
+            preferred_path = compressed;
+        } else {
+            g_free(compressed);
+        }
+    }
+    const char *effective_path = preferred_path ? preferred_path : path;
+
     g_mutex_lock(&settings->mutex);
-    DictConfig *existing = settings_find_dictionary_by_path_locked(settings, path);
+    DictConfig *existing = settings_find_dictionary_by_path_locked(settings, effective_path);
     if (existing) {
         // Update name if it changed
         if (name && g_strcmp0(existing->name, name) != 0) {
@@ -927,12 +939,14 @@ void settings_upsert_dictionary(AppSettings *settings, const char *name, const c
             existing->name = g_strdup(name);
         }
         g_mutex_unlock(&settings->mutex);
+        g_free(preferred_path);
         return;
     }
 
-    DictConfig *cfg = dict_config_new(name, path, source);
+    DictConfig *cfg = dict_config_new(name, effective_path, source);
     g_ptr_array_add(settings->dictionaries, cfg);
     g_mutex_unlock(&settings->mutex);
+    g_free(preferred_path);
 }
 
 void settings_prune_directory_dictionaries(AppSettings *settings, GHashTable *loaded_paths) {
@@ -1131,9 +1145,21 @@ AppSettings* settings_load(void) {
                 int enabled = json_object_get_int_member(dobj, "enabled");
                 
                 if (path && g_path_is_absolute(path)) {
-                    DictConfig *cfg = dict_config_new(name ? name : path, path, source);
+                    /* Prefer .dsl.dz over a plain .dsl entry saved in settings */
+                    char *upgraded_path = NULL;
+                    if (ends_with_ci(path, ".dsl") && !ends_with_ci(path, ".dsl.dz")) {
+                        char *compressed = g_strconcat(path, ".dz", NULL);
+                        if (g_file_test(compressed, G_FILE_TEST_EXISTS)) {
+                            upgraded_path = compressed;
+                        } else {
+                            g_free(compressed);
+                        }
+                    }
+                    const char *effective_path = upgraded_path ? upgraded_path : path;
+                    DictConfig *cfg = dict_config_new(name ? name : effective_path, effective_path, source);
                     cfg->enabled = enabled;
                     g_ptr_array_add(settings->dictionaries, cfg);
+                    g_free(upgraded_path);
                 }
             }
         }

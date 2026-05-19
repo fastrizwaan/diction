@@ -1514,9 +1514,11 @@ DictMmap *parse_mdx_file(const char *path, volatile gint *cancel_flag, gint expe
             if (hdr->chunk_count > 0) {
                 dict->is_compressed = TRUE;
                 dict->chunk_reader = dict_chunk_reader_new(dict->data, dict->size, hdr);
-            } else {
-                dict->mdx_ctx = mdx_init_context(fh, is_v2, num_size, header_text_size, encoding_is_utf16, dict_encoding);
             }
+        }
+        
+        if (!dict->is_compressed) {
+            dict->mdx_ctx = mdx_init_context(fh, is_v2, num_size, header_text_size, encoding_is_utf16, dict_encoding);
         }
 
         if (!(cancel_flag && g_atomic_int_get(cancel_flag) != expected)) {

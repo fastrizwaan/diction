@@ -1150,14 +1150,18 @@ typedef struct MdxContext {
     char *encoding;
 } MdxContext;
 
-static void mdx_init_context(DictMmap *dict, FILE *fh, int is_v2, int num_size, uint64_t header_text_size, int encoding_is_utf16, const char *dict_encoding) {
+static MdxContext* mdx_init_context(FILE *fh, int is_v2, int num_size, uint64_t header_text_size, int encoding_is_utf16, const char *dict_encoding) {
+    if (!fh) return NULL;
+    clearerr(fh);
     long orig_pos = ftell(fh);
-    fseek(fh, 4 + header_text_size + 4, SEEK_SET);
+    if (fseek(fh, 4 + header_text_size + 4, SEEK_SET) != 0) {
+        return NULL;
+    }
 
     int kbh_size = is_v2 ? (num_size * 5) : (num_size * 4);
     unsigned char *kbh = g_malloc(kbh_size);
     if (fread(kbh, 1, kbh_size, fh) != (size_t)kbh_size) {
-        g_free(kbh); fseek(fh, orig_pos, SEEK_SET); return;
+        g_free(kbh); fseek(fh, orig_pos, SEEK_SET); return NULL;
     }
     const unsigned char *kp = kbh;
     uint64_t num_key_blocks = read_num(&kp, num_size); (void)num_key_blocks;
@@ -1167,12 +1171,15 @@ static void mdx_init_context(DictMmap *dict, FILE *fh, int is_v2, int num_size, 
     uint64_t kb_data_size = read_num(&kp, num_size);
     g_free(kbh);
 
-    fseek(fh, 4 + header_text_size + 4 + kbh_size + (is_v2?4:0) + kbi_comp + kb_data_size, SEEK_SET);
+    if (fseek(fh, 4 + header_text_size + 4 + kbh_size + (is_v2?4:0) + kbi_comp + kb_data_size, SEEK_SET) != 0) {
+        fseek(fh, orig_pos, SEEK_SET);
+        return NULL;
+    }
 
     unsigned char rbh[64];
     if (fread(rbh, 1, num_size * 4, fh) != (size_t)(num_size * 4)) {
         fseek(fh, orig_pos, SEEK_SET);
-        return;
+        return NULL;
     }
     const unsigned char *rp = rbh;
     uint64_t nrb = read_num(&rp, num_size);
@@ -1181,6 +1188,11 @@ static void mdx_init_context(DictMmap *dict, FILE *fh, int is_v2, int num_size, 
 
     MdxContext *ctx = g_new0(MdxContext, 1);
     ctx->fd = dup(fileno(fh));
+    if (ctx->fd < 0) {
+        g_free(ctx);
+        fseek(fh, orig_pos, SEEK_SET);
+        return NULL;
+    }
     ctx->nrb = nrb;
     ctx->is_utf16 = encoding_is_utf16;
     ctx->encoding = g_strdup(dict_encoding);
@@ -1191,7 +1203,14 @@ static void mdx_init_context(DictMmap *dict, FILE *fh, int is_v2, int num_size, 
 
     for (uint64_t i = 0; i < nrb; i++) {
         unsigned char tmp[16];
-        if (fread(tmp, 1, num_size * 2, fh) != (size_t)(num_size * 2)) break;
+        if (fread(tmp, 1, num_size * 2, fh) != (size_t)(num_size * 2)) {
+            close(ctx->fd);
+            g_free(ctx->encoding);
+            g_free(ctx->rbs);
+            g_free(ctx);
+            fseek(fh, orig_pos, SEEK_SET);
+            return NULL;
+        }
         const unsigned char *ppb = tmp;
         uint64_t comp = read_num(&ppb, num_size);
         uint64_t decomp = read_num(&ppb, num_size);
@@ -1205,8 +1224,8 @@ static void mdx_init_context(DictMmap *dict, FILE *fh, int is_v2, int num_size, 
         uncomp_offset += decomp;
     }
     
-    dict->mdx_ctx = ctx;
     fseek(fh, orig_pos, SEEK_SET);
+    return ctx;
 }
 
 const char* mdx_get_definition_on_the_fly(DictMmap *dict, const FlatTreeEntry *entry, size_t *out_len, char **out_to_free) {
@@ -1319,7 +1338,6 @@ DictMmap *parse_mdx_file(const char *path, volatile gint *cancel_flag, gint expe
     /* ── read header ── */
     FILE *fh = fopen(path, "rb");
     if (!fh) {
-        if (cancel_flag) g_atomic_int_set(cancel_flag, expected - 1); // abort gracefully to not hang UI
         return NULL; // Prevent fseek crashes during EMFILE (ulimit -n) handling
     }
 
@@ -1416,24 +1434,20 @@ DictMmap *parse_mdx_file(const char *path, volatile gint *cancel_flag, gint expe
                 } else {
                     g_free(header_raw);
                     if (fh) fclose(fh);
-                    if (cancel_flag) g_atomic_int_set(cancel_flag, expected - 1);
                     return NULL;
                 }
                 g_free(header_raw);
             } else {
                 g_free(header_raw);
                 if (fh) fclose(fh);
-                if (cancel_flag) g_atomic_int_set(cancel_flag, expected - 1);
                 return NULL;
             }
         } else {
             if (fh) fclose(fh);
-            if (cancel_flag) g_atomic_int_set(cancel_flag, expected - 1);
             return NULL;
         }
     } else {
         if (fh) fclose(fh);
-        if (cancel_flag) g_atomic_int_set(cancel_flag, expected - 1);
         return NULL;
     }
 
@@ -1444,7 +1458,6 @@ DictMmap *parse_mdx_file(const char *path, volatile gint *cancel_flag, gint expe
         g_free(s_lang);
         g_free(t_lang);
         if (fh) fclose(fh);
-        if (cancel_flag) g_atomic_int_set(cancel_flag, expected - 1);
         return NULL;
     }
 
@@ -1502,7 +1515,7 @@ DictMmap *parse_mdx_file(const char *path, volatile gint *cancel_flag, gint expe
                 dict->is_compressed = TRUE;
                 dict->chunk_reader = dict_chunk_reader_new(dict->data, dict->size, hdr);
             } else {
-                mdx_init_context(dict, fh, is_v2, num_size, header_text_size, encoding_is_utf16, dict_encoding);
+                dict->mdx_ctx = mdx_init_context(fh, is_v2, num_size, header_text_size, encoding_is_utf16, dict_encoding);
             }
         }
 
@@ -1793,12 +1806,15 @@ rebuild_cache:
         fprintf(stderr, "[MDX] Parsed zero entries for %s\n", path);
     }
 
+    MdxContext *mdx_ctx = mdx_init_context(fh, is_v2, num_size, header_text_size, encoding_is_utf16, dict_encoding);
+
     dict_cache_builder_free(builder);
     fclose(fh);
     g_free(dict_encoding);
 
     cache_fd = open(cache_path, O_RDONLY);
     if (cache_fd < 0) {
+        if (mdx_ctx) mdx_free_context(mdx_ctx);
         g_free(tree_entries);
         g_free(cache_path);
         g_free(source_dir);
@@ -1814,6 +1830,7 @@ rebuild_cache:
     dict_data = mmap(NULL, dict_size, PROT_READ, MAP_PRIVATE, cache_fd, 0);
     if (dict_data == MAP_FAILED) {
         close(cache_fd);
+        if (mdx_ctx) mdx_free_context(mdx_ctx);
         g_free(tree_entries);
         g_free(cache_path);
         g_free(source_dir);
@@ -1831,6 +1848,7 @@ rebuild_cache:
     dict->name = title;
     dict->source_dir = source_dir;
     dict->mdx_stylesheet = stylesheet;
+    dict->mdx_ctx = mdx_ctx;
     dict->index = flat_index_open(dict->data, dict->size);
 
     if (dict_cache_is_compressed(dict->data, dict->size)) {

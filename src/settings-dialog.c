@@ -735,7 +735,7 @@ static void on_fts_dialog_closed(FtsIndexCtx *ctx)
     g_free(ctx);
 }
 
-static void show_fts_builder_dialog(SettingsDialogData *sdd, GtkWindow *parent)
+static void show_fts_builder_dialog(SettingsDialogData *sdd, GtkWindow *parent, gboolean auto_start)
 {
     FtsIndexCtx *ctx = g_new0(FtsIndexCtx, 1);
     ctx->sdd    = sdd;
@@ -849,6 +849,36 @@ static void show_fts_builder_dialog(SettingsDialogData *sdd, GtkWindow *parent)
 
     g_signal_connect_swapped(dialog, "closed", G_CALLBACK(on_fts_dialog_closed), ctx);
     adw_dialog_present(dialog, parent ? GTK_WIDGET(parent) : NULL);
+
+    if (auto_start) {
+        on_fts_start_clicked(NULL, ctx);
+    }
+}
+
+static void on_fts_switch_toggled(GtkSwitch *sw, GParamSpec *pspec, SettingsDialogData *data);
+
+static void on_fts_confirm_response(AdwAlertDialog *dialog, const char *response, gpointer user_data)
+{
+    (void)user_data;
+    SettingsDialogData *data = g_object_get_data(G_OBJECT(dialog), "settings-data");
+    GtkSwitch *sw = g_object_get_data(G_OBJECT(dialog), "fts-switch");
+
+    if (!settings_dialog_is_active(data)) {
+        return;
+    }
+
+    if (g_strcmp0(response, "build") == 0) {
+        data->settings->fts_enabled = TRUE;
+        settings_save(data->settings);
+        show_fts_builder_dialog(data, data->parent_window, TRUE);
+    } else {
+        data->settings->fts_enabled = FALSE;
+        settings_save(data->settings);
+
+        g_signal_handlers_block_by_func(sw, on_fts_switch_toggled, data);
+        gtk_switch_set_active(sw, FALSE);
+        g_signal_handlers_unblock_by_func(sw, on_fts_switch_toggled, data);
+    }
 }
 
 static void on_fts_switch_toggled(GtkSwitch *sw, GParamSpec *pspec,
@@ -856,18 +886,36 @@ static void on_fts_switch_toggled(GtkSwitch *sw, GParamSpec *pspec,
 {
     (void)pspec;
     gboolean active = gtk_switch_get_active(sw);
-    data->settings->fts_enabled = active;
-    settings_save(data->settings);
 
     if (active) {
-        show_fts_builder_dialog(data, data->parent_window);
+        AdwDialog *confirm_dialog = adw_alert_dialog_new("Enable Full-Text Search?", NULL);
+        adw_alert_dialog_set_body(ADW_ALERT_DIALOG(confirm_dialog),
+            "Full-Text Search allows you to search within definition texts, but it requires building a persistent index first.\n\n"
+            "Would you like to enable Full-Text Search and build the search index now?");
+
+        adw_alert_dialog_add_responses(ADW_ALERT_DIALOG(confirm_dialog),
+            "cancel", "No, Keep Disabled",
+            "build", "Yes, Build Index",
+            NULL);
+
+        adw_alert_dialog_set_default_response(ADW_ALERT_DIALOG(confirm_dialog), "build");
+        adw_alert_dialog_set_close_response(ADW_ALERT_DIALOG(confirm_dialog), "cancel");
+
+        g_object_set_data(G_OBJECT(confirm_dialog), "settings-data", data);
+        g_object_set_data(G_OBJECT(confirm_dialog), "fts-switch", sw);
+
+        g_signal_connect(confirm_dialog, "response", G_CALLBACK(on_fts_confirm_response), NULL);
+        adw_dialog_present(ADW_DIALOG(confirm_dialog), GTK_WIDGET(data->dialog));
+    } else {
+        data->settings->fts_enabled = FALSE;
+        settings_save(data->settings);
     }
 }
 
 static void on_fts_manage_clicked(AdwButtonRow *row, SettingsDialogData *data)
 {
     (void)row;
-    show_fts_builder_dialog(data, data->parent_window);
+    show_fts_builder_dialog(data, data->parent_window, FALSE);
 }
 
 /* ---- Scanning dialog implementation ---- */

@@ -1743,6 +1743,67 @@ static char *canonicalize_watch_path(const char *path) {
     return g_canonicalize_filename(path, NULL);
 }
 
+static char *strip_dict_extensions(const char *path) {
+    if (!path) return g_strdup("");
+    char *p = g_strdup(path);
+    size_t len = strlen(p);
+    
+    /* Strip compressed/double extensions first */
+    if (len > 7 && g_ascii_strcasecmp(p + len - 7, ".dsl.dz") == 0) {
+        p[len - 7] = '\0';
+    } else if (len > 8 && g_ascii_strcasecmp(p + len - 8, ".dict.dz") == 0) {
+        p[len - 8] = '\0';
+    } else if (len > 8 && g_ascii_strcasecmp(p + len - 8, ".xdxf.dz") == 0) {
+        p[len - 8] = '\0';
+    } else if (len > 8 && g_ascii_strcasecmp(p + len - 8, ".idx.gz") == 0) {
+        p[len - 8] = '\0';
+    }
+    
+    /* Strip single extensions */
+    len = strlen(p);
+    if (len > 4) {
+        if (g_ascii_strcasecmp(p + len - 4, ".dsl") == 0 ||
+            g_ascii_strcasecmp(p + len - 4, ".mdx") == 0 ||
+            g_ascii_strcasecmp(p + len - 4, ".ifo") == 0 ||
+            g_ascii_strcasecmp(p + len - 4, ".idx") == 0 ||
+            g_ascii_strcasecmp(p + len - 4, ".bgl") == 0 ||
+            g_ascii_strcasecmp(p + len - 4, ".xdxf") == 0 ||
+            g_ascii_strcasecmp(p + len - 4, ".slob") == 0) {
+            p[len - 4] = '\0';
+        }
+    }
+    return p;
+}
+
+static gboolean paths_are_equivalent(const char *path1, const char *path2) {
+    if (!path1 || !path2) return FALSE;
+    if (strcmp(path1, path2) == 0) return TRUE;
+    
+    char *c1 = canonicalize_watch_path(path1);
+    char *c2 = canonicalize_watch_path(path2);
+    if (!c1 || !c2) {
+        g_free(c1);
+        g_free(c2);
+        return FALSE;
+    }
+    
+    if (strcmp(c1, c2) == 0) {
+        g_free(c1);
+        g_free(c2);
+        return TRUE;
+    }
+    
+    char *s1 = strip_dict_extensions(c1);
+    char *s2 = strip_dict_extensions(c2);
+    gboolean eq = (strcmp(s1, s2) == 0);
+    g_free(s1);
+    g_free(s2);
+    g_free(c1);
+    g_free(c2);
+    return eq;
+}
+
+
 static gboolean hash_table_remove_if_path_has_prefix(gpointer key, gpointer value, gpointer user_data) {
     (void)value;
     MonitorPathPrefix *prefix = user_data;
@@ -2070,7 +2131,13 @@ static guint rebuild_dict_entries_from_settings(void) {
                 continue;
             }
 
-            DictEntry *entry = g_hash_table_lookup(existing_by_path, cfg->path);
+            DictEntry *entry = NULL;
+            for (DictEntry *curr = old_head; curr; curr = curr->next) {
+                if (curr->path && paths_are_equivalent(curr->path, cfg->path)) {
+                    entry = curr;
+                    break;
+                }
+            }
             if (!entry) {
                 entry = dict_entry_new_shell(cfg->name, cfg->path);
             } else {
@@ -3051,7 +3118,6 @@ static char* render_entry_def_to_html(DictEntry *entry, const FlatTreeEntry *res
         : "diction";
 
     dict_render_set_resource_reader(entry->dict->resource_reader);
-
     const char *hw_data_ptr = entry->dict->data ? entry->dict->data : entry->dict->index->mmap_data;
     char *html = dsl_render_to_html(
         def_ptr, def_len,
@@ -3402,59 +3468,35 @@ static int append_exact_matches_html(GString *html_res, const char *query) {
     const char *render_style = (app_settings && app_settings->render_style && *app_settings->render_style)
         ? app_settings->render_style : "diction";
 
-    char *last_clean = NULL;
-    GString *group_body = g_string_new("");
-    char *current_display_hw = NULL;
-
-    for (guint i = 0; i <= matches->len; i++) {
-        ExactMatch *m = (i < matches->len) ? g_ptr_array_index(matches, i) : NULL;
-        
-        if (last_clean && (!m || strcmp(m->clean_hw, last_clean) != 0)) {
-            /* Render the group */
-            char *escaped_hw = safe_markup_escape_n(current_display_hw, -1);
-            
-            g_string_append_printf(html_res, 
-                "<section class='%s-entry'><div class='%s-header'><span class='%s-lemma'>%s</span></div>"
-                "<div class='%s-entry-body'>%s</div></section>",
-                render_style, render_style, render_style, escaped_hw, render_style, group_body->str);
-            
-            g_free(escaped_hw);
-            g_string_truncate(group_body, 0);
-            found_count++;
-        }
-
-        if (!m) break;
-
-        if (group_body->len > 0) {
-            g_string_append(group_body, "<hr style='border:none;border-top:1px dashed #ccc;margin:15px 0;opacity:0.3;'>");
-        }
-
-        /* Source label */
-        char *escaped_dict_name = safe_markup_escape_n(m->dict->name, -1);
-        const char *emoji = dict_format_emoji(m->dict->format);
-        g_string_append_printf(group_body, 
-            "<div style='font-size:0.85em;font-weight:600;opacity:0.6;margin-bottom:8px;display:flex;align-items:center;'>"
-            "<span>%s %s</span></div>",
-            emoji ? emoji : "📖", escaped_dict_name);
-        g_free(escaped_dict_name);
-
+    for (guint i = 0; i < matches->len; i++) {
+        ExactMatch *m = g_ptr_array_index(matches, i);
         char *rendered = render_entry_def_to_html(m->dict, m->entry);
         if (rendered) {
-            g_string_append(group_body, rendered);
-            g_free(rendered);
-        }
+            char *escaped_hw = safe_markup_escape_n(m->display_hw, -1);
+            char *escaped_dn = g_markup_escape_text(m->dict->name, -1);
+            const char *emoji = dict_format_emoji(m->dict->format);
 
-        g_free(last_clean);
-        last_clean = g_strdup(m->clean_hw);
-        g_free(current_display_hw);
-        current_display_hw = g_strdup(m->display_hw);
+            g_string_append_printf(html_res, 
+                "<section class='%s-entry'>"
+                "<div class='%s-header'>"
+                "<span class='%s-lemma'>%s</span>"
+                "<span class='%s-dict'>%s %s</span>"
+                "</div>"
+                "<div class='%s-entry-body'>%s</div>"
+                "</section>",
+                render_style, 
+                render_style, render_style, escaped_hw,
+                render_style, emoji ? emoji : "📖", escaped_dn,
+                render_style, rendered);
+
+            g_free(escaped_hw);
+            g_free(escaped_dn);
+            g_free(rendered);
+            found_count++;
+        }
     }
 
-    g_string_free(group_body, TRUE);
-    g_free(last_clean);
-    g_free(current_display_hw);
     g_ptr_array_unref(matches);
-
     return found_count;
 }
 
@@ -5307,7 +5349,7 @@ static gboolean on_dict_loaded_idle(gpointer user_data) {
         DictEntry *prev = NULL;
         DictEntry *existing = NULL;
         for (DictEntry *curr = all_dicts; curr; curr = curr->next) {
-            if (curr->path && strcmp(curr->path, e->path) == 0) {
+            if (curr->path && paths_are_equivalent(curr->path, e->path)) {
                 existing = curr;
                 break;
             }
@@ -5372,7 +5414,7 @@ static gboolean on_dict_loaded_idle(gpointer user_data) {
         prev = NULL;
         DictEntry *found_again = NULL;
         for (DictEntry *curr = all_dicts; curr; curr = curr->next) {
-            if (curr->path && strcmp(curr->path, e->path) == 0) {
+            if (curr->path && paths_are_equivalent(curr->path, e->path)) {
                 found_again = curr;
                 break;
             }

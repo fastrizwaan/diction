@@ -21,8 +21,55 @@ char* dict_cache_dir_path(void) {
     return g_build_filename(base, "diction", "dicts", NULL);
 }
 
+static char* canonicalize_and_strip_path(const char *path) {
+    if (!path) return g_strdup("");
+    
+    char *expanded = NULL;
+    if (path[0] == '~') {
+        char *expanded_tilde = g_build_filename(g_get_home_dir(), path + 1, NULL);
+        expanded = g_canonicalize_filename(expanded_tilde, NULL);
+        g_free(expanded_tilde);
+    } else {
+        expanded = g_canonicalize_filename(path, NULL);
+    }
+    
+    if (!expanded) return g_strdup("");
+    
+    char *p = expanded;
+    size_t len = strlen(p);
+    
+    /* Strip compressed/double extensions first */
+    if (len > 7 && g_ascii_strcasecmp(p + len - 7, ".dsl.dz") == 0) {
+        p[len - 7] = '\0';
+    } else if (len > 8 && g_ascii_strcasecmp(p + len - 8, ".dict.dz") == 0) {
+        p[len - 8] = '\0';
+    } else if (len > 8 && g_ascii_strcasecmp(p + len - 8, ".xdxf.dz") == 0) {
+        p[len - 8] = '\0';
+    } else if (len > 8 && g_ascii_strcasecmp(p + len - 8, ".idx.gz") == 0) {
+        p[len - 8] = '\0';
+    }
+    
+    /* Strip single extensions */
+    len = strlen(p);
+    if (len > 4) {
+        if (g_ascii_strcasecmp(p + len - 4, ".dsl") == 0 ||
+            g_ascii_strcasecmp(p + len - 4, ".mdx") == 0 ||
+            g_ascii_strcasecmp(p + len - 4, ".ifo") == 0 ||
+            g_ascii_strcasecmp(p + len - 4, ".idx") == 0 ||
+            g_ascii_strcasecmp(p + len - 4, ".bgl") == 0 ||
+            g_ascii_strcasecmp(p + len - 4, ".xdxf") == 0 ||
+            g_ascii_strcasecmp(p + len - 4, ".slob") == 0) {
+            p[len - 4] = '\0';
+        }
+    }
+    
+    return p;
+}
+
 char* dict_cache_path_for(const char *original_path) {
-    char *hash = g_compute_checksum_for_string(G_CHECKSUM_SHA1, original_path, -1);
+    char *canon_strip = canonicalize_and_strip_path(original_path);
+    char *hash = g_compute_checksum_for_string(G_CHECKSUM_SHA1, canon_strip, -1);
+    g_free(canon_strip);
     const char *base = dict_cache_base_dir();
     char *path = g_build_filename(base, "diction", "dicts", hash, NULL);
     g_free(hash);

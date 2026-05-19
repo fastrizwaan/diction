@@ -149,6 +149,81 @@ static DictConfig *settings_find_dictionary_by_id_locked(AppSettings *settings, 
     return NULL;
 }
 
+static char *settings_canonicalize_path(const char *path) {
+    if (!path || !*path) {
+        return NULL;
+    }
+
+    if (path[0] == '~') {
+        char *expanded = g_build_filename(g_get_home_dir(), path + 1, NULL);
+        char *canonical = g_canonicalize_filename(expanded, NULL);
+        g_free(expanded);
+        return canonical;
+    }
+
+    return g_canonicalize_filename(path, NULL);
+}
+
+static char *settings_strip_extensions(const char *path) {
+    if (!path) return g_strdup("");
+    char *p = g_strdup(path);
+    size_t len = strlen(p);
+    
+    /* Strip compressed/double extensions first */
+    if (len > 7 && g_ascii_strcasecmp(p + len - 7, ".dsl.dz") == 0) {
+        p[len - 7] = '\0';
+    } else if (len > 8 && g_ascii_strcasecmp(p + len - 8, ".dict.dz") == 0) {
+        p[len - 8] = '\0';
+    } else if (len > 8 && g_ascii_strcasecmp(p + len - 8, ".xdxf.dz") == 0) {
+        p[len - 8] = '\0';
+    } else if (len > 8 && g_ascii_strcasecmp(p + len - 8, ".idx.gz") == 0) {
+        p[len - 8] = '\0';
+    }
+    
+    /* Strip single extensions */
+    len = strlen(p);
+    if (len > 4) {
+        if (g_ascii_strcasecmp(p + len - 4, ".dsl") == 0 ||
+            g_ascii_strcasecmp(p + len - 4, ".mdx") == 0 ||
+            g_ascii_strcasecmp(p + len - 4, ".ifo") == 0 ||
+            g_ascii_strcasecmp(p + len - 4, ".idx") == 0 ||
+            g_ascii_strcasecmp(p + len - 4, ".bgl") == 0 ||
+            g_ascii_strcasecmp(p + len - 4, ".xdxf") == 0 ||
+            g_ascii_strcasecmp(p + len - 4, ".slob") == 0) {
+            p[len - 4] = '\0';
+        }
+    }
+    return p;
+}
+
+static gboolean settings_paths_are_equivalent(const char *path1, const char *path2) {
+    if (!path1 || !path2) return FALSE;
+    if (strcmp(path1, path2) == 0) return TRUE;
+    
+    char *c1 = settings_canonicalize_path(path1);
+    char *c2 = settings_canonicalize_path(path2);
+    if (!c1 || !c2) {
+        g_free(c1);
+        g_free(c2);
+        return FALSE;
+    }
+    
+    if (strcmp(c1, c2) == 0) {
+        g_free(c1);
+        g_free(c2);
+        return TRUE;
+    }
+    
+    char *s1 = settings_strip_extensions(c1);
+    char *s2 = settings_strip_extensions(c2);
+    gboolean eq = (strcmp(s1, s2) == 0);
+    g_free(s1);
+    g_free(s2);
+    g_free(c1);
+    g_free(c2);
+    return eq;
+}
+
 static DictConfig *settings_find_dictionary_by_path_locked(AppSettings *settings, const char *path) {
     if (!settings || !path || !settings->dictionaries) {
         return NULL;
@@ -156,7 +231,7 @@ static DictConfig *settings_find_dictionary_by_path_locked(AppSettings *settings
 
     for (guint i = 0; i < settings->dictionaries->len; i++) {
         DictConfig *cfg = g_ptr_array_index(settings->dictionaries, i);
-        if (cfg && cfg->path && g_strcmp0(cfg->path, path) == 0) {
+        if (cfg && cfg->path && settings_paths_are_equivalent(cfg->path, path)) {
             return cfg;
         }
     }

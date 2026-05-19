@@ -2401,6 +2401,8 @@ static void transform_dictd_markup(GString *out, const char *text, size_t len) {
     }
     g_string_append(out, "</div>");
 }
+
+
 char* dsl_render_to_html(const char *dsl_text,
                          size_t length,
                          const char *headword,
@@ -2717,8 +2719,6 @@ char* dsl_render_to_html(const char *dsl_text,
     buf_append_str(&b, "ol.single>li,ul.single>li,li.single{list-style-type:none;display:inline;}");
     buf_append_str(&b, "ol.sense{list-style-type:upper-roman;}");
     buf_append_str(&b, "ol.cit{list-style-type:decimal;}");
-    buf_append_str(&b, ".k, .headword, .word, .hw, .head, .entry-header, .entry-headword, .slobdict_headword, .slobdict_headwords { display: none; }");
-    buf_append_str(&b, "a .hw, a .headword, a .word, a .k, .scroller .hw, .scroller .headword, .scroller .word, .scroller .k, .smartt .hw, .smartt .headword, .smartt .word, .smartt .k { display: inline !important; }");
     buf_append_str(&b, ".slobdict .form:first-child .orth { display: none; }");
     buf_append_str(&b, ".orth { font-weight: bold; display: inline-block; padding-right: 0.5rem; }");
     buf_append_str(&b, "</style><script>");
@@ -2729,31 +2729,6 @@ char* dsl_render_to_html(const char *dsl_text,
     buf_append_str(&b, "    document.documentElement.style.setProperty('--' + key, value);");
     buf_append_str(&b, "  }");
     buf_append_str(&b, "}");
-    buf_append_str(&b, "(function() {");
-    buf_append_str(&b, "  const hideDuplicate = () => {");
-    buf_append_str(&b, "    document.querySelectorAll('.diction-entry, .gold-entry, .slate-entry, .paper-entry, .entry, .gdarticle').forEach(entry => {");
-    buf_append_str(&b, "      const lemmaEl = entry.querySelector('.diction-lemma, .gold-entry-headword, .slate-lemma, .paper-lemma, .lemma, .gold-entry-headword');");
-    buf_append_str(&b, "      if (!lemmaEl) return;");
-    buf_append_str(&b, "      const hw = lemmaEl.textContent.trim().toLowerCase();");
-    buf_append_str(&b, "      const body = entry.querySelector('.rendered-entry-body, .gdarticlebody, .defs, .slate-entry-body, .paper-entry-body');");
-    buf_append_str(&b, "      if (!body) return;");
-    buf_append_str(&b, "      const elements = body.querySelectorAll('h1, h2, h3, h4, b, strong, span, div, .orth, .k, .headword');");
-    buf_append_str(&b, "      for (let i = 0; i < elements.length; i++) {");
-    buf_append_str(&b, "        const el = elements[i];");
-    buf_append_str(&b, "        if (el.offsetParent === null) continue;");
-    buf_append_str(&b, "        const text = el.textContent.trim().toLowerCase();");
-    buf_append_str(&b, "        if (text === hw) {");
-    buf_append_str(&b, "          el.style.setProperty('display', 'none', 'important');");
-    buf_append_str(&b, "          break;");
-    buf_append_str(&b, "        }");
-    buf_append_str(&b, "        if (text.length > 0) break;");
-    buf_append_str(&b, "      }");
-    buf_append_str(&b, "    });");
-    buf_append_str(&b, "  };");
-    buf_append_str(&b, "  hideDuplicate();");
-    buf_append_str(&b, "  setTimeout(hideDuplicate, 10);");
-    buf_append_str(&b, "  setTimeout(hideDuplicate, 100);");
-    buf_append_str(&b, "})();");
     buf_append_str(&b, "</script><style>");
     buf_append_str(&b, ".gen { color:var(--pos-color); font-style: italic; display: inline-block; vertical-align: top; padding-right: 0.5rem; }");
     buf_append_str(&b, ".gen::before { content: ' ('; }");
@@ -2921,27 +2896,32 @@ char* dsl_render_to_html(const char *dsl_text,
     if (python_style) {
         buf_append_str(&b, "<div class='rendered-entry py-entry-rendered ");
         buf_append_str(&b, scope_class);
-        buf_append_str(&b, "'><div class='rendered-entry-body'>");
+        buf_append_str(&b, "'>");
     } else if (diction_style) {
         buf_append_str(&b, "<div class='rendered-entry diction-entry-rendered ");
         buf_append_str(&b, scope_class);
-        buf_append_str(&b, "'><div class='rendered-entry-body'>");
+        buf_append_str(&b, "'>");
     } else if (slate_style) {
         buf_append_str(&b, "<div class='rendered-entry slate-entry-rendered ");
         buf_append_str(&b, scope_class);
-        buf_append_str(&b, "'><div class='rendered-entry-body'>");
+        buf_append_str(&b, "'>");
     } else if (paper_style) {
         buf_append_str(&b, "<div class='rendered-entry paper-entry-rendered ");
         buf_append_str(&b, scope_class);
-        buf_append_str(&b, "'><div class='rendered-entry-body'>");
+        buf_append_str(&b, "'>");
     } else if (goldendict_style) {
         buf_append_str(&b, "<div class='rendered-entry gold-entry-rendered ");
         buf_append_str(&b, scope_class);
-        buf_append_str(&b, "'><div class='rendered-entry-body'>");
+        buf_append_str(&b, "'>");
     } else {
         buf_append_str(&b, "<div class='rendered-entry diction-entry-rendered ");
         buf_append_str(&b, scope_class);
         buf_append_str(&b, "'>");
+    }
+
+    if (python_style || diction_style || slate_style || paper_style || goldendict_style) {
+        buf_append_str(&b, "<div class='rendered-entry-body'>");
+    } else {
         if (format == DICT_FORMAT_DSL || format == DICT_FORMAT_SDICT || format == DICT_FORMAT_DICTD) {
             buf_append_str(&b, "<h2 style='color:");
             buf_append_str(&b, heading_color);

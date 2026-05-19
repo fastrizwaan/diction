@@ -1061,6 +1061,7 @@ static gpointer sidebar_search_thread_func(gpointer user_data) {
     guint processed = 0;
     const guint max_batch_size = 1000;
     gint64 next_dispatch_time = g_get_monotonic_time() + 50000; // Dispatch every 50ms at most
+    guint added = 0;
 
     // First, do the fast prefix search (formerly seed_search_sidebar_fast_rows)
     if (state->query && state->query_key && !state->is_fts) {
@@ -1068,8 +1069,6 @@ static gpointer sidebar_search_thread_func(gpointer user_data) {
         seed_msg->state = sidebar_search_state_ref(state);
         seed_msg->labels[SEARCH_BUCKET_EXACT] = g_ptr_array_new_with_free_func(g_free);
         seed_msg->payloads[SEARCH_BUCKET_EXACT] = g_ptr_array_new_with_free_func((GDestroyNotify)related_row_payload_free);
-        
-        guint added = 0;
         const guint max_seed_rows = 512;
         
         for (guint idx = 0; state->search_entries && idx < state->search_entries->len && added < max_seed_rows; idx++) {
@@ -1166,22 +1165,24 @@ static gpointer sidebar_search_thread_func(gpointer user_data) {
         return NULL;
     }
 
-    // Inform UI if searching
-    SearchBatchMsg *status_msg = g_new0(SearchBatchMsg, 1);
-    status_msg->state = sidebar_search_state_ref(state);
-    if (state->is_fts) {
-        if (state->fts_limited) {
-            status_msg->status_subtitle = g_strdup_printf("Searching the first %u of %u dictionaries in this scope.",
-                                             state->searched_dict_count,
-                                             state->scoped_dict_count);
-            status_msg->status_title = g_strdup("Full Text Search…");
+    // Inform UI if searching (only if we haven't already seeded results in standard search)
+    if (state->is_fts || added == 0) {
+        SearchBatchMsg *status_msg = g_new0(SearchBatchMsg, 1);
+        status_msg->state = sidebar_search_state_ref(state);
+        if (state->is_fts) {
+            if (state->fts_limited) {
+                status_msg->status_subtitle = g_strdup_printf("Searching the first %u of %u dictionaries in this scope.",
+                                                 state->searched_dict_count,
+                                                 state->scoped_dict_count);
+                status_msg->status_title = g_strdup("Full Text Search…");
+            } else {
+                status_msg->status_title = g_strdup("Full Text Search…");
+            }
         } else {
-            status_msg->status_title = g_strdup("Full Text Search…");
+            status_msg->status_title = g_strdup("Searching…");
         }
-    } else {
-        status_msg->status_title = g_strdup("Searching…");
+        g_idle_add(sidebar_search_idle_cb, status_msg);
     }
-    g_idle_add(sidebar_search_idle_cb, status_msg);
 
     while (!g_atomic_int_get(&state->cancelled)) {
         if ((!state->search_entries || state->current_entry_index >= state->search_entries->len) &&

@@ -3536,14 +3536,14 @@ static int append_exact_matches_html(GString *html_res, const char *query, gbool
             const char *emoji = dict_format_emoji(m->dict->format);
 
             g_string_append_printf(html_res, 
-                "<section class='%s-entry'>"
+                "<section id='dict-%s' class='%s-entry'>"
                 "<div class='%s-header'>"
                 "<span class='%s-lemma'>%s</span>"
                 "<span class='%s-dict'>%s %s</span>"
                 "</div>"
                 "<div class='%s-entry-body'>%s</div>"
                 "</section>",
-                render_style, 
+                m->dict->dict_id ? m->dict->dict_id : "", render_style, 
                 render_style, render_style, escaped_hw,
                 render_style, emoji ? emoji : "📖", escaped_dn,
                 render_style, rendered);
@@ -4006,39 +4006,13 @@ static void maybe_show_startup_random_word(void) {
 }
 
 static void activate_dictionary_entry(DictEntry *e) {
-    if (!e) return;
-    int idx = -1;
-    int current = 0;
-    g_mutex_lock(&dict_loader_mutex);
-    DictEntry *cursor = all_dicts;
-    while (cursor) {
-        dict_entry_ref(cursor);
-        g_mutex_unlock(&dict_loader_mutex);
-
-        if (cursor->dict && dict_entry_in_active_scope(cursor)) {
-            if (cursor == e) {
-                idx = current;
-                dict_entry_unref(cursor);
-                break;
-            }
-            current++;
-        }
-        
-        g_mutex_lock(&dict_loader_mutex);
-        DictEntry *next = cursor->next;
-        dict_entry_unref(cursor);
-        cursor = next;
-    }
-    if (cursor == NULL) g_mutex_unlock(&dict_loader_mutex);
-    if (idx < 0) {
-        return;
-    }
+    if (!e || !e->dict_id) return;
 
     char js[256];
     snprintf(js, sizeof(js),
-        "var el = document.getElementById('dict-%d'); "
+        "var el = document.getElementById('dict-%s'); "
         "if (el) { el.scrollIntoView({behavior: 'smooth', block: 'start'}); }",
-        idx);
+        e->dict_id);
     webkit_web_view_evaluate_javascript(web_view, js, -1, NULL, NULL, NULL, NULL, NULL);
     set_active_entry(e);
     populate_dict_sidebar();

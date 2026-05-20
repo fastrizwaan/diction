@@ -64,3 +64,15 @@ also create submenu groups
 -> DSl, MDX, Slob (all dictoinary types)
 
 -> 
+
+2. use splitview 1, 2, 3, 4 so that maximized window can show more dictionaries.
+
+
+
+
+
+
+in a dead faint
+📘 The Little Dict
+in a dead faint
+colorful line as separator see the little dict

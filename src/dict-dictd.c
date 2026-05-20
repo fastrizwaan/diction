@@ -87,6 +87,8 @@ DictMmap* parse_dictd_file(const char *index_path, volatile gint *cancel_flag, g
                 if (data != MAP_FAILED) {
                     DictMmap *dict = g_new0(DictMmap, 1);
                     dict->fd = fd;
+                    close(dict->fd);
+                    dict->fd = -1;
                     dict->data = data;
                     dict->size = st.st_size;
                     dict->index = flat_index_open(dict->data, dict->size);
@@ -277,6 +279,8 @@ DictMmap* parse_dictd_file(const char *index_path, volatile gint *cancel_flag, g
 
     DictMmap *dict = g_new0(DictMmap, 1);
     dict->fd = fd;
+    close(dict->fd);
+    dict->fd = -1;
     dict->data = data;
     dict->size = final_st.st_size;
     dict->index = flat_index_open(dict->data, dict->size);

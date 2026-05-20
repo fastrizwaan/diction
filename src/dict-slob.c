@@ -352,6 +352,8 @@ DictMmap* parse_slob_file(const char *path, volatile gint *cancel_flag, gint exp
 
     DictMmap *dm = g_new0(DictMmap, 1);
     dm->fd = cache_fd;
+    close(dm->fd);
+    dm->fd = -1;
     dm->data = (const char*)cache_map;
     dm->size = st_cache.st_size;
     dm->name = title ? title : g_path_get_basename(path);

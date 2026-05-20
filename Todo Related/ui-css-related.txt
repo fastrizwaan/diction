@@ -11,7 +11,10 @@ henry morgan
 📘 Dictionary.com Unabridged 2015
 @@@LINK=jp morgan
 
-الله أعلم
+الله أعلمquail
+📚 English-Russian Lingvistica'98 dictionary
+<FONT COLOR=BLUE>(v)</FONT> падать духом; приходить в ужас; трусить
+
 📘 Wiktionary
 qp" onclick="zyfq_p(this)">◀▶
 .dsl_headwords{display:inline-block;margin-top:0;margin-bottom:0.35em;}.dsl_headwords{font-size:1.18em;font-weight:700;color:var(--heading-color);}.gold-entry-headword{display:inline-block;font-size:1.18em;font-weight:700;color:var(--heading-color);margin:0;}.slate-entry{margin:0.25em 0 0.9em 0;padding:14px 18px;border-radius:16px;border:1px solid var(--slate-badge);background:var(--slate-surface);box-shadow:none;}.slate-header{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin:0 0 12px 0;width:100%;}.slate-dict{display:inline-flex;align-items:center;padding:0.28em 0.75em;border-radius:999px;font-size:0.82em;font-weight:600;white-space:nowrap;background:var(--slate-badge);color:var(--link-color);}.slate-lemma{font-size:1.28em;font-weight:700;color:var(--heading-color);}.slate-entry .rendered-entry-body{line-height:1.5;}.fts-highlight{background-color:var(--fts-highlight);color:#000;border-radius:2px;padding:0 2px;font-weight:bold;}.paper-entry{margin:0 0 1em 0;padding:14px 18px 12px 18px;border-left:4px solid var(--paper-accent);border-radius:10px;border-top:1px solid var(--paper-edge);border-right:1px solid var(--paper-edge);border-bottom:1px solid var(--paper-edge);}.paper-header{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin:0 0 10px 0;width:100%;}.paper-lemma{font-family:sans-serif;font-size:16px;font-size:1.32em;font-weight:700;color:var(--heading-color);}.diction-lemma,.lemma,.py-lemma,.gold-entry-headword,.slate-lemma,.paper-lemma{white-space:pre-line;}.paper-dict{font-size:0.82em;letter-spacing:0.03em;text-transform:uppercase;white-space:nowrap;color:#e0e0e0;}.paper-entry .rendered-entry-body{line-height:1.58;}k{display:block;font-size:1.18em;font-weight:700;color:var(--heading-color);margin-bottom:0.2em;}dtrn{display:block;margin-top:0.3em;line-height:1.45;}co{color:var(--com-color);}nu{display:none;}c{color:var(--trn-color);}kref{cursor:pointer;color:var(--link-color);text-decoration:underline;}ol.single,ul.single{list-style-type:none;padding-left:0;margin-left:0;margin-right:0.5em;}li>ol,li>ul{margin-top:0;margin-bottom:0;}li>ol.single,li>ul.single{display:inline;}ol.single>li,ul.single>li,li.single{list-style-type:none;display:inline;}ol.sense{list-style-type:upper-roman;}ol.cit{list-style-type:decimal;}.slobdict .form:first-child .orth { display: none; }.orth { font-weight: bold; display: inline-block; padding-right: 0.5rem; }
@@ -69,8 +72,12 @@ also create submenu groups
 
 
 
+/run/media/asif/0487b1a0-e06a-412c-bb90-38daa7d36c8b/home/shifu/XDXF/en-en_Hist_Austria_1_0/dict.xdxf:207: parser error : Excessive depth in document: 256 use XML_PARSE_HUGE option
+<blockquote><blockquote> ♦ <
 
 
+/run/media/asif/0487b1a0-e06a-412c-bb90-38daa7d36c8b/home/shifu/XDXF/Telecommunication_Standard_Terms/dict.xdxf:174: parser error : Entity 'reg' not defined
+<ar><k>Centrex&reg; (CTX) service</k>A service offered by Bell Ope
 
 in a dead faint
 📘 The Little Dict

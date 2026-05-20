@@ -454,6 +454,8 @@ DictMmap* parse_bgl_file(const char *path, volatile gint *cancel_flag, gint expe
 
         DictMmap *dict = g_new0(DictMmap, 1);
         dict->fd = cache_fd;
+        close(dict->fd);
+        dict->fd = -1;
         dict->tmp_file = NULL;
         dict->data = dict_data;
         dict->size = dict_size;
@@ -595,6 +597,8 @@ DictMmap* parse_bgl_file(const char *path, volatile gint *cancel_flag, gint expe
 
         DictMmap *dict = g_new0(DictMmap, 1);
         dict->fd = cache_fd;
+        close(dict->fd);
+        dict->fd = -1;
         dict->tmp_file = NULL;
         dict->data = dict_data;
         dict->size = dict_size;

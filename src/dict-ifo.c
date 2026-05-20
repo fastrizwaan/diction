@@ -553,6 +553,8 @@ static DictMmap *open_cached_stardict(const char *cache_path, char *bookname, ch
 
     DictMmap *dict = g_new0(DictMmap, 1);
     dict->fd = fd;
+    close(dict->fd);
+    dict->fd = -1;
     dict->data = data;
     dict->size = st.st_size;
     dict->name = bookname;
@@ -572,6 +574,8 @@ static DictMmap *open_cached_stardict(const char *cache_path, char *bookname, ch
                     fstat(dict->source_fd, &s_st);
                     dict->source_size = s_st.st_size;
                     dict->source_mmap = mmap(NULL, dict->source_size, PROT_READ, MAP_SHARED, dict->source_fd, 0);
+                    close(dict->source_fd);
+                    dict->source_fd = -1;
                 }
             }
             if (header->stardict_sts[0] != '\0') {

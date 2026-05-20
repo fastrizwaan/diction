@@ -329,6 +329,8 @@ DictMmap* dict_mmap_open(const char *path, volatile gint *cancel_flag, gint expe
     }
 
     dict->data = (const char*)map;
+    close(dict->fd);
+    dict->fd = -1;
     dict->index = flat_index_open(dict->data, dict->size);
 
     if (dict_cache_is_compressed(dict->data, dict->size)) {
@@ -345,6 +347,8 @@ DictMmap* dict_mmap_open(const char *path, volatile gint *cancel_flag, gint expe
                     fstat(dict->source_fd, &s_st);
                     dict->source_size = s_st.st_size;
                     dict->source_mmap = mmap(NULL, dict->source_size, PROT_READ, MAP_SHARED, dict->source_fd, 0);
+                    close(dict->source_fd);
+                    dict->source_fd = -1;
                 }
             }
             dict->source_encoding = header->source_encoding;

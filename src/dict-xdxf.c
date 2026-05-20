@@ -698,6 +698,8 @@ DictMmap* parse_xdxf_file(const char *path, volatile gint *cancel_flag, gint exp
 
                 DictMmap *dict = g_new0(DictMmap, 1);
                 dict->fd = fd;
+                close(dict->fd);
+                dict->fd = -1;
                 dict->data = data;
                 dict->size = size;
                 char *archive_path = NULL;
@@ -921,6 +923,8 @@ rebuild_xdxf_cache:
     
     DictMmap *dict = g_new0(DictMmap, 1);
     dict->fd = fd;
+    close(dict->fd);
+    dict->fd = -1;
     dict->data = data;
     dict->size = size;
     dict->name = state.dict_name;

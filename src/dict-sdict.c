@@ -240,6 +240,8 @@ DictMmap* parse_sdict_file(const char *path, volatile gint *cancel_flag, gint ex
                     fprintf(stderr, "[SDICT] Cache loaded successfully: %s\n", cache_path);
                     DictMmap *dict = g_new0(DictMmap, 1);
                     dict->fd = fd;
+                    close(dict->fd);
+                    dict->fd = -1;
                     dict->data = data;
                     dict->size = st.st_size;
                     dict->name = bookname;
@@ -428,6 +430,8 @@ DictMmap* parse_sdict_file(const char *path, volatile gint *cancel_flag, gint ex
     }
     DictMmap *dict = g_new0(DictMmap, 1);
     dict->fd = fd;
+    close(dict->fd);
+    dict->fd = -1;
     dict->data = final_data;
     dict->size = final_st.st_size;
     dict->name = bookname;

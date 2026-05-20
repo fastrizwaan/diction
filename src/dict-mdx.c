@@ -1848,6 +1848,8 @@ rebuild_cache:
 
     DictMmap *dict = g_new0(DictMmap, 1);
     dict->fd = cache_fd;
+    close(dict->fd);
+    dict->fd = -1;
     dict->data = dict_data;
     dict->size = dict_size;
     dict->name = title;

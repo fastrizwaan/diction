@@ -298,6 +298,12 @@ static void on_add_directory_response(GObject *source, GAsyncResult *result, gpo
             guint before = data->settings->dictionary_dirs->len;
             settings_add_directory(data->settings, path);
 
+            /* Force a directory rescan so that if a parent directory is being added
+               after its subdirectories were already added, the parent's other
+               subdirectories are discovered (not just the already-known ones). */
+            extern void force_next_dictionary_directory_rescan(void);
+            force_next_dictionary_directory_rescan();
+
             /* Show the scan dialog IMMEDIATELY before doing heavy UI work in the main window */
             char **dirs = g_new0(char *, 2);
             dirs[0] = g_strdup(path);

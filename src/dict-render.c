@@ -2403,34 +2403,9 @@ static void transform_dictd_markup(GString *out, const char *text, size_t len) {
 }
 
 
-char* dsl_render_to_html(const char *dsl_text,
-                         size_t length,
-                         const char *headword,
-                         size_t hw_length,
-                         DictFormat format,
-                         const char *resource_dir,
-                         const char *source_dir,
-                         const char *mdx_stylesheet,
-                         int dark_mode,
-                         const char *theme_name,
-                         const char *render_style,
-                         const char *font_family,
-                         int font_size,
-                         const char *highlight_query) {
-    StrBuf b = {NULL, 0, 0};
-    char *styled_text = NULL;
-    char *normalized_plain_text = NULL;
-    char *display_headword = normalize_headword_for_render(headword, hw_length, TRUE);
-    char scope_class[64] = "";
-    unsigned long path_hash = get_djb2_hash(resource_dir ? resource_dir : (source_dir ? source_dir : "default"));
-    g_snprintf(scope_class, sizeof(scope_class), "dict-scoped-%lx", path_hash);
 
-    gboolean python_style = g_strcmp0(render_style, "python") == 0;
-    gboolean goldendict_style = g_strcmp0(render_style, "goldendict-ng") == 0;
-    gboolean slate_style = g_strcmp0(render_style, "slate-card") == 0;
-    gboolean paper_style = g_strcmp0(render_style, "paper") == 0;
-    gboolean diction_style = !python_style && !goldendict_style && !slate_style && !paper_style;
-    gboolean is_kyw = FALSE;
+char* dict_render_shared_styles(int dark_mode, const char *theme_name, const char *font_family, int font_size) {
+    StrBuf b = {NULL, 0, 0};
 
     /* Build font CSS value from user settings, with sensible fallback */
     const char *ff = (font_family && *font_family) ? font_family : "system-ui,sans-serif";
@@ -2446,13 +2421,6 @@ char* dsl_render_to_html(const char *dsl_text,
         g_snprintf(body_font_css, sizeof(body_font_css), "\"%s\",sans-serif%s", ff, font_size_str);
     } else {
         g_snprintf(body_font_css, sizeof(body_font_css), "%s%s", ff, font_size_str);
-    }
-
-    if (format == DICT_FORMAT_MDX) {
-        styled_text = substitute_mdx_stylesheet(dsl_text, length, mdx_stylesheet, &length);
-        if (styled_text) {
-            dsl_text = styled_text;
-        }
     }
 
     // Map theme colors
@@ -2750,8 +2718,7 @@ char* dsl_render_to_html(const char *dsl_text,
     /* Base styles now use variables, no need for conditional style blocks here */
 
     /* MDX thesaurus expand/collapse support (Cambridge SMART Thesaurus, etc.) */
-    if (format == DICT_FORMAT_MDX) {
-        is_kyw = (g_strstr_len(dsl_text, length, "eol") != NULL || g_strstr_len(dsl_text, length, "ypu") != NULL);
+    if (1) { /* Always emit MDX CSS for shared */
         /* Derive pill background from link_color */
         char pill_bg[64];
         char pill_hover[64];
@@ -2851,9 +2818,8 @@ char* dsl_render_to_html(const char *dsl_text,
 
         buf_append_str(&b, "</style>");
 
-        if (is_kyw) {
-            buf_append_str(&b,
-                "<script>"
+        buf_append_str(&b,
+            "<script>"
                 "function cacd_openShutManager(el,id){"
                 "  if(typeof event!=='undefined'&&event&&event.preventDefault)event.preventDefault();"
                 "  var box=document.getElementById(id);"
@@ -2890,6 +2856,46 @@ char* dsl_render_to_html(const char *dsl_text,
                 "  }"
                 "};"
                 "</script>");
+    }
+
+    
+    return b.str;
+}
+
+char* dsl_render_body_only(const char *dsl_text,
+                           size_t length,
+                           const char *headword,
+                           size_t hw_length,
+                           DictFormat format,
+                           const char *resource_dir,
+                           const char *source_dir,
+                           const char *mdx_stylesheet,
+                           int dark_mode,
+                           const char *theme_name,
+                           const char *render_style,
+                           const char *highlight_query) {
+    StrBuf b = {NULL, 0, 0};
+    char *styled_text = NULL;
+    char *normalized_plain_text = NULL;
+    char *display_headword = normalize_headword_for_render(headword, hw_length, TRUE);
+    char scope_class[64] = "";
+    unsigned long path_hash = get_djb2_hash(resource_dir ? resource_dir : (source_dir ? source_dir : "default"));
+    g_snprintf(scope_class, sizeof(scope_class), "dict-scoped-%lx", path_hash);
+
+    gboolean python_style = g_strcmp0(render_style, "python") == 0;
+    gboolean goldendict_style = g_strcmp0(render_style, "goldendict-ng") == 0;
+    gboolean slate_style = g_strcmp0(render_style, "slate-card") == 0;
+    gboolean paper_style = g_strcmp0(render_style, "paper") == 0;
+    gboolean diction_style = !python_style && !goldendict_style && !slate_style && !paper_style;
+
+    dsl_theme_palette palette;
+    dict_render_get_theme_palette(theme_name, dark_mode, &palette);
+    const char *heading_color = palette.heading;
+
+    if (format == DICT_FORMAT_MDX) {
+        styled_text = substitute_mdx_stylesheet(dsl_text, length, mdx_stylesheet, &length);
+        if (styled_text) {
+            dsl_text = styled_text;
         }
     }
 
@@ -3574,3 +3580,31 @@ char* dsl_render_to_html(const char *dsl_text,
     g_free(display_headword);
     return finalize_placeholder_dict_links(result_html);
 }
+
+char* dsl_render_to_html(const char *dsl_text,
+                         size_t length,
+                         const char *headword,
+                         size_t hw_length,
+                         DictFormat format,
+                         const char *resource_dir,
+                         const char *source_dir,
+                         const char *mdx_stylesheet,
+                         int dark_mode,
+                         const char *theme_name,
+                         const char *render_style,
+                         const char *font_family,
+                         int font_size,
+                         const char *highlight_query) {
+    char *styles = dict_render_shared_styles(dark_mode, theme_name, font_family, font_size);
+    char *body = dsl_render_body_only(dsl_text, length, headword, hw_length, format, resource_dir, source_dir, mdx_stylesheet, dark_mode, theme_name, render_style, highlight_query);
+    
+    if (!styles && !body) return NULL;
+    if (!styles) return body;
+    if (!body) return styles;
+    
+    char *combined = g_strconcat(styles, body, NULL);
+    g_free(styles);
+    g_free(body);
+    return combined;
+}
+

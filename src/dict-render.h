@@ -28,8 +28,22 @@ char* dsl_render_to_html(const char *dsl_text,
                          int font_size,
                          const char *highlight_query);
 
-char *normalize_headword_for_render(const char *text, size_t length, gboolean keep_middle_dot);
+char* dict_render_shared_styles(int dark_mode, const char *theme_name, const char *font_family, int font_size);
 
+char* dsl_render_body_only(const char *dsl_text,
+                           size_t length,
+                           const char *headword,
+                           size_t hw_length,
+                           DictFormat format,
+                           const char *resource_dir,
+                           const char *source_dir,
+                           const char *mdx_stylesheet,
+                           int dark_mode,
+                           const char *theme_name,
+                           const char *render_style,
+                           const char *highlight_query);
+
+char *normalize_headword_for_render(const char *text, size_t length, gboolean keep_middle_dot);
 typedef struct {
     const char *bg;
     const char *fg;

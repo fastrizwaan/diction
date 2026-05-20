@@ -16,6 +16,15 @@ typedef struct {
     uint32_t d_len;
 } FlatTreeEntry;
 
+/* NormKey: offset/length into the pre-computed normalized key buffer.
+ * Normalized keys are lowercase-decomposed UTF-8 strings with DSL noise
+ * stripped, enabling memcmp-based binary search instead of per-character
+ * g_unichar_fully_decompose() calls. */
+typedef struct {
+    uint32_t off;   /* byte offset into norm_keys_buf */
+    uint16_t len;   /* byte length of normalized key */
+} NormKey;
+
 /* FlatIndex: a sorted, read-only index backed by mmap'd data.
  * Zero heap allocation for the entries themselves — they point
  * directly into the mmap'd cache file. */
@@ -24,6 +33,9 @@ typedef struct {
     size_t count;
     const char *mmap_data;       /* base pointer of mmap'd file */
     size_t mmap_size;
+    /* Pre-computed normalized keys for fast binary search */
+    char *norm_keys_buf;         /* contiguous buffer of normalized keys */
+    NormKey *norm_keys;          /* parallel array: one per entry */
 } FlatIndex;
 
 /* Create a FlatIndex from mmap'd cache data. Reads the count from
@@ -34,6 +46,10 @@ FlatIndex* flat_index_open(const char *data, size_t size);
 
 /* Free the FlatIndex struct (does NOT unmap data). */
 void flat_index_close(FlatIndex *idx);
+
+/* Build the pre-computed normalized key cache for fast binary search.
+ * Call once after flat_index_open(). Safe to call multiple times. */
+void flat_index_build_norm_cache(FlatIndex *idx);
 
 /* Search for an exact (case-insensitive) match. Returns the index
  * position of the first match, or (size_t)-1 if not found. */

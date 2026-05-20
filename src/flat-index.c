@@ -371,11 +371,130 @@ FlatIndex* flat_index_open(const char *data, size_t size) {
     idx->count = (size_t)count;
     idx->mmap_data = data;
     idx->mmap_size = size;
+    /* Pre-compute normalized search keys for fast memcmp-based binary search */
+    flat_index_build_norm_cache(idx);
     return idx;
 }
 
 void flat_index_close(FlatIndex *idx) {
+    if (idx) {
+        g_free(idx->norm_keys_buf);
+        g_free(idx->norm_keys);
+    }
     g_free(idx); /* entries are mmap'd, not heap-allocated */
+}
+
+/* ── Normalized key helpers ────────────────────────────── */
+
+/* Build a single normalized key from a raw headword.
+ * Returns a newly allocated UTF-8 string (lowercase, decomposed, DSL noise stripped).
+ * Caller must g_free() the result. *out_len is set to the byte length. */
+static char *build_norm_key_for_raw(const char *raw, size_t raw_len, size_t *out_len) {
+    GString *out = g_string_sized_new(raw_len);
+    size_t i = 0;
+    size_t skip;
+
+    while (i < raw_len) {
+        /* Skip DSL noise characters */
+        skip = get_dsl_ignored_len_ext(raw + i, raw_len - i, true);
+        if (skip > 0) { i += skip; continue; }
+
+        /* Handle DSL escapes */
+        if (raw[i] == '\\' && i + 1 < raw_len && dsl_headword_is_escapable_char(raw[i + 1])) {
+            i++;
+        }
+
+        gunichar ch = g_utf8_get_char_validated(raw + i, raw_len - i);
+        size_t char_len;
+        if (ch == (gunichar)-1 || ch == (gunichar)-2) {
+            char_len = 1;
+            i += char_len;
+            continue;
+        }
+        char_len = g_utf8_skip[*(unsigned char *)(raw + i)];
+        i += char_len;
+
+        /* Decompose to base and lowercase */
+        gunichar base = get_base_unichar(ch);
+        char utf8[6];
+        int len = g_unichar_to_utf8(base, utf8);
+        g_string_append_len(out, utf8, len);
+    }
+
+    *out_len = out->len;
+    return g_string_free(out, FALSE);
+}
+
+void flat_index_build_norm_cache(FlatIndex *idx) {
+    if (!idx || !idx->entries || idx->count == 0) return;
+    if (idx->norm_keys) return; /* Already built */
+
+    /* Pass 1: compute total buffer size needed */
+    size_t total_key_bytes = 0;
+    for (size_t i = 0; i < idx->count; i++) {
+        /* Upper bound: each raw byte could produce at most 4 UTF-8 bytes after decompose.
+         * But in practice, normalized keys are shorter than raw. Use raw length as estimate. */
+        total_key_bytes += idx->entries[i].h_len + 4; /* +4 for safety margin */
+    }
+
+    idx->norm_keys = g_new(NormKey, idx->count);
+    idx->norm_keys_buf = g_malloc(total_key_bytes);
+
+    size_t buf_pos = 0;
+    for (size_t i = 0; i < idx->count; i++) {
+        const char *raw = idx->mmap_data + idx->entries[i].h_off;
+        size_t raw_len = idx->entries[i].h_len;
+        size_t key_len = 0;
+        char *key = build_norm_key_for_raw(raw, raw_len, &key_len);
+
+        /* Ensure we don't overflow */
+        if (buf_pos + key_len > total_key_bytes) {
+            total_key_bytes = buf_pos + key_len + idx->count * 4; /* grow */
+            idx->norm_keys_buf = g_realloc(idx->norm_keys_buf, total_key_bytes);
+        }
+
+        memcpy(idx->norm_keys_buf + buf_pos, key, key_len);
+        idx->norm_keys[i].off = (uint32_t)buf_pos;
+        idx->norm_keys[i].len = (uint16_t)(key_len > 65535 ? 65535 : key_len);
+        buf_pos += key_len;
+        g_free(key);
+    }
+
+    /* Shrink buffer to actual size */
+    if (buf_pos < total_key_bytes) {
+        idx->norm_keys_buf = g_realloc(idx->norm_keys_buf, buf_pos > 0 ? buf_pos : 1);
+    }
+}
+
+/* Fast comparison using pre-computed normalized keys.
+ * Returns <0, 0, >0 like strcmp. */
+static int compare_norm_key(const FlatIndex *idx, size_t entry_idx,
+                            const char *query_norm, size_t query_norm_len) {
+    const NormKey *nk = &idx->norm_keys[entry_idx];
+    const char *entry_key = idx->norm_keys_buf + nk->off;
+    size_t entry_len = nk->len;
+
+    size_t min_len = entry_len < query_norm_len ? entry_len : query_norm_len;
+    int cmp = memcmp(entry_key, query_norm, min_len);
+    if (cmp != 0) return cmp;
+    if (entry_len < query_norm_len) return -1;
+    if (entry_len > query_norm_len) return 1;
+    return 0;
+}
+
+/* Fast prefix comparison using pre-computed normalized keys. */
+static int compare_norm_prefix(const FlatIndex *idx, size_t entry_idx,
+                               const char *prefix_norm, size_t prefix_norm_len) {
+    const NormKey *nk = &idx->norm_keys[entry_idx];
+    const char *entry_key = idx->norm_keys_buf + nk->off;
+    size_t entry_len = nk->len;
+
+    size_t cmp_len = entry_len < prefix_norm_len ? entry_len : prefix_norm_len;
+    int cmp = memcmp(entry_key, prefix_norm, cmp_len);
+    if (cmp != 0) return cmp;
+    /* If entry is shorter than prefix, it can't match */
+    if (entry_len < prefix_norm_len) return -1;
+    return 0; /* entry starts with prefix */
 }
 
 static size_t flat_index_search_impl(const FlatIndex *idx,
@@ -388,16 +507,37 @@ static size_t flat_index_search_impl(const FlatIndex *idx,
     size_t lo = 0, hi = idx->count;
     size_t result = (size_t)-1;
 
-    while (lo < hi) {
-        size_t mid = lo + (hi - lo) / 2;
-        int cmp = compare_headword(idx->mmap_data, &idx->entries[mid], query, qlen);
-        if (cmp < 0) {
-            lo = mid + 1;
-        } else if (cmp > 0) {
-            hi = mid;
-        } else {
-            result = mid;
-            hi = mid; /* find first match */
+    /* Use fast norm-cache path if available */
+    if (idx->norm_keys) {
+        size_t norm_len = 0;
+        char *query_norm = build_norm_key_for_raw(query, qlen, &norm_len);
+
+        while (lo < hi) {
+            size_t mid = lo + (hi - lo) / 2;
+            int cmp = compare_norm_key(idx, mid, query_norm, norm_len);
+            if (cmp < 0) {
+                lo = mid + 1;
+            } else if (cmp > 0) {
+                hi = mid;
+            } else {
+                result = mid;
+                hi = mid; /* find first match */
+            }
+        }
+        g_free(query_norm);
+    } else {
+        /* Fallback: original per-character comparison */
+        while (lo < hi) {
+            size_t mid = lo + (hi - lo) / 2;
+            int cmp = compare_headword(idx->mmap_data, &idx->entries[mid], query, qlen);
+            if (cmp < 0) {
+                lo = mid + 1;
+            } else if (cmp > 0) {
+                hi = mid;
+            } else {
+                result = mid;
+                hi = mid; /* find first match */
+            }
         }
     }
 
@@ -434,16 +574,36 @@ static size_t flat_index_search_prefix_impl(const FlatIndex *idx,
     size_t lo = 0, hi = idx->count;
     size_t result = (size_t)-1;
 
-    while (lo < hi) {
-        size_t mid = lo + (hi - lo) / 2;
-        int cmp = compare_prefix(idx->mmap_data, &idx->entries[mid], prefix, plen);
-        if (cmp < 0) {
-            lo = mid + 1;
-        } else if (cmp > 0) {
-            hi = mid;
-        } else {
-            result = mid;
-            hi = mid; /* find first match */
+    /* Use fast norm-cache path if available */
+    if (idx->norm_keys) {
+        size_t norm_len = 0;
+        char *prefix_norm = build_norm_key_for_raw(prefix, plen, &norm_len);
+
+        while (lo < hi) {
+            size_t mid = lo + (hi - lo) / 2;
+            int cmp = compare_norm_prefix(idx, mid, prefix_norm, norm_len);
+            if (cmp < 0) {
+                lo = mid + 1;
+            } else if (cmp > 0) {
+                hi = mid;
+            } else {
+                result = mid;
+                hi = mid; /* find first match */
+            }
+        }
+        g_free(prefix_norm);
+    } else {
+        while (lo < hi) {
+            size_t mid = lo + (hi - lo) / 2;
+            int cmp = compare_prefix(idx->mmap_data, &idx->entries[mid], prefix, plen);
+            if (cmp < 0) {
+                lo = mid + 1;
+            } else if (cmp > 0) {
+                hi = mid;
+            } else {
+                result = mid;
+                hi = mid; /* find first match */
+            }
         }
     }
 

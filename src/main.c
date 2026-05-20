@@ -3170,14 +3170,12 @@ static char* render_entry_def_to_html(DictEntry *entry, const FlatTreeEntry *res
 
     dict_render_set_resource_reader(entry->dict->resource_reader);
     const char *hw_data_ptr = entry->dict->data ? entry->dict->data : entry->dict->index->mmap_data;
-    char *html = dsl_render_to_html(
+    char *html = dsl_render_body_only(
         def_ptr, def_len,
         hw_data_ptr + res->h_off, res->h_len,
         entry->format, entry->dict->resource_dir, entry->dict->source_dir, entry->dict->mdx_stylesheet, dark_mode,
         app_settings ? app_settings->color_theme : "default",
         render_style,
-        app_settings ? app_settings->font_family : NULL,
-        app_settings ? app_settings->font_size : 0,
         fts_highlight_query);
     if (to_free) g_free(to_free);
     return html;
@@ -3483,12 +3481,16 @@ static int append_exact_matches_html(GString *html_res, const char *query, gbool
             continue;
         }
 
-        size_t pos = flat_index_search(e->dict->index, query);
+        size_t qlen = strlen(query);
+        /* Use binary-only search — avoids the O(N) alias fallback scan that
+         * would otherwise linearly scan ALL entries of this dict. The outer loop
+         * already iterates every dictionary, so the fallback is pure waste. */
+        size_t pos = flat_index_search_fast(e->dict->index, query);
         while (pos != (size_t)-1) {
             const FlatTreeEntry *res = flat_index_get(e->dict->index, pos);
             if (!res) break;
             const char *data_ptr = e->dict->data ? e->dict->data : e->dict->index->mmap_data;
-            if (!flat_index_entry_matches_query(data_ptr, res, query, strlen(query))) break;
+            if (!flat_index_entry_matches_query(data_ptr, res, query, qlen)) break;
 
             ExactMatch *m = g_new0(ExactMatch, 1);
             m->dict = e;
@@ -3587,7 +3589,20 @@ static void render_query_to_webview(const char *query_raw, WebKitWebView *target
         return;
     }
 
-    GString *html_res = g_string_new("<html><body>");
+    int dark_mode = style_manager && adw_style_manager_get_dark(style_manager) ? 1 : 0;
+    char *shared_css = dict_render_shared_styles(
+        dark_mode,
+        app_settings ? app_settings->color_theme : "default",
+        app_settings ? app_settings->font_family : NULL,
+        app_settings ? app_settings->font_size : 0);
+
+    GString *html_res = g_string_new("<html><head>");
+    if (shared_css) {
+        g_string_append(html_res, shared_css);
+        g_free(shared_css);
+    }
+    g_string_append(html_res, "</head><body>");
+
     char *escaped_query_attr = safe_markup_escape_n(query, -1);
     g_string_append_printf(html_res, "<div class='word-group' data-word='%s'>", escaped_query_attr);
     g_free(escaped_query_attr);
@@ -3776,10 +3791,25 @@ static void append_rendered_word_html_impl(const char *raw_word, gboolean push_h
         if (wv) {
             queue_fts_highlight_for_web_view(wv,
                                              should_highlight_fts ? fts_highlight_query : NULL);
-            GString *full_html = g_string_new("<html><body>");
-            char *escaped_query_attr = safe_markup_escape_n(query, -1);
-            g_string_append_printf(full_html, "<div class='word-group' data-word='%s'>", escaped_query_attr);
-            g_free(escaped_query_attr);
+                                             
+            int dark_mode = style_manager && adw_style_manager_get_dark(style_manager) ? 1 : 0;
+            char *shared_css = dict_render_shared_styles(
+                dark_mode,
+                app_settings ? app_settings->color_theme : "default",
+                app_settings ? app_settings->font_family : NULL,
+                app_settings ? app_settings->font_size : 0);
+                
+            GString *full_html = g_string_new("<html><head>");
+            if (shared_css) {
+                g_string_append(full_html, shared_css);
+                g_free(shared_css);
+            }
+            g_string_append(full_html, "</head><body>");
+            
+            char *escaped_attr = safe_markup_escape_n(query, -1);
+            g_string_append_printf(full_html, "<div class='word-group' data-word='%s'>", escaped_attr);
+            g_free(escaped_attr);
+            
             g_string_append(full_html, html_res->str);
             g_string_append(full_html, "</div></body></html>");
 

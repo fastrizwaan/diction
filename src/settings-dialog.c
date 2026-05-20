@@ -582,7 +582,7 @@ static gpointer fts_build_worker(gpointer user_data)
             sorted_indices[i] = (guint32)i;
         }
 
-        g_qsort_with_data(sorted_indices, (gint)count, sizeof(guint32), cmp_indices_by_doff, dmmap->index);
+        g_sort_array(sorted_indices, (gint)count, sizeof(guint32), cmp_indices_by_doff, dmmap->index);
 
         guint batch = 0;
 

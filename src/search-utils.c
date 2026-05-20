@@ -97,8 +97,6 @@ char *normalize_headword_for_search(const char *value, gboolean unescape_dsl) {
     while (*p) {
         gunichar ch = g_utf8_get_char(p);
         const char *next = g_utf8_next_char(p);
-        size_t char_len = next - p;
-
         /* 1. Braces and DSL tags */
         if (ch == '{') {
             size_t brace_tag_len = dsl_headword_brace_tag_len(p);

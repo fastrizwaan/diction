@@ -4859,14 +4859,14 @@ static void populate_dict_sidebar(void) {
             payload->type = SIDEBAR_ROW_DICT;
             payload->title = g_strdup(e->name ? e->name : "Dictionary");
             payload->dict_entry = e;
-            dict_entry_ref(e); // payload owns a ref
+            dict_entry_ref(e);
             if (e->icon_path) {
                 payload->icon_path = g_strdup(e->icon_path);
             }
             g_ptr_array_add(labels, g_strdup(payload->title));
             g_ptr_array_add(payloads, payload);
         }
-        
+
         g_mutex_lock(&dict_loader_mutex);
         DictEntry *next = e->next;
         dict_entry_unref(e);

@@ -557,7 +557,7 @@ static gboolean mdd_find_resource(MddFileState *fs, const char *query, uint64_t 
     g_free(data);
     
     if (found && !got_end) {
-        if (found_kb + 1 < fs->nkb) {
+        if (found_kb + 1 < (int)fs->nkb) {
             fseek(f, fs->kbis[found_kb + 1].file_offset, SEEK_SET);
             unsigned char *next_comp = g_malloc(fs->kbis[found_kb + 1].comp_size);
             if (next_comp && fread(next_comp, 1, fs->kbis[found_kb + 1].comp_size, f) == fs->kbis[found_kb + 1].comp_size) {
@@ -686,6 +686,7 @@ static void mdd_close(ResourceReader *reader) {
 }
 
 static ResourceReader* mdx_open_mdd_reader(GPtrArray *mdd_paths, const char *extract_dir, int is_v2, int num_size, int encoding_is_utf16, int encrypted, volatile gint *cancel_flag, gint expected) {
+    (void)cancel_flag; (void)expected;
     if (!mdd_paths || mdd_paths->len == 0) return NULL;
     
     MddBackend *mdd = g_new0(MddBackend, 1);
@@ -747,7 +748,7 @@ static ResourceReader* mdx_open_mdd_reader(GPtrArray *mdd_paths, const char *ext
         
         const unsigned char *kp = kbh;
         uint64_t num_key_blocks = read_num(&kp, mdd_num_size);
-        uint64_t num_entries = read_num(&kp, mdd_num_size);
+        read_num(&kp, mdd_num_size);
         uint64_t kbi_decomp = mdd_is_v2 ? read_num(&kp, mdd_num_size) : 0;
         uint64_t kbi_comp = read_num(&kp, mdd_num_size);
         uint64_t kb_data_size = read_num(&kp, mdd_num_size);

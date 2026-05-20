@@ -140,7 +140,7 @@ static void dsl_parse_header(const char *path, char **out_name, char **out_sourc
     }
 
     unsigned char bom[4];
-    int bom_len = is_dz ? gzread(gz, bom, 4) : fread(bom, 1, 4, f);
+    size_t bom_len = is_dz ? (size_t)gzread(gz, bom, 4) : fread(bom, 1, 4, f);
     int skip = 0, bom_is_utf16 = 0, utf16_be = 0;
     if (bom_len >= 3 && bom[0] == 0xEF && bom[1] == 0xBB && bom[2] == 0xBF) {
         skip = 3;

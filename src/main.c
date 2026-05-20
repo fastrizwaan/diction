@@ -3,7 +3,6 @@
 #include <glib/gstdio.h>
 #include <gio/gio.h>
 #include <adwaita.h>
-#include "langid.h"
 #include "langpair.h"
 #include <webkit/webkit.h>
 #include <sys/stat.h>
@@ -5239,81 +5238,7 @@ static void queue_loader_idle(LoadIdleKind kind,
                     NULL);
 }
 
-static char* sample_dict_and_detect_lang(DictEntry *entry) {
-    if (!entry || !entry->dict || !entry->dict->index) return NULL;
-    
-    size_t total = flat_index_count(entry->dict->index);
-    if (total == 0) return NULL;
 
-    GString *hw_samples = g_string_new("");
-    GString *def_samples = g_string_new("");
-
-    int count = total < 12 ? (int)total : 12;
-    gboolean sample_definitions = !(entry->dict->source_dz || entry->dict->mdx_ctx);
-    for (int i = 0; i < count; i++) {
-        size_t idx = count == 1 ? 0 : ((size_t)i * (total - 1)) / (size_t)(count - 1);
-        const FlatTreeEntry *node = flat_index_get(entry->dict->index, idx);
-        if (!node) continue;
-
-        const char *data_ptr = entry->dict->data ? entry->dict->data : entry->dict->index->mmap_data;
-        char *hw = g_strndup(data_ptr + node->h_off, node->h_len);
-        
-        char *to_free = NULL;
-        char *def = NULL;
-        if (sample_definitions && i < 4) {
-            size_t def_len = 0;
-            const char *def_ptr = dict_get_definition(entry->dict, node, &def_len, &to_free);
-            if (def_ptr) {
-                def = g_strndup(def_ptr, MIN(def_len, (size_t)4096));
-            }
-        }
-        
-        if (hw) g_string_append_printf(hw_samples, " %s ", hw);
-        if (def) g_string_append_printf(def_samples, " %s ", def);
-        
-        g_free(hw);
-        g_free(def);
-        if (to_free) g_free(to_free);
-    }
-
-    const char *hw_lang = langid_guess_language(hw_samples->str);
-    const char *def_lang = langid_guess_language(def_samples->str);
-
-    g_string_free(hw_samples, TRUE);
-    g_string_free(def_samples, TRUE);
-
-    if (g_strcmp0(hw_lang, "Unknown") == 0 && g_strcmp0(def_lang, "Unknown") == 0) {
-        return g_strdup("Mixed");
-    }
-
-    if (g_strcmp0(def_lang, "Unknown") == 0) def_lang = hw_lang;
-    if (g_strcmp0(hw_lang, "Unknown") == 0) hw_lang = def_lang;
-
-    char *group = langpair_build_group_name(hw_lang, def_lang);
-    if (group) {
-        return group;
-    }
-
-    return g_strdup_printf("%s->%s", hw_lang, def_lang);
-}
-
-static gboolean lang_group_is_monolingual(const char *group_name) {
-    if (!group_name) {
-        return FALSE;
-    }
-
-    const char *sep = strstr(group_name, "->");
-    if (!sep) {
-        return FALSE;
-    }
-
-    char *left = g_strndup(group_name, (gsize)(sep - group_name));
-    char *right = g_strdup(sep + 2);
-    gboolean same = g_strcmp0(left, right) == 0;
-    g_free(left);
-    g_free(right);
-    return same;
-}
 
 static char *build_dict_metadata_text(DictEntry *entry) {
     if (!entry) {
@@ -5391,29 +5316,9 @@ static gboolean on_dict_loaded_idle(gpointer user_data) {
             char *metadata_text = build_dict_metadata_text(e);
             char *source_lang = e->dict->source_lang ? g_strdup(e->dict->source_lang) : NULL;
             char *target_lang = e->dict->target_lang ? g_strdup(e->dict->target_lang) : NULL;
-            gboolean parser_had_langs =
-                (e->dict->source_lang && *e->dict->source_lang) ||
-                (e->dict->target_lang && *e->dict->target_lang);
 
             langpair_fill_missing(&source_lang, &target_lang, metadata_text, e->path);
             guessed = langpair_build_group_name(source_lang, target_lang);
-
-            if (!parser_had_langs && (!guessed || lang_group_is_monolingual(guessed))) {
-                /* No headers found, or only a weak/monolingual guess from filename.
-                 * Perform deep sampling to improve language identification. */
-                char *sampled = sample_dict_and_detect_lang(e);
-                if (sampled && *sampled && g_strcmp0(sampled, "Mixed") != 0) {
-                    g_free(guessed);
-                    guessed = sampled;
-                    sampled = NULL;
-                }
-                g_free(sampled);
-            }
-
-            /* Fallback only if we still have absolutely nothing */
-            if (!guessed && !parser_had_langs) {
-                guessed = sample_dict_and_detect_lang(e);
-            }
 
             if (guessed && *guessed) {
                 e->guessed_lang_group = g_strdup(guessed);

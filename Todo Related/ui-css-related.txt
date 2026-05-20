@@ -4,6 +4,10 @@ goria
 " id="zyfq0" onclick="zyfq_t(this)">★◀▶
 
 
+📖 lingvo gsm formatted_en-ru.dsl
+[Result Clicked]: 'TRILOGUE\ INfinity'
+
+
 
 'Dates\ of\ 2004'
 'China:\ Asia's\ Emerging\ Superpower'
@@ -14,3 +18,17 @@ could we add 'Card Styles' and this as "Goldendict"
 article-style.css?
 
 also you see that clicking on the arrow hids/show the definition container.
+
+1. diciotnary sidebar
+   have a dropdown where start is perhaps ... view-more-symbolic icon
+   it should show 
+   -> Show definitions from this at the top
+   -> Search words in this dictionary -> leads to new tab with this selected dictonary from the dropdown.
+   -> Do not show results from this session/always
+   -> Add to group -> create new, existing custom groups.
+   -> Remove this dictionary
+   -> create FTS cache
+   
+whatever we can do in settings, can be done with this triple vertical dot menu.
+   
+   if dict language is not detected/unavailable, ask user rename the file with en-en or ru-zh, en-ar, hi-te etc.; else set unkown-> unknown 

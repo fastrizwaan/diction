@@ -121,6 +121,107 @@ static char *dsl_prepare_resource_dir(const char *path, ResourceReader **out_rea
     return resource_dir;
 }
 
+static void dsl_parse_header(const char *path, char **out_name, char **out_source_lang, char **out_target_lang) {
+    if (out_name) *out_name = NULL;
+    if (out_source_lang) *out_source_lang = NULL;
+    if (out_target_lang) *out_target_lang = NULL;
+
+    size_t len = strlen(path);
+    gboolean is_dz = (len > 3 && g_ascii_strcasecmp(path + len - 3, ".dz") == 0);
+
+    gzFile gz = NULL;
+    FILE *f = NULL;
+    if (is_dz) {
+        gz = gzopen(path, "rb");
+        if (!gz) return;
+    } else {
+        f = fopen(path, "rb");
+        if (!f) return;
+    }
+
+    unsigned char bom[4];
+    int bom_len = is_dz ? gzread(gz, bom, 4) : fread(bom, 1, 4, f);
+    int skip = 0, bom_is_utf16 = 0, utf16_be = 0;
+    if (bom_len >= 3 && bom[0] == 0xEF && bom[1] == 0xBB && bom[2] == 0xBF) {
+        skip = 3;
+    } else if (bom_len >= 2 && bom[0] == 0xFF && bom[1] == 0xFE) {
+        skip = 2; bom_is_utf16 = 1;
+    } else if (bom_len >= 2 && bom[0] == 0xFE && bom[1] == 0xFF) {
+        skip = 2; bom_is_utf16 = 1; utf16_be = 1;
+    } else if (bom_len >= 4 && bom[0] != 0 && bom[1] == 0 && bom[2] != 0 && bom[3] == 0) {
+        bom_is_utf16 = 1;
+    } else if (bom_len >= 4 && bom[0] == 0 && bom[1] != 0 && bom[2] == 0 && bom[3] != 0) {
+        bom_is_utf16 = 1; utf16_be = 1;
+    }
+    if (skip) {
+        if (is_dz) gzseek(gz, skip, SEEK_SET);
+        else fseek(f, skip, SEEK_SET);
+    } else if (bom_len > 0) {
+        if (is_dz) gzseek(gz, 0, SEEK_SET);
+        else fseek(f, 0, SEEK_SET);
+    }
+
+    uint8_t buf[1024];
+    for (int line = 0; line < 30; line++) {
+        int buf_pos = 0;
+        if (bom_is_utf16) {
+            while (buf_pos < (int)sizeof(buf) - 2) {
+                int r0 = is_dz ? gzgetc(gz) : fgetc(f);
+                if (r0 == EOF) break;
+                int r1 = is_dz ? gzgetc(gz) : fgetc(f);
+                if (r1 == EOF) break;
+                uint16_t wc = utf16_be ? ((uint8_t)r0 << 8 | (uint8_t)r1) : ((uint8_t)r0 | (uint8_t)r1 << 8);
+                if (wc == '\n') break;
+                if (wc <= 0x7F) buf[buf_pos++] = (uint8_t)wc;
+            }
+        } else {
+            if (is_dz) {
+                if (!gzgets(gz, (char*)buf, (int)sizeof(buf))) break;
+            } else {
+                if (!fgets((char*)buf, (int)sizeof(buf), f)) break;
+            }
+            buf_pos = strlen((char*)buf);
+            while (buf_pos > 0 && (buf[buf_pos-1] == '\n' || buf[buf_pos-1] == '\r'))
+                buf[--buf_pos] = '\0';
+        }
+        if (buf_pos == 0) continue;
+        if (buf[0] != '#') break;
+
+        char *line_s = (char*)buf;
+
+        if (g_ascii_strncasecmp(line_s, "#NAME", 5) == 0) {
+            char *q = strchr(line_s + 5, '"');
+            if (q && out_name) {
+                q++;
+                char *end = strchr(q, '"');
+                if (end) { *end = '\0'; *out_name = g_strdup(q); }
+            }
+        }
+
+        if (g_ascii_strncasecmp(line_s, "#INDEX_LANGUAGE", 15) == 0) {
+            char *q = strchr(line_s + 15, '"');
+            if (q && out_source_lang) {
+                q++;
+                char *end = strchr(q, '"');
+                if (end) { *end = '\0'; *out_source_lang = g_strdup(q); }
+            }
+        }
+
+        if (g_ascii_strncasecmp(line_s, "#CONTENTS_LANGUAGE", 18) == 0) {
+            char *q = strchr(line_s + 18, '"');
+            if (q && out_target_lang) {
+                q++;
+                char *end = strchr(q, '"');
+                if (end) { *end = '\0'; *out_target_lang = g_strdup(q); }
+            }
+        }
+
+        if ((!out_name || *out_name) && (!out_source_lang || *out_source_lang) && (!out_target_lang || *out_target_lang)) break;
+    }
+
+    if (is_dz) gzclose(gz);
+    else fclose(f);
+}
 
 
 /* New signature accepts cancel flag and expected generation for cooperative cancellation. */
@@ -151,6 +252,17 @@ DictMmap* dict_mmap_open(const char *path, volatile gint *cancel_flag, gint expe
     dict->tmp_file = NULL;
     dict->source_dir = g_path_get_dirname(path);
     dict->resource_dir = dsl_prepare_resource_dir(path, &dict->resource_reader);
+
+    {
+        char *name = NULL, *src_lang = NULL, *tgt_lang = NULL;
+        dsl_parse_header(path, &name, &src_lang, &tgt_lang);
+        if (name) {
+            g_free(dict->name);
+            dict->name = name;
+        }
+        dict->source_lang = src_lang;
+        dict->target_lang = tgt_lang;
+    }
 
     if (!cache_valid) {
         printf("[DSL] Building index-only cache for %s\n", path);

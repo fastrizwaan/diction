@@ -49,7 +49,6 @@ srcs = [
   'src/scan-popup.c',
   'src/startup-splash.c',
   'src/tray-icon.c',
-  'src/langid.c',
   'src/langpair.c',
   'src/json-theme.c',
   'src/dictzip.c',

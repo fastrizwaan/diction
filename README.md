@@ -1,65 +1,54 @@
 # Diction
 
-**A high-performance, multi-format offline dictionary.**
+**The ultimate fast, multi-dictionary offline reader for Linux.**
 
-Diction is a fast, lightweight, and feature-rich dictionary application built in C using GTK4, Libadwaita, and WebKitGTK. It provides a seamless and beautiful user interface for looking up words across multiple offline dictionary formats.
+## 📖 The Gist
+**Diction** is a lightning-fast desktop application that lets you look up words without needing an internet connection. 
 
-## Features
+Instead of relying on websites or simple built-in dictionaries, Diction allows you to download massive, high-quality dictionary files from the internet and load **hundreds of them at the same time** (supporting up to ~1,000 dictionaries concurrently, depending on your system's open-file `ulimit`). Whether you are learning a new language, reading medical textbooks, or just need a good thesaurus, Diction searches through all of your loaded dictionaries instantly and displays the results in a beautiful, modern interface.
 
-- **Multiple Formats Supported:** Read dictionary files in **MDX**, **SLOB**, **BGL** (Babylon), and **IFO** (StarDict) formats natively without manual conversion.
-- **Modern User Interface:** Built with GTK4 and Libadwaita, featuring responsive design, dark mode support, and a sidebar navigation system.
-- **Fast Search:** Features multi-bucket fuzzy text searching for exact, suffix, prefix, phrase, and substring matches.
-- **Global Dictionary Scan:** Press `Ctrl+Alt+d` (or custom keyboard shortcut) to trigger a global scan popup that looks up text from your clipboard instantly.
-- **Tray Icon Support:** Can run optionally in the background via the system tray, providing quick access whenever needed.
-- **Audio Pronunciations:** Built-in audio player support via Gstreamer, FFmpeg, and other backends down to raw PCM, capable of playing dictionary audio `.spx`, `.ogg`, and `.oga` files.
-- **User History & Favorites:** Tracks your search history and allows you to bookmark favorite words for later reference.
-- **Random Word:** Explore new vocabulary with the integrated random word button.
-- **Render Engine:** Utilizes WebKitGTK to render dictionary definitions flawlessly, retaining the original DSL-like markdown or web styling.
+## ✨ Why use Diction?
 
-## Dependencies
+* 🚀 **Blazing Fast & Multi-Dictionary:** Search across dozens (or even hundreds!) of offline dictionaries simultaneously (up to the ~1000 open-file system limit). The results appear instantly as you type.
+* 🔍 **Global Scan Popup:** You don't even need to open the app! Just highlight a word in your web browser, PDF reader, or terminal, hit your custom keyboard shortcut (e.g., `Super+Alt+L`), and a small popup will appear right at your mouse cursor with the definition.
+* 📚 **Supports Almost Everything:** You can easily find and download dictionary files online. Diction natively supports almost all popular formats without needing manual conversion:
+  * **MDX / MDD** (MDict dictionaries, often containing images and audio)
+  * **DSL / DSL.DZ** (ABBYY Lingvo dictionaries)
+  * **StarDict** (`.ifo` / `.dict.dz`)
+  * **Slob** (Used for offline Wikipedia)
+  * **BGL** (Babylon Glossaries)
+  * **XDXF** & **Dictd**
+* 🎨 **Beautiful & Modern:** Built specifically for Linux using GTK4 and Libadwaita. It perfectly matches your system, supports Dark Mode, and lets you customize colors and fonts so reading definitions is easy on the eyes.
+* 🔊 **Audio Pronunciations:** Click on audio icons to hear how a word is pronounced (supports audio embedded inside MDX and DSL dictionaries).
 
-The project uses the Meson build system and requires the following libraries and tools to be installed on your system:
+## 🛠️ How to Install & Build
 
-- C Compiler (e.g., `gcc` or `clang`)
-- `meson` and `ninja-build`
-- `gtk4-devel`
-- `libadwaita-devel`
-- `webkitgtk6.0-devel` (or `webkit2gtk4.1-devel`)
-- `glib2-devel` and `json-glib-devel`
-- Archiving & Compression libraries: `zlib-devel`, `libarchive-devel`, `libzstd-devel`, `xz-devel` (liblzma), and `bzip2-devel`.
+Diction uses the `meson` and `ninja` build system.
 
-*On Fedora Silverblue/Kinoite, you can use `rpm-ostree install` with the above dependencies.*
+**1. Install Dependencies** (Fedora/Silverblue example):
+You will need a C compiler (`gcc`), `meson`, `ninja-build`, and development headers for `gtk4`, `libadwaita`, `webkitgtk6.0`, `glib2`, `zlib`, `libarchive`, `libzstd`, `xz`, and `bzip2`.
 
-## Build and Install
-
-Diction uses `meson` and `ninja` for compilation:
-
+**2. Compile the Application:**
 ```bash
-# 1. Setup the build directory
+# Setup the build directory
 meson setup build
 
-# 2. Compile the application
+# Compile the application
 ninja -C build
 
-# 3. Install the application (and its desktop shortcuts)
+# Install the application to your system
 sudo ninja -C build install
 ```
+*Note: To uninstall later, you can run `sudo ninja -C build uninstall`.*
 
-This will also automatically install the necessary desktop integration files (.desktop, dbus services, SVG icons) to standard system directories. You can also run the provided `install.sh` script to streamline this process.
+## 🚀 How to Use
 
-### Uninstall
-If you need to remove the application from your system:
+1. Open **Diction** from your app launcher.
+2. Go to **Preferences** and select the folder on your computer where you downloaded your dictionary files.
+3. Diction will automatically scan the folder, index your dictionaries, and make them ready for instant searching.
+4. Start typing in the search bar!
 
-```bash
-sudo ninja -C build uninstall
-```
+---
 
-## Usage
-
-Simply run `diction` from your command line, or find **Diction** in your application launcher.
-
-Once inside the app:
-1. Load your directory containing the dictionary files via user settings. The app will automatically scan for supported formats (`.mdx`, `.slob`, `.bgl`, `.ifo`).
-2. Search through the indexed dictionaries using the search bar.
-3. Access your favorites or history from the sidebar.
-4. Enjoy fast, offline definition access!
+### 🤓 For Developers
+Are you curious about how Diction can search millions of words instantly, or how it renders custom dictionary formats? Check out the [Technical Documentation Index](About/README.md) inside the `About/` folder for a deep dive into the engine's architecture and source code.

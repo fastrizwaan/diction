@@ -732,6 +732,7 @@ static DictConfig* dict_config_new(const char *name, const char *path, const cha
     cfg->path = g_strdup(path);
     cfg->enabled = 1;
     cfg->source = g_strdup(source ? source : "manual");
+    cfg->format = dict_detect_format(path);
     return cfg;
 }
 
@@ -1158,6 +1159,9 @@ AppSettings* settings_load(void) {
                     const char *effective_path = upgraded_path ? upgraded_path : path;
                     DictConfig *cfg = dict_config_new(name ? name : effective_path, effective_path, source);
                     cfg->enabled = enabled;
+                    if (json_object_has_member(dobj, "format")) {
+                        cfg->format = (DictFormat)json_object_get_int_member(dobj, "format");
+                    }
                     g_ptr_array_add(settings->dictionaries, cfg);
                     g_free(upgraded_path);
                 }
@@ -1256,6 +1260,7 @@ void settings_save(AppSettings *settings) {
         json_object_set_string_member(dobj, "path", cfg->path);
         json_object_set_int_member(dobj, "enabled", cfg->enabled);
         json_object_set_string_member(dobj, "source", cfg->source);
+        json_object_set_int_member(dobj, "format", (int)cfg->format);
         json_array_add_object_element(dicts, dobj);
     }
     json_object_set_array_member(root, "dictionaries", dicts);

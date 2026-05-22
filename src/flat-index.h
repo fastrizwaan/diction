@@ -31,8 +31,13 @@ typedef struct {
     char            *norm_buf;      /* normalized keys contiguous buffer */
     NormKey         *norm_keys;     /* parallel array: one per entry */
     char            *db_path;       /* path to .hw.sqlite file (informational) */
-    GHashTable      *metadata;      /* key -> value mapping from metadata table */
+    GHashTable      *metadata;      /* key (char*) -> value (GBytes*) */
     gboolean         is_loaded;     /* TRUE if headwords and entries are in memory */
+    void            *db;            /* sqlite3* (cast to void to avoid header dependency) */
+    void            *stmt_search;   /* sqlite3_stmt* */
+    void            *stmt_get;      /* sqlite3_stmt* */
+    void            *stmt_prefix;   /* sqlite3_stmt* */
+    GMutex           mutex;
 } FlatIndex;
 
 /* Open a headword index from a SQLite database file. */
@@ -40,6 +45,10 @@ FlatIndex* flat_index_open(const char *db_path);
 
 /* Get a metadata value from the index. Returns NULL if not found. */
 const char* flat_index_get_metadata(const FlatIndex *idx, const char *key);
+const void* flat_index_get_metadata_blob(const FlatIndex *idx, const char *key, size_t *out_len);
+
+/* Get the headword at a specific position. Caller must free the returned string. */
+char* flat_index_get_headword(const FlatIndex *idx, size_t pos, size_t *out_len);
 
 /* Build a normalized key from a raw headword. */
 char* build_norm_key(const char *raw, size_t raw_len, size_t *out_len);

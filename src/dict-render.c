@@ -2999,7 +2999,11 @@ char* dsl_render_body_only(const char *dsl_text,
                 }
                 
                 size_t tag_len = tag_end - tag_start + 1;
-            char *tag = g_strndup(tag_start, tag_len);
+                char *tag = g_strndup(tag_start, tag_len);
+                size_t next_head = head + tag_len;
+                
+                g_debug("[treat_as_html] processing tag: %.*s", (int)(tag_len > 32 ? 32 : tag_len), tag);
+
                 /* Process tag based on type */
                 char tag_name[32];
                 const char *name_start = tag + 1;
@@ -3030,14 +3034,11 @@ char* dsl_render_body_only(const char *dsl_text,
                         buf_append_str(&b, "🔊</a>");
                         g_free(processed_tag);
                         g_free(no_class);
-                        g_free(tag);
 
                         if (close_anchor) {
-                            head = (close_anchor - dsl_text) + 4;
-                        } else {
-                            head += tag_len;
+                            next_head = (close_anchor - dsl_text) + 4;
                         }
-                        continue;
+                        goto loop_cleanup;
                     }
                     
                     /* Regular link - handle href */
@@ -3048,9 +3049,10 @@ char* dsl_render_body_only(const char *dsl_text,
                     } else {
                         final_tag = process_html_common_attributes(processed_tag, resource_dir, source_dir, dark_mode);
                     }
-                    g_free(processed_tag);
                     buf_append_str(&b, final_tag);
                     g_free(final_tag);
+                    g_free(processed_tag);
+                    goto loop_cleanup;
                 } else if (strcmp(tag_name, "link") == 0) {
                     /* Inline local stylesheets so color rewriting applies to their rules too */
                     char *inlined_or_tag = inline_local_stylesheet_if_possible(tag, resource_dir, source_dir, dark_mode, scope_class);
@@ -3062,13 +3064,14 @@ char* dsl_render_body_only(const char *dsl_text,
                         } else {
                             final_tag = process_html_common_attributes(processed_tag, resource_dir, source_dir, dark_mode);
                         }
-                        g_free(processed_tag);
                         buf_append_str(&b, final_tag);
                         g_free(final_tag);
+                        g_free(processed_tag);
                     } else {
                         buf_append_str(&b, inlined_or_tag);
                     }
                     g_free(inlined_or_tag);
+                    goto loop_cleanup;
                 } else if (strcmp(tag_name, "img") == 0) {
                     /* Images - handle src and srcset */
                     char *wiktionary_audio_url = extract_wiktionary_audio_url(tag);
@@ -3096,6 +3099,7 @@ char* dsl_render_body_only(const char *dsl_text,
                         buf_append_str(&b, processed_tag);
                     }
                     g_free(processed_tag);
+                    goto loop_cleanup;
                 } else if (strcmp(tag_name, "style") == 0) {
                     const char *close_style = g_strstr_len(dsl_text + head + tag_len, length - head - tag_len, "</style>");
                     buf_append_str(&b, tag);
@@ -3111,10 +3115,9 @@ char* dsl_render_body_only(const char *dsl_text,
                         g_free(rewritten_css);
                         g_free(themed_css);
                         g_free(scoped_css);
-                        g_free(tag);
-                        head = (close_style - dsl_text) + 8;
-                        continue;
+                        next_head = (close_style - dsl_text) + 8;
                     }
+                    goto loop_cleanup;
                 } else if (strcmp(tag_name, "script") == 0) {
                     /* For external scripts: try to inline from resource/source dir;
                      * if the file doesn't exist, skip the tag entirely (no broken
@@ -3142,18 +3145,16 @@ char* dsl_render_body_only(const char *dsl_text,
                         /* Skip the original tag + its closing </script> */
                         const char *close_script = g_strstr_len(dsl_text + head + tag_len, length - head - tag_len, "</script>");
                         if (close_script) {
-                            head = (close_script - dsl_text) + 9;
-                        } else {
-                            head += tag_len;
+                            next_head = (close_script - dsl_text) + 9;
                         }
                         if (!inlined) {
                             /* File not found — nothing to emit, already skipped */
                         }
-                        g_free(tag);
-                        continue;
+                        goto loop_cleanup;
                     }
                     g_free(js_src);
                     buf_append_str(&b, tag);
+                    goto loop_cleanup;
                 } else if (strcmp(tag_name, "source") == 0 || strcmp(tag_name, "audio") == 0 || strcmp(tag_name, "video") == 0) {
                     /* Media tags - handle src */
                     char *processed_tag = process_html_tag_attribute(tag, "src", resource_dir, source_dir, dark_mode);
@@ -3167,6 +3168,7 @@ char* dsl_render_body_only(const char *dsl_text,
                     processed_tag = with_common;
                     buf_append_str(&b, processed_tag);
                     g_free(processed_tag);
+                    goto loop_cleanup;
                 } else if (strcmp(tag_name, "object") == 0) {
                     /* Object tags - handle data */
                     char *processed_tag = process_html_tag_attribute(tag, "data", resource_dir, source_dir, dark_mode);
@@ -3180,12 +3182,14 @@ char* dsl_render_body_only(const char *dsl_text,
                     processed_tag = with_common;
                     buf_append_str(&b, processed_tag);
                     g_free(processed_tag);
+                    goto loop_cleanup;
                 } else if (strcmp(tag_name, "html") == 0 || strcmp(tag_name, "/html") == 0 ||
                            strcmp(tag_name, "head") == 0 || strcmp(tag_name, "/head") == 0 ||
                            strcmp(tag_name, "body") == 0 || strcmp(tag_name, "/body") == 0 ||
                            g_str_has_prefix(tag_name, "!doctype")) {
                     /* Strip root structure tags to avoid breaking the wrapper div's DOM */
                     // Do nothing, just drop the tag
+                    goto loop_cleanup;
                 } else {
                     /* Other tags - pass through */
                     char *processed_tag;
@@ -3196,10 +3200,12 @@ char* dsl_render_body_only(const char *dsl_text,
                     }
                     buf_append_str(&b, processed_tag);
                     g_free(processed_tag);
+                    goto loop_cleanup;
                 }
                 
+loop_cleanup:
                 g_free(tag);
-                head += tag_len;
+                head = next_head;
             }
         }
 

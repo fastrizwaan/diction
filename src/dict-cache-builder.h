@@ -36,6 +36,9 @@ void dict_hw_builder_add(DictHwBuilder *b,
 void dict_hw_builder_set_metadata(DictHwBuilder *b,
                                   const char *key, const char *value);
 
+void dict_hw_builder_set_metadata_blob(DictHwBuilder *b,
+                                       const char *key, const void *data, size_t len);
+
 /* Finalize: commit, create index, optimize. Returns TRUE on success. */
 gboolean dict_hw_builder_finalize(DictHwBuilder *b);
 

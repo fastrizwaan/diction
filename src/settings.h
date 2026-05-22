@@ -13,6 +13,7 @@ typedef struct {
     char *path;
     int enabled;
     char *source;  // "manual", "imported", or "directory"
+    DictFormat format;
 } DictConfig;
 
 typedef struct {

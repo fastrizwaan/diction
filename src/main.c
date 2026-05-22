@@ -26,7 +26,7 @@ static AdwTabView *tab_view = NULL;
 static volatile gint loader_generation = 0;
 static GMutex loader_cancel_mutex;
 static GCancellable *loader_cancellable = NULL;
-static GMutex dict_loader_mutex;
+GMutex dict_loader_mutex;
 
 
 static WebKitWebView *get_web_view_from_scroll(GtkWidget *scroll) {
@@ -869,11 +869,6 @@ static void sidebar_list_item_unbind(GtkSignalListItemFactory *factory, GtkListI
         g_binding_unbind(binding);
         g_object_set_data(G_OBJECT(item), "star-binding", NULL);
     }
-    GtkWidget *box = gtk_list_item_get_child(item);
-    if (box) {
-        GtkWidget *row = gtk_widget_get_parent(box);
-        if (row) gtk_widget_remove_css_class(row, "hw-selected");
-    }
 }
 
 static void populate_history_sidebar(void);
@@ -1055,9 +1050,10 @@ static gboolean sidebar_search_idle_cb(gpointer user_data) {
     return G_SOURCE_REMOVE;
 }
 
-static gpointer sidebar_search_thread_func(gpointer user_data) {
-    SidebarSearchState *state = user_data;
-    if (!state) return NULL;
+static void sidebar_search_task_func(GTask *task, gpointer source_object, gpointer task_data, GCancellable *cancellable) {
+    (void)task; (void)source_object; (void)cancellable;
+    SidebarSearchState *state = (SidebarSearchState*)task_data;
+    if (!state) return;
 
     guint processed = 0;
     const guint max_batch_size = 1000;
@@ -1082,8 +1078,8 @@ static gpointer sidebar_search_thread_func(gpointer user_data) {
                 const FlatTreeEntry *node = flat_index_get(entry->dict->index, pos);
                 if (!node) break;
 
-                const char *data_ptr = entry->dict->index->headword_buf;
-                char *raw_word = g_strndup(data_ptr + node->h_off, node->h_len);
+                size_t raw_len = 0;
+                char *raw_word = flat_index_get_headword(entry->dict->index, pos, &raw_len);
                 char *clean_word = normalize_headword_for_search(raw_word, TRUE);
 
                 if (!clean_word || text_has_replacement_char(clean_word)) {
@@ -1102,7 +1098,7 @@ static gpointer sidebar_search_thread_func(gpointer user_data) {
                                                        state->query_compact_key, state->query_compact_len,
                                                        word_key, &bucket, &score)) {
                     if (bucket == SEARCH_BUCKET_EXACT || bucket == SEARCH_BUCKET_PREFIX) {
-                        char *render_word = normalize_headword_for_render(raw_word, node->h_len, FALSE);
+                        char *render_word = normalize_headword_for_render(raw_word, raw_len, FALSE);
                         GPtrArray *raw_variants = split_headword_variants(raw_word);
                         GPtrArray *render_variants = split_headword_variants(render_word ? render_word : raw_word);
 
@@ -1169,13 +1165,13 @@ static gpointer sidebar_search_thread_func(gpointer user_data) {
             final_msg->status_title = g_strdup("No results");
             g_idle_add(sidebar_search_idle_cb, final_msg);
         }
-        sidebar_search_state_unref(state);
-        return NULL;
+        g_task_return_boolean(task, TRUE);
+        return;
     }
 
     if (g_atomic_int_get(&state->cancelled)) {
-        sidebar_search_state_unref(state);
-        return NULL;
+        g_task_return_boolean(task, TRUE);
+        return;
     }
 
     // Inform UI if searching (only if we haven't already seeded results in standard search)
@@ -1295,15 +1291,21 @@ static gpointer sidebar_search_thread_func(gpointer user_data) {
             state->current_pos++;
             if (state->current_pos >= state->current_dict_count) state->has_current_pos = FALSE;
 
-            const char *data_ptr = state->current_dict->dict->index->headword_buf;
-            if (!state->skip_fast_prefilter &&
-                !fast_strncasestr(data_ptr + node->h_off, node->h_len, state->query)) {
-                continue;
+            if (!state->skip_fast_prefilter) {
+                size_t hw_len = 0;
+                char *hw = flat_index_get_headword(state->current_dict->dict->index, state->current_pos - 1, &hw_len);
+                if (hw) {
+                    if (!fast_strncasestr(hw, hw_len, state->query)) {
+                        g_free(hw);
+                        continue;
+                    }
+                    g_free(hw);
+                }
             }
         }
 
-        const char *data_ptr = state->current_dict->dict->index->headword_buf;
-        char *word = g_strndup(data_ptr + node->h_off, node->h_len);
+        size_t raw_len = 0;
+        char *word = flat_index_get_headword(state->current_dict->dict->index, state->current_pos - 1, &raw_len);
         char *clean_word = normalize_headword_for_search(word, TRUE);
         if (!clean_word || text_has_replacement_char(clean_word)) {
             g_free(word);
@@ -1327,7 +1329,7 @@ static gpointer sidebar_search_thread_func(gpointer user_data) {
         }
 
         if (is_valid_match) {
-            char *render_word = normalize_headword_for_render(word, node->h_len, FALSE);
+            char *render_word = normalize_headword_for_render(word, raw_len, FALSE);
             GPtrArray *raw_variants = split_headword_variants(word);
             GPtrArray *render_variants = split_headword_variants(render_word ? render_word : word);
 
@@ -1393,9 +1395,8 @@ static gpointer sidebar_search_thread_func(gpointer user_data) {
             next_dispatch_time = g_get_monotonic_time() + 50000;
         }
     }
-
-    sidebar_search_state_unref(state);
-    return NULL;
+    
+    g_task_return_boolean(task, TRUE);
 }
 
 static void populate_search_sidebar_with_mode(const char *query, gboolean force_fts) {
@@ -1446,8 +1447,10 @@ static void populate_search_sidebar_with_mode(const char *query, gboolean force_
     sidebar_search_state->query_compact_key = collapse_search_separators(sidebar_search_state->query_key);
     sidebar_search_state->query_compact_len = utf8_length_or_bytes(sidebar_search_state->query_compact_key);
     sidebar_search_state->skip_fast_prefilter = search_query_needs_literal_prefilter_bypass(sidebar_search_state->query);
-    sidebar_search_state->prefix_only = !sidebar_search_state->is_fts &&
-        sidebar_search_state->query_len <= 3;
+    
+    /* Standard sidebar search is ALWAYS prefix-only for performance.
+     * Use FTS (start query with *) for substring/regex search. */
+    sidebar_search_state->prefix_only = !sidebar_search_state->is_fts;
     
     if (sidebar_search_state->is_fts && strlen(sidebar_search_state->query) > 0) {
         GError *err = NULL;
@@ -1488,13 +1491,10 @@ static void populate_search_sidebar_with_mode(const char *query, gboolean force_
         sidebar_search_state->global_bucket_payloads[i] = g_ptr_array_new();
     }
 
-    GThread *search_thread = g_thread_try_new("sidebar_search", sidebar_search_thread_func, sidebar_search_state_ref(sidebar_search_state), NULL);
-    if (search_thread) {
-        g_thread_unref(search_thread);
-    } else {
-        sidebar_search_state_unref(sidebar_search_state);
-        g_clear_pointer(&sidebar_search_state, sidebar_search_state_unref);
-    }
+    GTask *task = g_task_new(NULL, NULL, NULL, NULL);
+    g_task_set_task_data(task, sidebar_search_state, (GDestroyNotify)sidebar_search_state_unref);
+    g_task_run_in_thread(task, sidebar_search_task_func);
+    g_object_unref(task);
 }
 
 static void populate_search_sidebar(const char *query) {
@@ -2121,13 +2121,13 @@ static void set_active_entry(DictEntry *new_entry) {
     if (old) dict_entry_unref(old);
 }
 
-static DictEntry *dict_entry_new_shell(const char *name, const char *path) {
+static DictEntry *dict_entry_new_shell(const char *name, const char *path, DictFormat format) {
     if (!path || !*path) {
         return NULL;
     }
 
     DictEntry *entry = g_new0(DictEntry, 1);
-    entry->format = dict_detect_format(path);
+    entry->format = format;
     entry->path = g_strdup(path);
     entry->dict_id = settings_make_dictionary_id(path);
     entry->name = g_strdup((name && *name) ? name : path);
@@ -2166,7 +2166,7 @@ static guint rebuild_dict_entries_from_settings(void) {
     GHashTable *reused_entries = g_hash_table_new(g_direct_hash, g_direct_equal);
 
     for (DictEntry *entry = old_head; entry; entry = entry->next) {
-        if (entry->path && !g_hash_table_contains(existing_by_path, entry->path)) {
+        if (entry->path) {
             g_hash_table_insert(existing_by_path, entry->path, entry);
         }
         g_ptr_array_add(old_entries, entry);
@@ -2181,16 +2181,9 @@ static guint rebuild_dict_entries_from_settings(void) {
                 continue;
             }
 
-            DictEntry *entry = NULL;
-            for (guint j = 0; j < old_entries->len; j++) {
-                DictEntry *curr = g_ptr_array_index(old_entries, j);
-                if (curr->path && paths_are_equivalent(curr->path, cfg->path)) {
-                    entry = curr;
-                    break;
-                }
-            }
+            DictEntry *entry = g_hash_table_lookup(existing_by_path, cfg->path);
             if (!entry) {
-                entry = dict_entry_new_shell(cfg->name, cfg->path);
+                entry = dict_entry_new_shell(cfg->name, cfg->path, cfg->format);
             } else {
                 g_hash_table_add(reused_entries, entry);
                 g_free(entry->name);
@@ -2201,7 +2194,7 @@ static guint rebuild_dict_entries_from_settings(void) {
                     g_free(entry->dict_id);
                     entry->dict_id = settings_make_dictionary_id(cfg->path);
                 }
-                entry->format = dict_detect_format(cfg->path);
+                entry->format = cfg->format;
                 entry->has_matches = FALSE;
             }
 
@@ -3036,11 +3029,6 @@ static void related_list_item_unbind(GtkSignalListItemFactory *factory, GtkListI
         g_binding_unbind(binding);
         g_object_set_data(G_OBJECT(item), "star-binding", NULL);
     }
-    GtkWidget *box = gtk_list_item_get_child(item);
-    if (box) {
-        GtkWidget *row = gtk_widget_get_parent(box);
-        if (row) gtk_widget_remove_css_class(row, "hw-selected");
-    }
 }
 
 static void on_related_item_activated(GtkListView *view, guint position, gpointer user_data) {
@@ -3120,15 +3108,19 @@ static void schedule_execute_search(void) {
     if (search_execute_source_id != 0) {
         g_source_remove(search_execute_source_id);
     }
-    search_execute_source_id = g_timeout_add(200, run_debounced_search, NULL);
+    search_execute_source_id = g_timeout_add(350, run_debounced_search, NULL);
 }
 
 
 
-static char* render_entry_def_to_html(DictEntry *entry, const FlatTreeEntry *res) {
+static char* render_entry_def_to_html(DictEntry *entry, size_t pos, int dark_mode, const char *color_theme, const char *render_style, const char *fts_highlight_query) {
+    const FlatTreeEntry *res = flat_index_get(entry->dict->index, pos);
+    if (!res) return NULL;
+
     char *to_free = NULL;
     size_t def_len = 0;
     const char *def_ptr = dict_get_definition(entry->dict, res, &def_len, &to_free);
+    size_t final_pos = pos;
 
     if (!def_ptr) return NULL;
 
@@ -3149,6 +3141,7 @@ static char* render_entry_def_to_html(DictEntry *entry, const FlatTreeEntry *res
                 if (to_free) g_free(to_free);
                 to_free = NULL;
                 def_ptr = dict_get_definition(entry->dict, red_res, &def_len, &to_free);
+                final_pos = red_pos;
             }
         } else {
             /* Redirect target not found — render a clickable link instead of raw text */
@@ -3163,20 +3156,17 @@ static char* render_entry_def_to_html(DictEntry *entry, const FlatTreeEntry *res
         }
     }
 
-    int dark_mode = style_manager && adw_style_manager_get_dark(style_manager) ? 1 : 0;
-    const char *render_style = (app_settings && app_settings->render_style && *app_settings->render_style)
-        ? app_settings->render_style
-        : "diction";
-
     dict_render_set_resource_reader(entry->dict->resource_reader);
-    const char *hw_data_ptr = entry->dict->index->headword_buf;
+    size_t hw_len = 0;
+    char *hw_text = flat_index_get_headword(entry->dict->index, final_pos, &hw_len);
     char *html = dsl_render_body_only(
         def_ptr, def_len,
-        hw_data_ptr + res->h_off, res->h_len,
+        hw_text, hw_len,
         entry->format, entry->dict->resource_dir, entry->dict->source_dir, entry->dict->mdx_stylesheet, dark_mode,
-        app_settings ? app_settings->color_theme : "default",
+        color_theme,
         render_style,
         fts_highlight_query);
+    g_free(hw_text);
     if (to_free) g_free(to_free);
     return html;
 }
@@ -3438,7 +3428,7 @@ static char *exact_lookup_definite_article_variant(const char *query) {
 
 typedef struct {
     DictEntry *dict;
-    const FlatTreeEntry *entry;
+    size_t pos;
     char *raw_hw;
     char *clean_hw;
     char *display_hw;
@@ -3462,7 +3452,7 @@ static void exact_match_free(gpointer data) {
     g_free(m);
 }
 
-static int append_exact_matches_html(GString *html_res, const char *query, gboolean *limited) {
+static int append_exact_matches_html(GString *html_res, const char *query, gboolean *limited, int dark_mode, const char *color_theme, const char *render_style, const char *fts_highlight_query) {
     int found_count = 0;
     GPtrArray *matches = g_ptr_array_new_with_free_func(exact_match_free);
     if (limited) *limited = FALSE;
@@ -3489,16 +3479,21 @@ static int append_exact_matches_html(GString *html_res, const char *query, gbool
         while (pos != (size_t)-1) {
             const FlatTreeEntry *res = flat_index_get(e->dict->index, pos);
             if (!res) break;
-            const char *data_ptr = e->dict->index->headword_buf;
-            if (!flat_index_entry_matches_query(data_ptr, res, query, qlen)) break;
+            
+            size_t hw_len = 0;
+            char *raw_hw = flat_index_get_headword(e->dict->index, pos, &hw_len);
+            if (!flat_index_entry_matches_query(raw_hw, res, query, qlen)) {
+                g_free(raw_hw);
+                break;
+            }
 
             ExactMatch *m = g_new0(ExactMatch, 1);
             m->dict = e;
             dict_entry_ref(e);
-            m->entry = res;
-            m->raw_hw = g_strndup(data_ptr + res->h_off, res->h_len);
+            m->pos = pos;
+            m->raw_hw = raw_hw;
             m->clean_hw = normalize_headword_for_search(m->raw_hw, TRUE);
-            m->display_hw = normalize_headword_for_render(m->raw_hw, strlen(m->raw_hw), FALSE);
+            m->display_hw = normalize_headword_for_render(m->raw_hw, hw_len, FALSE);
             
             g_ptr_array_add(matches, m);
             if (matches->len >= MAX_EXACT_RENDERED_MATCHES) {
@@ -3524,12 +3519,9 @@ static int append_exact_matches_html(GString *html_res, const char *query, gbool
 
     g_ptr_array_sort(matches, compare_exact_match_items);
 
-    const char *render_style = (app_settings && app_settings->render_style && *app_settings->render_style)
-        ? app_settings->render_style : "diction";
-
     for (guint i = 0; i < matches->len; i++) {
         ExactMatch *m = g_ptr_array_index(matches, i);
-        char *rendered = render_entry_def_to_html(m->dict, m->entry);
+        char *rendered = render_entry_def_to_html(m->dict, m->pos, dark_mode, color_theme, render_style, fts_highlight_query);
         if (rendered) {
             m->dict->has_matches = TRUE;
             char *escaped_hw = safe_markup_escape_n(m->display_hw, -1);
@@ -3567,12 +3559,152 @@ static int append_exact_matches_html(GString *html_res, const char *query, gbool
     return found_count;
 }
 
-static void render_query_to_webview(const char *query_raw, WebKitWebView *target_wv, gboolean push_history) {
+typedef struct {
+    char *query_raw;
+    char *query;
+    char *fallback_query;
+    char *current_search_query;
+    
+    gboolean should_highlight_fts;
+    char *fts_highlight_query_copy;
+    gboolean is_fts_tab;
+
+    int dark_mode;
+    char *shared_css;
+    char *color_theme;
+    char *render_style;
+    char *font_family;
+    int font_size;
+
+    WebKitWebView *target_wv;
+    gboolean push_history;
+    gboolean is_sidebar_click;
+
+    /* Outputs */
+    int found_count;
+    char *html_result;
+    gboolean exact_limited;
+    char *used_query;
+} AsyncSearchData;
+
+static void async_search_data_free(AsyncSearchData *data) {
+    if (!data) return;
+    g_free(data->query_raw);
+    g_free(data->query);
+    g_free(data->fallback_query);
+    g_free(data->current_search_query);
+    g_free(data->fts_highlight_query_copy);
+    g_free(data->shared_css);
+    g_free(data->color_theme);
+    g_free(data->render_style);
+    g_free(data->font_family);
+    g_free(data->html_result);
+    g_free(data->used_query);
+    if (data->target_wv) g_object_unref(data->target_wv);
+    g_free(data);
+}
+
+static void search_webview_task_thread(GTask *task, gpointer source_object, gpointer task_data, GCancellable *cancellable) {
+    (void)source_object; (void)cancellable;
+    AsyncSearchData *data = task_data;
+
+    GString *html_res = g_string_new("");
+
+    g_mutex_lock(&dict_loader_mutex);
+    for (DictEntry *e = all_dicts; e; e = e->next) e->has_matches = FALSE;
+    g_mutex_unlock(&dict_loader_mutex);
+
+    data->exact_limited = FALSE;
+    data->found_count = append_exact_matches_html(html_res, data->query, &data->exact_limited,
+                                                  data->dark_mode, data->color_theme, data->render_style, data->fts_highlight_query_copy);
+    
+    data->used_query = g_strdup(data->query);
+
+    if (data->found_count == 0) {
+        data->fallback_query = exact_lookup_definite_article_variant(data->query);
+        if (data->fallback_query) {
+            g_string_truncate(html_res, 0);
+            data->exact_limited = FALSE;
+            data->found_count = append_exact_matches_html(html_res, data->fallback_query, &data->exact_limited,
+                                                          data->dark_mode, data->color_theme, data->render_style, data->fts_highlight_query_copy);
+            if (data->found_count > 0) {
+                g_free(data->used_query);
+                data->used_query = g_strdup(data->fallback_query);
+            }
+        }
+    }
+
+    if (data->found_count > 0) {
+        GString *full_html = g_string_new("<html><head>");
+        if (data->shared_css) {
+            g_string_append(full_html, data->shared_css);
+        }
+        g_string_append(full_html, "</head><body>");
+
+        char *escaped_query_attr = safe_markup_escape_n(data->used_query, -1);
+        g_string_append_printf(full_html, "<div class='word-group' data-word='%s'>", escaped_query_attr);
+        g_free(escaped_query_attr);
+        
+        g_string_append(full_html, html_res->str);
+        g_string_append(full_html, "</div></body></html>");
+        
+        data->html_result = g_string_free(full_html, FALSE);
+    }
+
+    g_string_free(html_res, TRUE);
+    g_task_return_boolean(task, TRUE);
+}
+
+static void on_search_webview_task_ready(GObject *source_object, GAsyncResult *res, gpointer user_data) {
+    (void)source_object;
+    (void)user_data;
+    GTask *task = G_TASK(res);
+    AsyncSearchData *data = g_task_get_task_data(task);
+
+    if (data->found_count > 0) {
+        queue_fts_highlight_for_web_view(data->target_wv,
+                                         data->should_highlight_fts ? data->fts_highlight_query_copy : NULL);
+        webkit_web_view_load_html(data->target_wv, data->html_result, "file:///");
+        
+        char *display_title = normalize_headword_for_render(data->used_query, data->used_query ? strlen(data->used_query) : 0, FALSE);
+        set_tab_metadata(data->target_wv, data->used_query, data->is_sidebar_click ? display_title : data->used_query, 1);
+        g_free(display_title);
+
+        /* Auto-highlight the matching word in the search sidebar */
+        select_related_word(data->used_query);
+        if (data->push_history && data->target_wv == get_current_web_view()) {
+            update_history_word(data->used_query);
+            push_to_nav_history(data->used_query, data->current_search_query, data->is_fts_tab);
+        }
+    } else {
+        if (!data->is_sidebar_click) {
+            queue_fts_highlight_for_web_view(data->target_wv, NULL);
+            set_tab_metadata(data->target_wv, data->query, "No Match", 1);
+            char *escaped_query = safe_markup_escape_n(data->query, -1);
+            char *message = g_strdup_printf(
+                "No exact match for <b>%s</b> in any dictionary.",
+                escaped_query ? escaped_query : data->query);
+            render_idle_page_to_webview(data->target_wv, "No Match", message);
+            g_free(message);
+            g_free(escaped_query);
+        }
+    }
+
+    /* Refresh the Dictionaries sidebar so it shows only dicts with results */
+    if (!data->is_sidebar_click) {
+        populate_dict_sidebar();
+    }
+}
+
+static void dispatch_async_webview_search(const char *query_raw, WebKitWebView *target_wv, gboolean push_history, gboolean is_sidebar_click) {
     if (!target_wv) return;
 
-    char *query = normalize_headword_for_search(query_raw, FALSE);
+    char *query = normalize_headword_for_search(query_raw, is_sidebar_click);
+    gboolean is_fts_tab = current_tab_is_full_text_search();
+    
+    const char *current_search_query = search_entry ? gtk_editable_get_text(GTK_EDITABLE(search_entry)) : NULL;
     gboolean should_highlight_fts =
-        query_requests_full_text_search(query_raw, current_tab_is_full_text_search()) &&
+        query_requests_full_text_search(is_sidebar_click ? current_search_query : query_raw, is_fts_tab) &&
         fts_highlight_query && *fts_highlight_query;
 
     if (query && g_str_has_prefix(query, "* ")) {
@@ -3583,76 +3715,51 @@ static void render_query_to_webview(const char *query_raw, WebKitWebView *target
 
     if (!query || strlen(query) == 0) {
         queue_fts_highlight_for_web_view(target_wv, NULL);
-        render_idle_page_to_webview(target_wv, "Diction", "Start typing to search...");
-        set_tab_metadata(target_wv, "", "Diction", 0);
+        if (!is_sidebar_click) {
+            render_idle_page_to_webview(target_wv, "Diction", "Start typing to search...");
+            set_tab_metadata(target_wv, "", "Diction", 0);
+        }
         g_free(query);
         return;
     }
 
     int dark_mode = style_manager && adw_style_manager_get_dark(style_manager) ? 1 : 0;
-    char *shared_css = dict_render_shared_styles(
-        dark_mode,
-        app_settings ? app_settings->color_theme : "default",
-        app_settings ? app_settings->font_family : NULL,
-        app_settings ? app_settings->font_size : 0);
+    
+    AsyncSearchData *data = g_new0(AsyncSearchData, 1);
+    data->query_raw = g_strdup(query_raw);
+    data->query = query;
+    data->target_wv = target_wv;
+    g_object_ref(target_wv);
+    data->push_history = push_history;
+    data->is_sidebar_click = is_sidebar_click;
+    data->dark_mode = dark_mode;
+    data->color_theme = g_strdup(app_settings ? app_settings->color_theme : "default");
+    data->render_style = g_strdup((app_settings && app_settings->render_style && *app_settings->render_style) ? app_settings->render_style : "diction");
+    data->font_family = g_strdup(app_settings ? app_settings->font_family : NULL);
+    data->font_size = app_settings ? app_settings->font_size : 0;
+    
+    data->shared_css = dict_render_shared_styles(
+        data->dark_mode,
+        data->color_theme,
+        data->font_family,
+        data->font_size);
 
-    GString *html_res = g_string_new("<html><head>");
-    if (shared_css) {
-        g_string_append(html_res, shared_css);
-        g_free(shared_css);
-    }
-    g_string_append(html_res, "</head><body>");
-
-    char *escaped_query_attr = safe_markup_escape_n(query, -1);
-    g_string_append_printf(html_res, "<div class='word-group' data-word='%s'>", escaped_query_attr);
-    g_free(escaped_query_attr);
-    gsize html_prefix_len = html_res->len;
-
-    g_mutex_lock(&dict_loader_mutex);
-    for (DictEntry *e = all_dicts; e; e = e->next) e->has_matches = FALSE;
-    g_mutex_unlock(&dict_loader_mutex);
-
-    gboolean exact_limited = FALSE;
-    int found_count = append_exact_matches_html(html_res, query, &exact_limited);
-    if (found_count == 0) {
-        char *fallback_query = exact_lookup_definite_article_variant(query);
-        if (fallback_query) {
-            g_string_truncate(html_res, html_prefix_len);
-            exact_limited = FALSE;
-            found_count = append_exact_matches_html(html_res, fallback_query, &exact_limited);
-            g_free(fallback_query);
-        }
+    data->should_highlight_fts = should_highlight_fts;
+    data->fts_highlight_query_copy = (fts_highlight_query && *fts_highlight_query) ? g_strdup(fts_highlight_query) : NULL;
+    data->is_fts_tab = is_fts_tab;
+    
+    if (current_search_query) {
+        data->current_search_query = g_strdup(current_search_query);
     }
 
-    if (found_count > 0) {
-        queue_fts_highlight_for_web_view(target_wv,
-                                         should_highlight_fts ? fts_highlight_query : NULL);
-        g_string_append(html_res, "</div></body></html>");
-        webkit_web_view_load_html(target_wv, html_res->str, "file:///");
-        set_tab_metadata(target_wv, query, query, 1);
-        /* Auto-highlight the matching word in the search sidebar */
-        select_related_word(query);
-        if (push_history && target_wv == get_current_web_view()) {
-            update_history_word(query);
-            const char *current_search_query = gtk_editable_get_text(GTK_EDITABLE(search_entry));
-            push_to_nav_history(query, current_search_query, current_tab_is_full_text_search());
-        }
-    } else {
-        queue_fts_highlight_for_web_view(target_wv, NULL);
-        set_tab_metadata(target_wv, query, "No Match", 1);
-        char *escaped_query = safe_markup_escape_n(query, -1);
-        char *message = g_strdup_printf(
-            "No exact match for <b>%s</b> in any dictionary.",
-            escaped_query ? escaped_query : query);
-        render_idle_page_to_webview(target_wv, "No Match", message);
-        g_free(message);
-        g_free(escaped_query);
-    }
-    g_string_free(html_res, TRUE);
-    g_free(query);
+    GTask *task = g_task_new(NULL, NULL, on_search_webview_task_ready, NULL);
+    g_task_set_task_data(task, data, (GDestroyNotify)async_search_data_free);
+    g_task_run_in_thread(task, search_webview_task_thread);
+    g_object_unref(task);
+}
 
-    /* Refresh the Dictionaries sidebar so it shows only dicts with results */
-    populate_dict_sidebar();
+static void render_query_to_webview(const char *query_raw, WebKitWebView *target_wv, gboolean push_history) {
+    dispatch_async_webview_search(query_raw, target_wv, push_history, FALSE);
 }
 
 static void execute_search_now_for_query(const char *query_raw, gboolean push_history) {
@@ -3740,87 +3847,7 @@ static void queue_fts_highlight_for_web_view(WebKitWebView *wv, const char *quer
 }
 
 static void append_rendered_word_html_impl(const char *raw_word, gboolean push_history) {
-    char *query = normalize_headword_for_search(raw_word, TRUE);
-    
-    /* Strip FTS prefix for headword matching in the renderer */
-    if (query && g_str_has_prefix(query, "* ")) {
-        char *stripped = g_strdup(query + 2);
-        g_free(query);
-        query = stripped;
-    }
-
-    if (!query || strlen(query) == 0) {
-        g_free(query);
-        return;
-    }
-
-    select_related_word(query);
-
-    char *display_title = normalize_headword_for_render(raw_word, raw_word ? strlen(raw_word) : 0, FALSE);
-
-    GString *html_res = g_string_new("");
-    gboolean exact_limited = FALSE;
-    int found_count = append_exact_matches_html(html_res, query, &exact_limited);
-    if (found_count == 0) {
-        char *fallback_query = exact_lookup_definite_article_variant(query);
-        if (fallback_query) {
-            g_string_truncate(html_res, 0);
-            exact_limited = FALSE;
-            found_count = append_exact_matches_html(html_res, fallback_query, &exact_limited);
-            g_free(fallback_query);
-        }
-    }
-
-    if (found_count > 0) {
-        const char *current_search_query = search_entry
-            ? gtk_editable_get_text(GTK_EDITABLE(search_entry))
-            : NULL;
-        gboolean should_highlight_fts =
-            query_requests_full_text_search(current_search_query, current_tab_is_full_text_search()) &&
-            fts_highlight_query && *fts_highlight_query;
-
-        set_tab_metadata(get_current_web_view(), query, display_title, 1);
-        
-        if (push_history) {
-            update_history_word(query);
-            push_to_nav_history(query, current_search_query,
-                                query_requests_full_text_search(current_search_query, current_tab_is_full_text_search()));
-        }
-
-        WebKitWebView *wv = get_current_web_view();
-        if (wv) {
-            queue_fts_highlight_for_web_view(wv,
-                                             should_highlight_fts ? fts_highlight_query : NULL);
-                                             
-            int dark_mode = style_manager && adw_style_manager_get_dark(style_manager) ? 1 : 0;
-            char *shared_css = dict_render_shared_styles(
-                dark_mode,
-                app_settings ? app_settings->color_theme : "default",
-                app_settings ? app_settings->font_family : NULL,
-                app_settings ? app_settings->font_size : 0);
-                
-            GString *full_html = g_string_new("<html><head>");
-            if (shared_css) {
-                g_string_append(full_html, shared_css);
-                g_free(shared_css);
-            }
-            g_string_append(full_html, "</head><body>");
-            
-            char *escaped_attr = safe_markup_escape_n(query, -1);
-            g_string_append_printf(full_html, "<div class='word-group' data-word='%s'>", escaped_attr);
-            g_free(escaped_attr);
-            
-            g_string_append(full_html, html_res->str);
-            g_string_append(full_html, "</div></body></html>");
-
-            webkit_web_view_load_html(wv, full_html->str, "file:///");
-            g_string_free(full_html, TRUE);
-        }
-    }
-    
-    g_free(display_title);
-    g_free(query);
-    g_string_free(html_res, TRUE);
+    dispatch_async_webview_search(raw_word, get_current_web_view(), push_history, TRUE);
 }
 
 static void append_rendered_word_html(const char *raw_word) {
@@ -3957,14 +3984,14 @@ static gpointer random_word_thread_worker(gpointer data) {
         char *clean_hw = NULL;
 
         while (attempts < 15) {
-            node = flat_index_random(target_e->dict->index);
+            size_t rand_pos = (size_t)rand() % flat_index_count(target_e->dict->index);
+            node = flat_index_get(target_e->dict->index, rand_pos);
             if (!node) break;
 
             /* This read might block on disk I/O, which is why we are in a background thread */
-            const char *data_ptr = target_e->dict->index->headword_buf;
-            const char *raw_data = data_ptr + node->h_off;
-            found_word = g_strndup(raw_data, node->h_len);
-            clean_hw = normalize_headword_for_render(found_word, node->h_len, FALSE);
+            size_t hw_len = 0;
+            found_word = flat_index_get_headword(target_e->dict->index, rand_pos, &hw_len);
+            clean_hw = normalize_headword_for_render(found_word, hw_len, FALSE);
 
             if (clean_hw && *clean_hw && !text_has_replacement_char(clean_hw)) {
                 break;
@@ -5240,6 +5267,7 @@ static DictEntry *create_dict_entry_from_loaded(const char *path, DictFormat fmt
     entry->dict_id = settings_make_dictionary_id(entry->path);
 
     /* Propagate icon detected by the parser / dict-loader fallback */
+    dict_mmap_ensure_icon(dict);
     if (dict->icon_path) {
         entry->icon_path = g_strdup(dict->icon_path);
     }
@@ -6549,19 +6577,22 @@ static int run_cli_search(const char *query, const char *in_dict) {
         while (pos != (size_t)-1) {
             const FlatTreeEntry *res = flat_index_get(e->dict->index, pos);
             if (!res) break;
-            const char *data_ptr = e->dict->index->headword_buf;
-            if (!flat_index_entry_matches_query(data_ptr, res, normalized_query, strlen(normalized_query))) break;
+            size_t hw_len = 0;
+            char *raw_hw = flat_index_get_headword(e->dict->index, pos, &hw_len);
+            if (!flat_index_entry_matches_query(raw_hw, res, normalized_query, strlen(normalized_query))) {
+                g_free(raw_hw);
+                break;
+            }
 
             if (!dict_header_printed) {
                 g_print("\n--- From: %s (%s) ---\n", e->name, dict_format_to_str(e->format));
                 dict_header_printed = TRUE;
             }
 
-            char *raw_hw = g_strndup(data_ptr + res->h_off, res->h_len);
             g_print("Headword: %s\n", raw_hw);
             g_free(raw_hw);
 
-            char *rendered = render_entry_def_to_html(e, res);
+            char *rendered = render_entry_def_to_html(e, pos, 0, "default", "diction", NULL);
             if (rendered) {
                 /* Simple HTML tag stripping for CLI */
                 GRegex *regex = g_regex_new("<[^>]*>", 0, 0, NULL);

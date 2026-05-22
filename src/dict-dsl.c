@@ -91,7 +91,7 @@ static char *dsl_find_resource_zip(const char *path) {
     return NULL;
 }
 
-static char *dsl_prepare_resource_dir(const char *path, ResourceReader **out_reader) {
+char *dsl_prepare_resource_dir(const char *path, ResourceReader **out_reader) {
     char *local_dir = dsl_find_local_resource_dir(path);
     if (local_dir) {
         return local_dir;
@@ -241,6 +241,39 @@ DictMmap* dict_mmap_open(const char *path, volatile gint *cancel_flag, gint expe
     char *hw_path = dict_hw_index_path_for(path);
     gboolean hw_exists = (access(hw_path, F_OK) == 0);
     gboolean hw_valid = hw_exists && dict_cache_is_valid(hw_path, path);
+
+    if (hw_valid) {
+        FlatIndex *idx = flat_index_open(hw_path);
+        if (idx && idx->count > 0 && flat_index_validate(idx)) {
+            if (!flat_index_get_metadata(idx, "source_path")) {
+                flat_index_close(idx);
+                hw_valid = FALSE;
+            } else {
+                DictMmap *dict = g_new0(DictMmap, 1);
+                dict->fd = -1;
+                dict->index = idx;
+            dict->source_dir = g_path_get_dirname(path);
+
+            /* Get metadata from index if available */
+            const char *m_name = flat_index_get_metadata(idx, "dict_name");
+            const char *m_src = flat_index_get_metadata(idx, "source_lang");
+            const char *m_tgt = flat_index_get_metadata(idx, "target_lang");
+            const char *m_enc = flat_index_get_metadata(idx, "source_encoding");
+
+            if (m_name) dict->name = g_strdup(m_name);
+            if (m_src) dict->source_lang = g_strdup(m_src);
+            if (m_tgt) dict->target_lang = g_strdup(m_tgt);
+            if (m_enc) dict->source_encoding = atoi(m_enc);
+
+            /* Lazy source initialization will happen on first get_definition */
+            g_free(hw_path);
+            return dict;
+            }
+        } else if (idx) {
+            flat_index_close(idx);
+        }
+    }
+
     if (!hw_valid && dict_cache_failure_is_current(hw_path, path)) {
         fprintf(stderr, "[DSL] Skipping cached index failure for %s\n", path);
         g_free(hw_path);
@@ -251,7 +284,6 @@ DictMmap* dict_mmap_open(const char *path, volatile gint *cancel_flag, gint expe
     dict->fd = -1;
     dict->tmp_file = NULL;
     dict->source_dir = g_path_get_dirname(path);
-    dict->resource_dir = dsl_prepare_resource_dir(path, &dict->resource_reader);
 
     if (!hw_valid) {
         printf("[DSL] Building SQLite headword index for %s\n", path);
@@ -347,3 +379,4 @@ DictMmap* dict_mmap_open(const char *path, volatile gint *cancel_flag, gint expe
     g_free(hw_path);
     return dict;
 }
+

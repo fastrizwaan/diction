@@ -158,6 +158,7 @@ struct DictHwBuilder {
     sqlite3      *db;
     sqlite3_stmt *insert_stmt;
     sqlite3_stmt *meta_stmt;
+    sqlite3_stmt *meta_blob_stmt;
     char         *db_path;
     int           batch_count;
     gboolean      in_txn;
@@ -227,10 +228,21 @@ DictHwBuilder* dict_hw_builder_new(const char *db_path) {
         return NULL;
     }
 
+    sqlite3_stmt *mbstmt = NULL;
+    if (sqlite3_prepare_v2(db,
+        "INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?);",
+        -1, &mbstmt, NULL) != SQLITE_OK) {
+        sqlite3_finalize(stmt);
+        sqlite3_finalize(mstmt);
+        sqlite3_close(db);
+        return NULL;
+    }
+
     DictHwBuilder *b = g_new0(DictHwBuilder, 1);
     b->db          = db;
     b->insert_stmt = stmt;
     b->meta_stmt   = mstmt;
+    b->meta_blob_stmt = mbstmt;
     b->db_path     = g_strdup(db_path);
     b->batch_count = 0;
     b->in_txn      = FALSE;
@@ -281,6 +293,18 @@ void dict_hw_builder_set_metadata(DictHwBuilder *b,
     }
 }
 
+void dict_hw_builder_set_metadata_blob(DictHwBuilder *b,
+                                       const char *key, const void *data, size_t len)
+{
+    if (!b || !b->meta_blob_stmt || !key || !data) return;
+    sqlite3_reset(b->meta_blob_stmt);
+    sqlite3_bind_text(b->meta_blob_stmt, 1, key, -1, SQLITE_STATIC);
+    sqlite3_bind_blob(b->meta_blob_stmt, 2, data, (int)len, SQLITE_STATIC);
+    if (sqlite3_step(b->meta_blob_stmt) != SQLITE_DONE) {
+        fprintf(stderr, "[HW] metadata blob error: %s\n", sqlite3_errmsg(b->db));
+    }
+}
+
 gboolean dict_hw_builder_finalize(DictHwBuilder *b) {
     if (!b) return FALSE;
 
@@ -301,6 +325,7 @@ gboolean dict_hw_builder_finalize(DictHwBuilder *b) {
     /* Clean up */
     if (b->insert_stmt) { sqlite3_finalize(b->insert_stmt); b->insert_stmt = NULL; }
     if (b->meta_stmt)   { sqlite3_finalize(b->meta_stmt);   b->meta_stmt   = NULL; }
+    if (b->meta_blob_stmt) { sqlite3_finalize(b->meta_blob_stmt); b->meta_blob_stmt = NULL; }
     if (b->norm_str)    { g_string_free(b->norm_str, TRUE); b->norm_str = NULL; }
     sqlite3_close(b->db);
     g_free(b->db_path);
@@ -313,6 +338,7 @@ void dict_hw_builder_free(DictHwBuilder *b) {
     if (b->in_txn && b->db) sqlite3_exec(b->db, "ROLLBACK;", NULL, NULL, NULL);
     if (b->insert_stmt) { sqlite3_finalize(b->insert_stmt); b->insert_stmt = NULL; }
     if (b->meta_stmt)   { sqlite3_finalize(b->meta_stmt);   b->meta_stmt   = NULL; }
+    if (b->meta_blob_stmt) { sqlite3_finalize(b->meta_blob_stmt); b->meta_blob_stmt = NULL; }
     if (b->norm_str)    { g_string_free(b->norm_str, TRUE); b->norm_str = NULL; }
     if (b->db) sqlite3_close(b->db);
     if (b->db_path) {

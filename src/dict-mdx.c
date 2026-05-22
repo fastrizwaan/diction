@@ -999,7 +999,6 @@ static char *mdx_convert_icon_to_png(const char *icon_path) {
     return png_path;
 }
 
-
 static void mdx_detect_icon(DictMmap *dict, const char *path) {
     if (!dict->resource_dir) return;
 
@@ -1230,10 +1229,61 @@ static MdxContext* mdx_init_context(FILE *fh, int is_v2, int num_size, uint64_t 
     return ctx;
 }
 
-const char* mdx_get_definition_on_the_fly(DictMmap *dict, const FlatTreeEntry *entry, size_t *out_len, char **out_to_free) {
-    if (!dict || !dict->mdx_ctx || !entry) {
-        return NULL;
+void mdx_ensure_context(DictMmap *dict) {
+    if (dict->mdx_ctx) return;
+    const char *path = flat_index_get_metadata(dict->index, "source_path");
+    if (!path) return;
+
+    const char *m_is_v2 = flat_index_get_metadata(dict->index, "mdx_is_v2");
+    size_t rbs_len = 0;
+    const void *rbs_data = flat_index_get_metadata_blob(dict->index, "mdx_record_blocks", &rbs_len);
+
+    if (m_is_v2 && rbs_data) {
+        MdxContext *ctx = g_new0(MdxContext, 1);
+        ctx->fd = open(path, O_RDONLY);
+        if (ctx->fd >= 0) {
+            ctx->nrb = rbs_len / sizeof(MdxRecordBlock);
+            ctx->rbs = g_malloc(rbs_len);
+            memcpy(ctx->rbs, rbs_data, rbs_len);
+            const char *m_utf16 = flat_index_get_metadata(dict->index, "mdx_encoding_is_utf16");
+            const char *m_enc = flat_index_get_metadata(dict->index, "mdx_dict_encoding");
+            if (m_utf16) ctx->is_utf16 = atoi(m_utf16);
+            if (m_enc) ctx->encoding = g_strdup(m_enc);
+            dict->mdx_ctx = ctx;
+            return;
+        }
+        g_free(ctx);
     }
+
+    FILE *fh = fopen(path, "rb");
+    if (fh) {
+        const char *m_num = flat_index_get_metadata(dict->index, "mdx_num_size");
+        const char *m_hdr = flat_index_get_metadata(dict->index, "mdx_header_text_size");
+        const char *m_utf16 = flat_index_get_metadata(dict->index, "mdx_encoding_is_utf16");
+        const char *m_enc = flat_index_get_metadata(dict->index, "mdx_dict_encoding");
+        if (m_is_v2 && m_num && m_hdr) {
+            dict->mdx_ctx = mdx_init_context(fh, atoi(m_is_v2), atoi(m_num), strtoull(m_hdr, NULL, 10), m_utf16 ? atoi(m_utf16) : 0, m_enc);
+        }
+        fclose(fh);
+    }
+}
+
+void mdx_ensure_resources(DictMmap *dict) {
+    if (dict->resource_dir || dict->resource_reader) return;
+    const char *path = flat_index_get_metadata(dict->index, "source_path");
+    if (!path) return;
+    const char *m_is_v2 = flat_index_get_metadata(dict->index, "mdx_is_v2");
+    const char *m_num = flat_index_get_metadata(dict->index, "mdx_num_size");
+    const char *m_utf16 = flat_index_get_metadata(dict->index, "mdx_encoding_is_utf16");
+    if (m_is_v2 && m_num && m_utf16) {
+        dict->resource_dir = mdx_prepare_resource_dir(path, atoi(m_is_v2), atoi(m_num), atoi(m_utf16), FALSE, NULL, 0, &dict->resource_reader);
+    }
+}
+
+const char* mdx_get_definition_on_the_fly(DictMmap *dict, const FlatTreeEntry *entry, size_t *out_len, char **out_to_free) {
+    if (!dict || !entry) return NULL;
+    mdx_ensure_context(dict);
+    if (!dict->mdx_ctx) return NULL;
     MdxContext *ctx = dict->mdx_ctx;
     
     if (out_len) *out_len = 0;
@@ -1325,8 +1375,58 @@ DictMmap *parse_mdx_file(const char *path, volatile gint *cancel_flag, gint expe
     dict_cache_ensure_dir();
 
     char *cache_path = dict_cache_path_for(path);
-    gboolean cache_valid = (access(cache_path, F_OK) == 0) &&
-                           dict_cache_is_valid(cache_path, path);
+    char *hw_path = dict_hw_index_path_for(path);
+    gboolean cache_valid = (access(cache_path, F_OK) == 0) && dict_cache_is_valid(cache_path, path);
+    gboolean hw_valid = (access(hw_path, F_OK) == 0) && dict_cache_is_valid(hw_path, path);
+
+    if (cache_valid && hw_valid) {
+        FlatIndex *idx = flat_index_open(hw_path);
+        if (idx && idx->count > 0 && flat_index_validate(idx)) {
+            if (!flat_index_get_metadata(idx, "source_path")) {
+                flat_index_close(idx);
+                cache_valid = FALSE;
+                hw_valid = FALSE;
+            } else {
+                int cache_fd = open(cache_path, O_RDONLY);
+            if (cache_fd >= 0) {
+                struct stat st;
+                fstat(cache_fd, &st);
+                size_t dict_size = (size_t)st.st_size;
+                const void *dict_data = mmap(NULL, dict_size, PROT_READ, MAP_PRIVATE, cache_fd, 0);
+                if (dict_data != MAP_FAILED) {
+                    DictMmap *dict = g_new0(DictMmap, 1);
+                    dict->fd = -1;
+                    dict->data = dict_data;
+                    dict->size = dict_size;
+                    dict->index = idx;
+                    dict->source_dir = g_path_get_dirname(path);
+                    
+                    /* Load metadata from index */
+                    const char *m_name = flat_index_get_metadata(idx, "dict_name");
+                    const char *m_src = flat_index_get_metadata(idx, "source_lang");
+                    const char *m_tgt = flat_index_get_metadata(idx, "target_lang");
+                    if (m_name) dict->name = g_strdup(m_name);
+                    if (m_src) dict->source_lang = g_strdup(m_src);
+                    if (m_tgt) dict->target_lang = g_strdup(m_tgt);
+
+                    if (dict_cache_is_compressed(dict->data, dict->size)) {
+                        dict->is_compressed = TRUE;
+                        dict->chunk_reader = dict_chunk_reader_new(dict->data, dict->size, (const DictCacheHeader*)dict->data);
+                    }
+
+                    /* Deferred MdxContext and ResourceReader initialization */
+                    close(cache_fd);
+                    g_free(cache_path);
+                    g_free(hw_path);
+                    return dict;
+                }
+                close(cache_fd);
+            }
+            }
+        } else if (idx) {
+            flat_index_close(idx);
+        }
+    }
 
     int cache_fd = -1;
     const char *dict_data = NULL;
@@ -1539,11 +1639,6 @@ DictMmap *parse_mdx_file(const char *path, volatile gint *cancel_flag, gint expe
             
             if (!dict->is_compressed) {
                 dict->mdx_ctx = mdx_init_context(fh, is_v2, num_size, header_text_size, encoding_is_utf16, dict_encoding);
-            }
-
-            if (!(cancel_flag && g_atomic_int_get(cancel_flag) != expected)) {
-                dict->resource_dir = mdx_prepare_resource_dir(path, is_v2, num_size, encoding_is_utf16, encrypted, cancel_flag, expected, &dict->resource_reader);
-                mdx_detect_icon(dict, path);
             }
 
             g_free(stylesheet);
@@ -1821,8 +1916,9 @@ rebuild_cache:
         fprintf(stderr, "[MDX] Parsed zero entries for %s\n", path);
     }
 
+    MdxContext *mdx_ctx = mdx_init_context(fh, is_v2, num_size, header_text_size, encoding_is_utf16, dict_encoding);
+
     /* Build SQLite headword index */
-    char *hw_path = dict_hw_index_path_for(path);
     {
         int hw_fd = open(cache_path, O_RDONLY);
         if (hw_fd >= 0) {
@@ -1846,6 +1942,23 @@ rebuild_cache:
                         if (title) dict_hw_builder_set_metadata(hw, "dict_name", title);
                         if (s_lang) dict_hw_builder_set_metadata(hw, "source_lang", s_lang);
                         if (t_lang) dict_hw_builder_set_metadata(hw, "target_lang", t_lang);
+
+                        /* Store MdxContext fields for lazy reconstruction */
+                        char buf[32];
+                        snprintf(buf, sizeof(buf), "%d", is_v2);
+                        dict_hw_builder_set_metadata(hw, "mdx_is_v2", buf);
+                        snprintf(buf, sizeof(buf), "%d", num_size);
+                        dict_hw_builder_set_metadata(hw, "mdx_num_size", buf);
+                        snprintf(buf, sizeof(buf), "%" PRIu64, (uint64_t)header_text_size);
+                        dict_hw_builder_set_metadata(hw, "mdx_header_text_size", buf);
+                        snprintf(buf, sizeof(buf), "%d", encoding_is_utf16);
+                        dict_hw_builder_set_metadata(hw, "mdx_encoding_is_utf16", buf);
+                        if (dict_encoding) dict_hw_builder_set_metadata(hw, "mdx_dict_encoding", dict_encoding);
+                        
+                        if (mdx_ctx && mdx_ctx->rbs && mdx_ctx->nrb > 0) {
+                            dict_hw_builder_set_metadata_blob(hw, "mdx_record_blocks", mdx_ctx->rbs, (size_t)(mdx_ctx->nrb * sizeof(MdxRecordBlock)));
+                        }
+
                         dict_hw_builder_finalize(hw);
                         struct stat hw_src_st;
                         if (stat(path, &hw_src_st) == 0) {
@@ -1859,8 +1972,6 @@ rebuild_cache:
             close(hw_fd);
         }
     }
-
-    MdxContext *mdx_ctx = mdx_init_context(fh, is_v2, num_size, header_text_size, encoding_is_utf16, dict_encoding);
 
     dict_cache_builder_free(builder);
     const char *sources[] = { path };

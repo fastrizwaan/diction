@@ -29,8 +29,8 @@ void dict_mmap_close(DictMmap *dict) {
         if (dict->data) munmap((void*)dict->data, dict->size);
         if (dict->source_mmap) munmap((void*)dict->source_mmap, dict->source_size);
         if (dict->source_dz) dictzip_close(dict->source_dz);
-        if (dict->source_fd >= 0) close(dict->source_fd);
-        if (dict->fd >= 0) close(dict->fd);
+        if (dict->source_fd >= 3) close(dict->source_fd);
+        if (dict->fd >= 3) close(dict->fd);
         if (dict->tmp_file) fclose(dict->tmp_file);
         g_free(dict->name);
         g_free(dict->source_dir);

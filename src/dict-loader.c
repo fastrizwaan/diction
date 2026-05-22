@@ -14,72 +14,78 @@
 #include "dict-chunked.h"
 #include "dict-fts-index.h"
 
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include "dictzip.h"
 
-static size_t convert_utf16le_to_utf8(const unsigned char *in_buf, size_t in_len, unsigned char *out_buf, size_t out_max) {
-    size_t in = 0, out = 0;
-    while (in + 1 < in_len && out + 4 <= out_max) {
-        uint32_t wc = in_buf[in] | (in_buf[in+1] << 8);
-        in += 2;
-        if (wc >= 0xD800 && wc <= 0xDBFF && in + 1 < in_len) {
-            uint32_t wc2 = in_buf[in] | (in_buf[in+1] << 8);
-            if (wc2 >= 0xDC00 && wc2 <= 0xDFFF) {
-                in += 2;
-                wc = 0x10000 + ((wc & 0x3FF) << 10) + (wc2 & 0x3FF);
-            }
-        }
-        if (wc >= 0xD800 && wc <= 0xDFFF) { wc = 0xFFFD; }
-        if (wc < 0x80) { out_buf[out++] = wc; }
-        else if (wc < 0x800) {
-            out_buf[out++] = 0xC0 | (wc >> 6);
-            out_buf[out++] = 0x80 | (wc & 0x3F);
-        } else if (wc < 0x10000) {
-            out_buf[out++] = 0xE0 | (wc >> 12);
-            out_buf[out++] = 0x80 | ((wc >> 6) & 0x3F);
-            out_buf[out++] = 0x80 | (wc & 0x3F);
-        } else {
-            out_buf[out++] = 0xF0 | (wc >> 18);
-            out_buf[out++] = 0x80 | ((wc >> 12) & 0x3F);
-            out_buf[out++] = 0x80 | ((wc >> 6) & 0x3F);
-            out_buf[out++] = 0x80 | (wc & 0x3F);
-        }
+extern GMutex dict_loader_mutex;
+
+void dict_mmap_ensure_source(DictMmap *dict) {
+    if (!dict || !dict->index) return;
+    if (dict->source_fd >= 3 || dict->source_mmap || dict->source_dz || dict->mdx_ctx) return;
+    
+    g_mutex_lock(&dict_loader_mutex);
+    if (dict->source_fd >= 3 || dict->source_mmap || dict->source_dz || dict->mdx_ctx) {
+        g_mutex_unlock(&dict_loader_mutex);
+        return;
     }
-    return out;
+
+    const char *path = flat_index_get_metadata(dict->index, "source_path");
+    if (!path) {
+        g_mutex_unlock(&dict_loader_mutex);
+        return;
+    }
+
+    if (g_str_has_suffix(path, ".dz")) {
+        dict->source_dz = dictzip_open(path);
+    } else if (g_str_has_suffix(path, ".dsl") || g_str_has_suffix(path, ".dict") || g_str_has_suffix(path, ".xdxf")) {
+        dict->source_fd = open(path, O_RDONLY);
+        if (dict->source_fd >= 0) {
+            struct stat s_st;
+            fstat(dict->source_fd, &s_st);
+            dict->source_size = s_st.st_size;
+            dict->source_mmap = mmap(NULL, dict->source_size, PROT_READ, MAP_SHARED, dict->source_fd, 0);
+            close(dict->source_fd);
+            dict->source_fd = -1;
+        }
+    } else if (g_str_has_suffix(path, ".mdx")) {
+        extern void mdx_ensure_context(DictMmap *dict);
+        mdx_ensure_context(dict);
+    }
+    g_mutex_unlock(&dict_loader_mutex);
 }
 
-static size_t convert_utf16be_to_utf8(const unsigned char *in_buf, size_t in_len, unsigned char *out_buf, size_t out_max) {
-    size_t in = 0, out = 0;
-    while (in + 1 < in_len && out + 4 <= out_max) {
-        uint32_t wc = (in_buf[in] << 8) | in_buf[in+1];
-        in += 2;
-        if (wc >= 0xD800 && wc <= 0xDBFF && in + 1 < in_len) {
-            uint32_t wc2 = (in_buf[in] << 8) | in_buf[in+1];
-            if (wc2 >= 0xDC00 && wc2 <= 0xDFFF) {
-                in += 2;
-                wc = 0x10000 + ((wc & 0x3FF) << 10) + (wc2 & 0x3FF);
-            }
-        }
-        if (wc >= 0xD800 && wc <= 0xDFFF) { wc = 0xFFFD; }
-        if (wc < 0x80) { out_buf[out++] = wc; }
-        else if (wc < 0x800) {
-            out_buf[out++] = 0xC0 | (wc >> 6);
-            out_buf[out++] = 0x80 | (wc & 0x3F);
-        } else if (wc < 0x10000) {
-            out_buf[out++] = 0xE0 | (wc >> 12);
-            out_buf[out++] = 0x80 | ((wc >> 6) & 0x3F);
-            out_buf[out++] = 0x80 | (wc & 0x3F);
-        } else {
-            out_buf[out++] = 0xF0 | (wc >> 18);
-            out_buf[out++] = 0x80 | ((wc >> 12) & 0x3F);
-            out_buf[out++] = 0x80 | ((wc >> 6) & 0x3F);
-            out_buf[out++] = 0x80 | (wc & 0x3F);
-        }
+void dict_mmap_ensure_resources(DictMmap *dict) {
+    if (!dict || !dict->index) return;
+    if (dict->resource_dir || dict->resource_reader) return;
+    
+    g_mutex_lock(&dict_loader_mutex);
+    if (dict->resource_dir || dict->resource_reader) {
+        g_mutex_unlock(&dict_loader_mutex);
+        return;
     }
-    return out;
+
+    const char *path = flat_index_get_metadata(dict->index, "source_path");
+    if (!path) {
+        g_mutex_unlock(&dict_loader_mutex);
+        return;
+    }
+    
+    if (g_str_has_suffix(path, ".dsl") || g_str_has_suffix(path, ".dz")) {
+        extern char* dsl_prepare_resource_dir(const char *path, ResourceReader **out_reader);
+        dict->resource_dir = dsl_prepare_resource_dir(path, &dict->resource_reader);
+    } else if (g_str_has_suffix(path, ".mdx")) {
+        extern void mdx_ensure_resources(DictMmap *dict);
+        mdx_ensure_resources(dict);
+    }
+    g_mutex_unlock(&dict_loader_mutex);
 }
 
 static const char* dict_get_definition_raw(DictMmap *dict, const FlatTreeEntry *entry, size_t *out_len, char **out_to_free) {
     if (!dict || !entry) return NULL;
+    dict_mmap_ensure_source(dict);
     if (out_len) *out_len = entry->d_len;
     if (out_to_free) *out_to_free = NULL;
 
@@ -91,19 +97,22 @@ static const char* dict_get_definition_raw(DictMmap *dict, const FlatTreeEntry *
             if (out_to_free) *out_to_free = transcoded;
             return transcoded;
         }
-        if (dict->source_encoding == 1 || dict->source_encoding == 2) {
-            size_t max_out = entry->d_len * 2;
-            char *utf8_buf = g_malloc(max_out + 1);
-            size_t utf8_len = 0;
-            if (dict->source_encoding == 1) {
-                utf8_len = convert_utf16le_to_utf8((const unsigned char*)dict->source_mmap + entry->d_off, entry->d_len, (unsigned char*)utf8_buf, max_out);
-            } else {
-                utf8_len = convert_utf16be_to_utf8((const unsigned char*)dict->source_mmap + entry->d_off, entry->d_len, (unsigned char*)utf8_buf, max_out);
+
+        /* Handle non-UTF8 encodings (mainly for DSL) */
+        if (dict->source_encoding != 0 && dict->source_encoding != 65001) {
+            const char *from = "UTF-16LE";
+            if (dict->source_encoding == 1) from = "UTF-16LE";
+            else if (dict->source_encoding == 2) from = "UTF-16BE";
+            else if (dict->source_encoding == 1251) from = "WINDOWS-1251";
+            else if (dict->source_encoding == 1252) from = "WINDOWS-1252";
+            
+            GError *err = NULL;
+            char *utf8 = g_convert(dict->source_mmap + entry->d_off, (gssize)entry->d_len, "UTF-8", from, NULL, out_len, &err);
+            if (!err) {
+                if (out_to_free) *out_to_free = utf8;
+                return utf8;
             }
-            utf8_buf[utf8_len] = '\0';
-            if (out_len) *out_len = utf8_len;
-            if (out_to_free) *out_to_free = utf8_buf;
-            return utf8_buf;
+            g_clear_error(&err);
         }
         return dict->source_mmap + entry->d_off;
     }
@@ -111,7 +120,7 @@ static const char* dict_get_definition_raw(DictMmap *dict, const FlatTreeEntry *
     /* 2. dictzip random access for .dsl.dz / .dict.dz */
     if (dict->source_dz) {
         size_t raw_len = 0;
-        unsigned char *raw = dictzip_read(dict->source_dz, entry->d_off, entry->d_len, &raw_len);
+        unsigned char *raw = (unsigned char*)dictzip_read(dict->source_dz, entry->d_off, entry->d_len, &raw_len);
         if (!raw) return NULL;
         
         if (dict->stardict_sts) {
@@ -122,20 +131,22 @@ static const char* dict_get_definition_raw(DictMmap *dict, const FlatTreeEntry *
             return transcoded;
         }
 
-        if (dict->source_encoding == 1 || dict->source_encoding == 2) {
-            size_t max_out = raw_len * 2;
-            char *utf8_buf = g_malloc(max_out + 1);
-            size_t utf8_len = 0;
-            if (dict->source_encoding == 1) {
-                utf8_len = convert_utf16le_to_utf8(raw, raw_len, (unsigned char*)utf8_buf, max_out);
-            } else {
-                utf8_len = convert_utf16be_to_utf8(raw, raw_len, (unsigned char*)utf8_buf, max_out);
-            }
-            utf8_buf[utf8_len] = '\0';
+        if (dict->source_encoding != 0 && dict->source_encoding != 65001) {
+            const char *from = "UTF-16LE";
+            if (dict->source_encoding == 1) from = "UTF-16LE";
+            else if (dict->source_encoding == 2) from = "UTF-16BE";
+            else if (dict->source_encoding == 1251) from = "WINDOWS-1251";
+            else if (dict->source_encoding == 1252) from = "WINDOWS-1252";
+
+            GError *err = NULL;
+            char *utf8 = g_convert((const char*)raw, (gssize)raw_len, "UTF-8", from, NULL, out_len, &err);
             g_free(raw);
-            if (out_len) *out_len = utf8_len;
-            if (out_to_free) *out_to_free = utf8_buf;
-            return utf8_buf;
+            if (!err) {
+                if (out_to_free) *out_to_free = utf8;
+                return utf8;
+            }
+            g_clear_error(&err);
+            return NULL;
         }
 
         if (out_len) *out_len = raw_len;
@@ -356,11 +367,102 @@ extern DictMmap* parse_slob_file(const char *path, volatile gint *cancel_flag, g
 extern DictMmap* parse_dictd_file(const char *index_path, volatile gint *cancel_flag, gint expected);
 extern DictMmap* parse_sdict_file(const char *path, volatile gint *cancel_flag, gint expected);
 
+void dict_mmap_ensure_icon(DictMmap *dict) {
+    if (!dict || dict->icon_path) return;
+    
+    const char *path = NULL;
+    if (dict->index) {
+        path = flat_index_get_metadata(dict->index, "source_path");
+    }
+    /* Fallback if metadata not yet loaded or for other formats */
+    if (!path) return;
+
+    const char *img_exts[] = {".png", ".ico", ".jpg", ".jpeg", ".bmp", NULL};
+    char *base_no_ext = g_strdup(path);
+
+    /* Strip double extension for compressed DSL (.dsl.dz) */
+    if (ends_with_ci(base_no_ext, ".dsl.dz")) {
+        base_no_ext[strlen(base_no_ext) - 7] = '\0'; /* strip ".dsl.dz" */
+    } else if (ends_with_ci(base_no_ext, ".dsl")) {
+        base_no_ext[strlen(base_no_ext) - 4] = '\0';
+    } else {
+        /* Generic: strip the last extension */
+        char *dot = strrchr(base_no_ext, '.');
+        if (dot) *dot = '\0';
+    }
+    
+    /* 1. Try basename match (e.g. dictname.png / dictname.bmp) */
+    for (int i = 0; img_exts[i]; i++) {
+        char *icon_candidate = g_strconcat(base_no_ext, img_exts[i], NULL);
+        if (g_file_test(icon_candidate, G_FILE_TEST_EXISTS)) {
+            dict->icon_path = icon_candidate;
+            break;
+        }
+        g_free(icon_candidate);
+    }
+    
+    /* 2. Try generic names (e.g. icon.png) in the same directory */
+    if (!dict->icon_path) {
+        char *dir = g_path_get_dirname(path);
+        const char *generic_names[] = {"icon.png", "icon.ico", "icon.jpg", "logo.png", NULL};
+        for (int i = 0; generic_names[i]; i++) {
+            char *icon_candidate = g_build_filename(dir, generic_names[i], NULL);
+            if (g_file_test(icon_candidate, G_FILE_TEST_EXISTS)) {
+                dict->icon_path = icon_candidate;
+                break;
+            }
+            g_free(icon_candidate);
+        }
+        g_free(dir);
+    }
+
+    /* 3. Convert BMP/ICO to PNG */
+    if (dict->icon_path) {
+        gboolean is_bmp = g_str_has_suffix(dict->icon_path, ".bmp") ||
+                            g_str_has_suffix(dict->icon_path, ".BMP");
+        gboolean is_ico = g_str_has_suffix(dict->icon_path, ".ico") ||
+                            g_str_has_suffix(dict->icon_path, ".ICO");
+        if (is_bmp || is_ico) {
+            char *hash = g_compute_checksum_for_string(G_CHECKSUM_SHA1, dict->icon_path, -1);
+            const char *base = dict_cache_base_dir();
+            char *icons_dir = g_build_filename(base, "diction", "icons", NULL);
+            g_mkdir_with_parents(icons_dir, 0755);
+
+            char *png_path = g_strdup_printf("%s/%s.png", icons_dir, hash);
+            g_free(icons_dir);
+            g_free(hash);
+
+            if (!g_file_test(png_path, G_FILE_TEST_EXISTS)) {
+                GError *err = NULL;
+                GdkPixbuf *pixbuf = gdk_pixbuf_new_from_file(dict->icon_path, &err);
+                if (pixbuf) {
+                    if (!gdk_pixbuf_save(pixbuf, png_path, "png", &err, NULL)) {
+                        g_clear_error(&err);
+                        g_free(png_path);
+                        png_path = NULL;
+                    }
+                    g_object_unref(pixbuf);
+                } else {
+                    g_clear_error(&err);
+                    g_free(png_path);
+                    png_path = NULL;
+                }
+            }
+
+            if (png_path) {
+                g_free(dict->icon_path);
+                dict->icon_path = png_path;
+            }
+        }
+    }
+    g_free(base_no_ext);
+}
+
 DictMmap* dict_load_any(const char *path, DictFormat fmt, volatile gint *cancel_flag, gint expected_generation) {
     DictMmap *dict = NULL;
     switch (fmt) {
         case DICT_FORMAT_DSL:
-            dict = dict_mmap_open(path, cancel_flag, expected_generation);
+            dict = (DictMmap*)dict_mmap_open(path, cancel_flag, expected_generation);
             break;
 
         case DICT_FORMAT_STARDICT:
@@ -392,91 +494,7 @@ DictMmap* dict_load_any(const char *path, DictFormat fmt, volatile gint *cancel_
             break;
     }
 
-    if (dict && !dict->icon_path) {
-        const char *img_exts[] = {".png", ".ico", ".jpg", ".jpeg", ".bmp", NULL};
-        char *base_no_ext = g_strdup(path);
-
-        /* Strip double extension for compressed DSL (.dsl.dz) */
-        if (ends_with_ci(base_no_ext, ".dsl.dz")) {
-            base_no_ext[strlen(base_no_ext) - 7] = '\0'; /* strip ".dsl.dz" */
-        } else if (ends_with_ci(base_no_ext, ".dsl")) {
-            base_no_ext[strlen(base_no_ext) - 4] = '\0';
-        } else {
-            /* Generic: strip the last extension */
-            char *dot = strrchr(base_no_ext, '.');
-            if (dot) *dot = '\0';
-        }
-        
-        /* 1. Try basename match (e.g. dictname.png / dictname.bmp) */
-        for (int i = 0; img_exts[i]; i++) {
-            char *icon_candidate = g_strconcat(base_no_ext, img_exts[i], NULL);
-            if (g_file_test(icon_candidate, G_FILE_TEST_EXISTS)) {
-                dict->icon_path = icon_candidate;
-                break;
-            }
-            g_free(icon_candidate);
-        }
-        
-        /* 2. Try generic names (e.g. icon.png) in the same directory */
-        if (!dict->icon_path) {
-            char *dir = g_path_get_dirname(path);
-            const char *generic_names[] = {"icon.png", "icon.ico", "icon.jpg", "logo.png", NULL};
-            for (int i = 0; generic_names[i]; i++) {
-                char *icon_candidate = g_build_filename(dir, generic_names[i], NULL);
-                if (g_file_test(icon_candidate, G_FILE_TEST_EXISTS)) {
-                    dict->icon_path = icon_candidate;
-                    break;
-                }
-                g_free(icon_candidate);
-            }
-            g_free(dir);
-        }
-
-        /* 3. Convert BMP/ICO to PNG so WebKit <img> tags can display them */
-        if (dict->icon_path) {
-            gboolean is_bmp = g_str_has_suffix(dict->icon_path, ".bmp") ||
-                              g_str_has_suffix(dict->icon_path, ".BMP");
-            gboolean is_ico = g_str_has_suffix(dict->icon_path, ".ico") ||
-                              g_str_has_suffix(dict->icon_path, ".ICO");
-            if (is_bmp || is_ico) {
-                char *hash = g_compute_checksum_for_string(G_CHECKSUM_SHA1, dict->icon_path, -1);
-                const char *base = dict_cache_base_dir();
-                char *icons_dir = g_build_filename(base, "diction", "icons", NULL);
-                g_mkdir_with_parents(icons_dir, 0755);
-
-                /* e.g. ~/.cache/diction/icons/ab12cd...89.png */
-                char *png_path = g_strdup_printf("%s/%s.png", icons_dir, hash);
-                g_free(icons_dir);
-                g_free(hash);
-
-                if (!g_file_test(png_path, G_FILE_TEST_EXISTS)) {
-                    GError *err = NULL;
-                    GdkPixbuf *pixbuf = gdk_pixbuf_new_from_file(dict->icon_path, &err);
-                    if (pixbuf) {
-                        if (!gdk_pixbuf_save(pixbuf, png_path, "png", &err, NULL)) {
-                            g_clear_error(&err);
-                            g_free(png_path);
-                            png_path = NULL;
-                        }
-                        g_object_unref(pixbuf);
-                    } else {
-                        g_clear_error(&err);
-                        g_free(png_path);
-                        png_path = NULL;
-                    }
-                }
-
-                if (png_path) {
-                    g_free(dict->icon_path);
-                    dict->icon_path = png_path;
-                }
-            }
-        }
-        
-        g_free(base_no_ext);
-    }
-
-
+    /* Icon detection is now deferred to dict_mmap_get_icon or similar lazy calls */
     return dict;
 }
 

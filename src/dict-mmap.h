@@ -50,3 +50,8 @@ DictMmap* parse_sdict_file(const char *path, volatile gint *cancel_flag, gint ex
 const char* mdx_get_definition_on_the_fly(DictMmap *dict, const FlatTreeEntry *entry, size_t *out_len, char **out_to_free);
 void mdx_free_context(void *ctx_ptr);
 void dict_mmap_close(DictMmap *dict);
+
+/* Lazy loading helpers */
+void dict_mmap_ensure_source(DictMmap *dict);
+void dict_mmap_ensure_resources(DictMmap *dict);
+void dict_mmap_ensure_icon(DictMmap *dict);

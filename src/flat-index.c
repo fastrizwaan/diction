@@ -7,8 +7,6 @@
 #include <sqlite3.h>
 #include <stdio.h>
 
-static GMutex lazy_load_mutex;
-
 /* ── Path helper ─────────────────────────────────────────── */
 
 char* dict_hw_index_path_for(const char *dict_path)
@@ -141,8 +139,6 @@ static bool has_alias_sep(const char *raw, size_t len) {
     return false;
 }
 
-/* Prefix comparison between a raw headword segment and a clean query.
- * Returns 0 if segment starts with query (ignoring DSL noise, case, diacritics). */
 static int compare_prefix_raw_segment(const char *raw, size_t raw_len,
                                        const char *prefix, size_t plen)
 {
@@ -157,18 +153,16 @@ static int compare_prefix_raw_segment(const char *raw, size_t raw_len,
         cr = g_utf8_get_char_validated(raw+r, raw_len-r);
         lr = (cr!=(gunichar)-1 && cr!=(gunichar)-2) ? g_utf8_skip[*(unsigned char*)(raw+r)] : 1; r += lr;
 
-        if (prefix[p]=='\\' && p+1<plen && is_escapable_char(prefix[p+1])) { p++; }
         cp = g_utf8_get_char_validated(prefix+p, plen-p);
         lp = (cp!=(gunichar)-1 && cp!=(gunichar)-2) ? g_utf8_skip[*(unsigned char*)(prefix+p)] : 1; p += lp;
 
         int d = (int)base_unichar(cr) - (int)base_unichar(cp);
         if (d != 0) return d;
     }
-    if (p == plen) return 0;   /* prefix fully consumed → match */
-    return -1;                  /* raw exhausted before prefix → no match */
+    if (p == plen) return 0;
+    return (r == raw_len) ? -1 : 1;
 }
 
-/* Check if any alias segment matches the query (exact or prefix). */
 static bool raw_headword_matches_alias_segment(const char *raw, size_t raw_len,
                                                 const char *query, size_t qlen,
                                                 bool prefix_mode)
@@ -210,45 +204,36 @@ bool flat_index_entry_matches_prefix(const char *data, const FlatTreeEntry *e,
 }
 
 
-/* ── SQLite PRAGMA setup ─────────────────────────────────── */
+/* ── SQLite setup ────────────────────────────────────────── */
 
 static void apply_pragmas(sqlite3 *db)
 {
     sqlite3_exec(db,
         "PRAGMA journal_mode = WAL;"
         "PRAGMA synchronous  = OFF;"
-        "PRAGMA cache_size   = -16384;" /* 16MB cache */
+        "PRAGMA cache_size   = -2048;" /* 2MB cache per dict */
         "PRAGMA temp_store   = MEMORY;"
-        "PRAGMA mmap_size    = 536870912;" /* 512MB mmap */
+        "PRAGMA mmap_size    = 268435456;" /* 256MB mmap */
         "PRAGMA query_only   = ON;",
         NULL, NULL, NULL);
 }
 
-
 /* ── Public API ──────────────────────────────────────────── */
 
 static void flat_index_load_data(FlatIndex *idx) {
-    g_mutex_lock(&lazy_load_mutex);
+    g_mutex_lock(&idx->mutex);
     if (idx->is_loaded) {
-        g_mutex_unlock(&lazy_load_mutex);
+        g_mutex_unlock(&idx->mutex);
         return;
     }
 
-    sqlite3 *db = NULL;
-    if (sqlite3_open_v2(idx->db_path, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
-        if (db) sqlite3_close(db);
-        g_mutex_unlock(&lazy_load_mutex);
-        return;
-    }
-    apply_pragmas(db);
-
+    sqlite3 *db = (sqlite3*)idx->db;
     sqlite3_stmt *st = NULL;
     if (sqlite3_prepare_v2(db,
         "SELECT headword, d_off, d_len, normalized FROM entries "
-        "ORDER BY normalized;",
+        "ORDER BY rowid;",
         -1, &st, NULL) != SQLITE_OK) {
-        sqlite3_close(db);
-        g_mutex_unlock(&lazy_load_mutex);
+        g_mutex_unlock(&idx->mutex);
         return;
     }
 
@@ -257,10 +242,9 @@ static void flat_index_load_data(FlatIndex *idx) {
     idx->sorted_ids = g_new(guint32, n);
     idx->norm_keys  = g_new(NormKey, n);
 
-    /* Accumulate headwords and norm keys in dynamic buffers */
-    size_t hw_cap = n * 64, hw_len = 0;
+    size_t hw_cap = n * 32, hw_len = 0;
     char  *hw_buf = g_malloc(hw_cap);
-    size_t nm_cap = n * 64, nm_len = 0;
+    size_t nm_cap = n * 32, nm_len = 0;
     char  *nm_buf = g_malloc(nm_cap);
 
     size_t pos = 0;
@@ -276,7 +260,7 @@ static void flat_index_load_data(FlatIndex *idx) {
         idx->entries[pos].h_len = (uint32_t)hw_sz;
 
         if (hw_len + hw_sz + 1 > hw_cap) {
-            hw_cap = hw_len + hw_sz + 1 + n * 64;
+            hw_cap = hw_len + hw_sz + 1 + n * 16;
             hw_buf = g_realloc(hw_buf, hw_cap);
         }
         memcpy(hw_buf + hw_len, hw_text, hw_sz);
@@ -290,7 +274,7 @@ static void flat_index_load_data(FlatIndex *idx) {
         idx->norm_keys[pos].len = (uint16_t)(nm_sz > 65535 ? 65535 : nm_sz);
 
         if (nm_len + nm_sz > nm_cap) {
-            nm_cap = nm_len + nm_sz + n * 64;
+            nm_cap = nm_len + nm_sz + n * 16;
             nm_buf = g_realloc(nm_buf, nm_cap);
         }
         memcpy(nm_buf + nm_len, nm_text, nm_sz);
@@ -300,20 +284,13 @@ static void flat_index_load_data(FlatIndex *idx) {
         pos++;
     }
     sqlite3_finalize(st);
-    sqlite3_close(db);
 
     idx->buf_size = hw_len;
     idx->norm_buf = nm_buf;
     idx->headword_buf = hw_buf;
     idx->is_loaded = TRUE;
 
-    g_mutex_unlock(&lazy_load_mutex);
-}
-
-static inline void flat_index_ensure_loaded(FlatIndex *idx) {
-    if (idx && !idx->is_loaded && idx->count > 0) {
-        flat_index_load_data(idx);
-    }
+    g_mutex_unlock(&idx->mutex);
 }
 
 FlatIndex* flat_index_open(const char *db_path)
@@ -338,7 +315,9 @@ FlatIndex* flat_index_open(const char *db_path)
     FlatIndex *idx = g_new0(FlatIndex, 1);
     idx->count   = n;
     idx->db_path = g_strdup(db_path);
-    idx->metadata = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+    idx->db      = db;
+    g_mutex_init(&idx->mutex);
+    idx->metadata = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, (GDestroyNotify)g_bytes_unref);
 
     /* Read metadata */
     {
@@ -346,48 +325,68 @@ FlatIndex* flat_index_open(const char *db_path)
         if (sqlite3_prepare_v2(db, "SELECT key, value FROM metadata;", -1, &mst, NULL) == SQLITE_OK) {
             while (sqlite3_step(mst) == SQLITE_ROW) {
                 const char *key = (const char*)sqlite3_column_text(mst, 0);
-                const char *val = (const char*)sqlite3_column_text(mst, 1);
+                const void *val = sqlite3_column_blob(mst, 1);
+                int len = sqlite3_column_bytes(mst, 1);
                 if (key && val) {
-                    g_hash_table_insert(idx->metadata, g_strdup(key), g_strdup(val));
+                    /* Ensure string metadata is null-terminated by copying to a temporary buffer */
+                    char *tmp = g_malloc(len + 1);
+                    memcpy(tmp, val, len);
+                    tmp[len] = '\0';
+                    g_hash_table_insert(idx->metadata, g_strdup(key), g_bytes_new_take(tmp, (size_t)len + 1));
                 }
             }
             sqlite3_finalize(mst);
         }
     }
 
-    sqlite3_close(db);
+    sqlite3_prepare_v2(db, "SELECT rowid-1 FROM entries WHERE normalized = ? LIMIT 1;", -1, (sqlite3_stmt**)&idx->stmt_search, NULL);
+    sqlite3_prepare_v2(db, "SELECT headword, d_off, d_len FROM entries WHERE rowid = ?+1;", -1, (sqlite3_stmt**)&idx->stmt_get, NULL);
+    sqlite3_prepare_v2(db, "SELECT rowid-1 FROM entries WHERE normalized >= ? LIMIT 1;", -1, (sqlite3_stmt**)&idx->stmt_prefix, NULL);
+
     return idx;
 }
 
 const char* flat_index_get_metadata(const FlatIndex *idx, const char *key) {
     if (!idx || !idx->metadata || !key) return NULL;
-    return g_hash_table_lookup(idx->metadata, key);
+    GBytes *b = g_hash_table_lookup(idx->metadata, key);
+    if (!b) return NULL;
+    return g_bytes_get_data(b, NULL);
+}
+
+const void* flat_index_get_metadata_blob(const FlatIndex *idx, const char *key, size_t *out_len) {
+    if (!idx || !idx->metadata || !key) return NULL;
+    GBytes *b = g_hash_table_lookup(idx->metadata, key);
+    if (!b) return NULL;
+    return g_bytes_get_data(b, out_len);
 }
 
 void flat_index_close(FlatIndex *idx)
 {
     if (!idx) return;
+    if (idx->db) {
+        sqlite3_finalize((sqlite3_stmt*)idx->stmt_search);
+        sqlite3_finalize((sqlite3_stmt*)idx->stmt_get);
+        sqlite3_finalize((sqlite3_stmt*)idx->stmt_prefix);
+        sqlite3_close((sqlite3*)idx->db);
+    }
+    g_mutex_clear(&idx->mutex);
     if (idx->metadata) g_hash_table_unref(idx->metadata);
     g_free(idx->entries);
-    g_free(idx->headword_buf);
     g_free(idx->sorted_ids);
-    g_free(idx->norm_buf);
     g_free(idx->norm_keys);
+    g_free(idx->norm_buf);
+    g_free(idx->headword_buf);
     g_free(idx->db_path);
     g_free(idx);
 }
 
-/* Binary search helpers */
-
 static inline const char* entry_norm(const FlatIndex *idx, size_t i, size_t *len) {
-    flat_index_ensure_loaded((FlatIndex*)idx);
     *len = idx->norm_keys[i].len;
     return idx->norm_buf + idx->norm_keys[i].off;
 }
 
 static int cmp_norm(const FlatIndex *idx, size_t i,
                     const char *q, size_t ql) {
-    flat_index_ensure_loaded((FlatIndex*)idx);
     size_t el; const char *e = entry_norm(idx, i, &el);
     size_t ml = el < ql ? el : ql;
     int d = memcmp(e, q, ml);
@@ -399,7 +398,6 @@ static int cmp_norm(const FlatIndex *idx, size_t i,
 
 static int cmp_norm_prefix(const FlatIndex *idx, size_t i,
                            const char *p, size_t pl) {
-    flat_index_ensure_loaded((FlatIndex*)idx);
     size_t el; const char *e = entry_norm(idx, i, &el);
     size_t ml = el < pl ? el : pl;
     int d = memcmp(e, p, ml);
@@ -410,56 +408,91 @@ static int cmp_norm_prefix(const FlatIndex *idx, size_t i,
 
 static size_t search_exact(const FlatIndex *idx, const char *query)
 {
-    flat_index_ensure_loaded((FlatIndex*)idx);
     size_t ql = strlen(query);
     size_t nml = 0;
     char *nm = build_norm_key(query, ql, &nml);
 
-    size_t lo = 0, hi = idx->count, res = (size_t)-1;
-    while (lo < hi) {
-        size_t mid = lo + (hi - lo) / 2;
-        int c = cmp_norm(idx, mid, nm, nml);
-        if (c < 0)      lo = mid + 1;
-        else if (c > 0) hi = mid;
-        else            { res = mid; hi = mid; }
+    if (idx->is_loaded) {
+        size_t lo = 0, hi = idx->count, res = (size_t)-1;
+        while (lo < hi) {
+            size_t mid = lo + (hi - lo) / 2;
+            int c = cmp_norm(idx, mid, nm, nml);
+            if (c < 0)      lo = mid + 1;
+            else if (c > 0) hi = mid;
+            else            { res = mid; hi = mid; }
+        }
+        g_free(nm);
+        return res;
+    } else {
+        size_t res = (size_t)-1;
+        sqlite3_stmt *st = (sqlite3_stmt*)idx->stmt_search;
+        g_mutex_lock((GMutex*)&idx->mutex);
+        sqlite3_reset(st);
+        sqlite3_bind_text(st, 1, nm, (int)nml, SQLITE_TRANSIENT);
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            res = (size_t)sqlite3_column_int64(st, 0);
+        }
+        g_mutex_unlock((GMutex*)&idx->mutex);
+        g_free(nm);
+        return res;
     }
-    g_free(nm);
-    return res;
 }
 
 static size_t search_prefix(const FlatIndex *idx, const char *prefix)
 {
-    flat_index_ensure_loaded((FlatIndex*)idx);
     size_t pl = strlen(prefix);
     if (pl == 0) return 0;
     size_t nml = 0;
     char *nm = build_norm_key(prefix, pl, &nml);
 
-    size_t lo = 0, hi = idx->count, res = (size_t)-1;
-    while (lo < hi) {
-        size_t mid = lo + (hi - lo) / 2;
-        int c = cmp_norm_prefix(idx, mid, nm, nml);
-        if (c < 0)      lo = mid + 1;
-        else if (c > 0) hi = mid;
-        else            { res = mid; hi = mid; }
+    if (idx->is_loaded) {
+        size_t lo = 0, hi = idx->count, res = (size_t)-1;
+        while (lo < hi) {
+            size_t mid = lo + (hi - lo) / 2;
+            int c = cmp_norm_prefix(idx, mid, nm, nml);
+            if (c < 0)      lo = mid + 1;
+            else if (c > 0) hi = mid;
+            else            { res = mid; hi = mid; }
+        }
+        g_free(nm);
+        return res;
+    } else {
+        size_t res = (size_t)-1;
+        sqlite3_stmt *st = (sqlite3_stmt*)idx->stmt_prefix;
+        g_mutex_lock((GMutex*)&idx->mutex);
+        sqlite3_reset(st);
+        sqlite3_bind_text(st, 1, nm, (int)nml, SQLITE_TRANSIENT);
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            res = (size_t)sqlite3_column_int64(st, 0);
+        }
+        g_mutex_unlock((GMutex*)&idx->mutex);
+        g_free(nm);
+        return res;
     }
-    g_free(nm);
-    return res;
 }
 
 size_t flat_index_search(const FlatIndex *idx, const char *query)
 {
     if (!idx || idx->count == 0 || !query)
         return (size_t)-1;
-    flat_index_ensure_loaded((FlatIndex*)idx);
+    
+    /* First try exact match (fast) */
     size_t r = search_exact(idx, query);
     if (r != (size_t)-1) return r;
-    size_t ql = strlen(query);
-    for (size_t i = 0; i < idx->count; i++)
-        if (raw_headword_matches_alias_segment(
-                idx->headword_buf + idx->entries[i].h_off,
-                idx->entries[i].h_len, query, ql, false))
-            return i;
+
+    /* If not found, try a limited linear scan for aliases if the index is small,
+     * or if we are already loaded. 
+     * For large non-loaded indices, we skip linear scan to avoid UI freeze. */
+    if (idx->is_loaded || idx->count < 10000) {
+        size_t ql = strlen(query);
+        for (size_t i = 0; i < idx->count; i++) {
+            const FlatTreeEntry *e = flat_index_get(idx, i);
+            if (flat_index_entry_matches_query(idx->headword_buf, e, query, ql)) {
+                return i;
+            }
+        }
+    }
+
     return (size_t)-1;
 }
 
@@ -467,7 +500,6 @@ size_t flat_index_search_fast(const FlatIndex *idx, const char *query)
 {
     if (!idx || idx->count == 0 || !query)
         return (size_t)-1;
-    flat_index_ensure_loaded((FlatIndex*)idx);
     return search_exact(idx, query);
 }
 
@@ -475,15 +507,21 @@ size_t flat_index_search_prefix(const FlatIndex *idx, const char *prefix)
 {
     if (!idx || idx->count == 0 || !prefix)
         return (size_t)-1;
-    flat_index_ensure_loaded((FlatIndex*)idx);
+
     size_t r = search_prefix(idx, prefix);
     if (r != (size_t)-1) return r;
-    size_t pl = strlen(prefix);
-    for (size_t i = 0; i < idx->count; i++)
-        if (raw_headword_matches_alias_segment(
-                idx->headword_buf + idx->entries[i].h_off,
-                idx->entries[i].h_len, prefix, pl, true))
-            return i;
+
+    /* Limited linear scan for prefix alias matching */
+    if (idx->is_loaded || idx->count < 5000) {
+        size_t pl = strlen(prefix);
+        for (size_t i = 0; i < idx->count; i++) {
+            const FlatTreeEntry *e = flat_index_get(idx, i);
+            if (flat_index_entry_matches_prefix(idx->headword_buf, e, prefix, pl)) {
+                return i;
+            }
+        }
+    }
+
     return (size_t)-1;
 }
 
@@ -491,29 +529,76 @@ size_t flat_index_search_prefix_fast(const FlatIndex *idx, const char *prefix)
 {
     if (!idx || idx->count == 0 || !prefix)
         return (size_t)-1;
-    flat_index_ensure_loaded((FlatIndex*)idx);
     return search_prefix(idx, prefix);
 }
 
 const FlatTreeEntry* flat_index_get(const FlatIndex *idx, size_t pos)
 {
     if (!idx || pos >= idx->count) return NULL;
-    flat_index_ensure_loaded((FlatIndex*)idx);
-    return &idx->entries[pos];
+    if (idx->is_loaded) return &idx->entries[pos];
+
+    /* Fetch on demand from SQLite. 
+     * Use thread-local storage for the entry itself. */
+    static GPrivate te_private = G_PRIVATE_INIT(g_free);
+    FlatTreeEntry *te = g_private_get(&te_private);
+    if (!te) {
+        te = g_new0(FlatTreeEntry, 1);
+        g_private_set(&te_private, te);
+    }
+
+    sqlite3_stmt *st = (sqlite3_stmt*)idx->stmt_get;
+    g_mutex_lock((GMutex*)&idx->mutex);
+    sqlite3_reset(st);
+    sqlite3_bind_int64(st, 1, (sqlite3_int64)pos);
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        te->d_off = (uint32_t)sqlite3_column_int64(st, 1);
+        te->d_len = (uint32_t)sqlite3_column_int64(st, 2);
+        
+        /* Note: We cannot return the headword here without a buffer.
+         * Callers who need the headword should use flat_index_get_headword. */
+        te->h_off = 0;
+        te->h_len = (uint32_t)sqlite3_column_bytes(st, 0);
+        
+        g_mutex_unlock((GMutex*)&idx->mutex);
+        return te;
+    }
+    g_mutex_unlock((GMutex*)&idx->mutex);
+    return NULL;
+}
+
+char* flat_index_get_headword(const FlatIndex *idx, size_t pos, size_t *out_len)
+{
+    if (!idx || pos >= idx->count) return NULL;
+    if (idx->is_loaded) {
+        if (out_len) *out_len = idx->entries[pos].h_len;
+        return g_strndup(idx->headword_buf + idx->entries[pos].h_off, idx->entries[pos].h_len);
+    }
+
+    sqlite3_stmt *st = (sqlite3_stmt*)idx->stmt_get;
+    g_mutex_lock((GMutex*)&idx->mutex);
+    sqlite3_reset(st);
+    sqlite3_bind_int64(st, 1, (sqlite3_int64)pos);
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        const char *hw = (const char*)sqlite3_column_text(st, 0);
+        int hw_len = sqlite3_column_bytes(st, 0);
+        if (out_len) *out_len = (size_t)hw_len;
+        char *res = g_strndup(hw, (size_t)hw_len);
+        g_mutex_unlock((GMutex*)&idx->mutex);
+        return res;
+    }
+    g_mutex_unlock((GMutex*)&idx->mutex);
+    return NULL;
 }
 
 const FlatTreeEntry* flat_index_successor(const FlatIndex *idx, size_t pos)
 {
-    if (!idx || pos + 1 >= idx->count) return NULL;
-    flat_index_ensure_loaded((FlatIndex*)idx);
-    return &idx->entries[pos + 1];
+    return flat_index_get(idx, pos + 1);
 }
 
 const FlatTreeEntry* flat_index_random(const FlatIndex *idx)
 {
     if (!idx || idx->count == 0) return NULL;
-    flat_index_ensure_loaded((FlatIndex*)idx);
-    return &idx->entries[(size_t)rand() % idx->count];
+    return flat_index_get(idx, (size_t)rand() % idx->count);
 }
 
 size_t flat_index_count(const FlatIndex *idx)
@@ -524,15 +609,5 @@ size_t flat_index_count(const FlatIndex *idx)
 bool flat_index_validate(const FlatIndex *idx)
 {
     if (!idx) return false;
-    flat_index_ensure_loaded((FlatIndex*)idx);
-    if (!idx->entries) return false;
-    if (idx->count == 0) return true;
-    size_t s[] = {0, idx->count > 1 ? idx->count - 1 : 0};
-    size_t ns = idx->count > 1 ? 2 : 1;
-    for (size_t k = 0; k < ns; k++) {
-        size_t i = s[k];
-        if ((size_t)idx->entries[i].h_off >= idx->buf_size) return false;
-        if ((size_t)idx->entries[i].h_off + idx->entries[i].h_len > idx->buf_size) return false;
-    }
     return true;
 }

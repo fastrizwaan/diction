@@ -25,8 +25,22 @@ Instead of relying on websites or simple built-in dictionaries, Diction allows y
 
 Diction uses the `meson` and `ninja` build system.
 
-**1. Install Dependencies** (Fedora/Silverblue example):
-You will need a C compiler (`gcc`), `meson`, `ninja-build`, and development headers for `gtk4`, `libadwaita`, `webkitgtk6.0`, `glib2`, `zlib`, `libarchive`, `libzstd`, `xz`, and `bzip2`.
+**1. Install Dependencies**
+
+You will need a C compiler (`gcc`), `meson`, `ninja-build`, and development headers for the required libraries.
+
+**For Debian / Ubuntu:**
+```bash
+sudo apt update
+sudo apt install build-essential meson ninja-build libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev libglib2.0-dev libjson-glib-dev zlib1g-dev libarchive-dev libzstd-dev liblzma-dev libbz2-dev
+```
+
+
+**For Fedora / RHEL:**
+```bash
+sudo dnf install gcc meson ninja-build gtk4-devel libadwaita-devel webkitgtk6.0-devel glib2-devel json-glib-devel zlib-devel libarchive-devel libzstd-devel xz-devel bzip2-devel
+```
+*(Note: On Fedora Silverblue or Kinoite, use `rpm-ostree install` instead of `dnf install`, or compile inside a `toolbox`/`distrobox` container.)*
 
 **2. Compile the Application:**
 ```bash

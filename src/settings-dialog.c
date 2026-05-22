@@ -576,7 +576,7 @@ static gpointer fts_build_worker(gpointer user_data)
         /* Access flat index via the DictMmap stored in DictEntry */
         struct DictMmap *dmmap = e->dict;
 
-        if (!dmmap || !dmmap->data || !dmmap->index) {
+        if (!dmmap || !dmmap->index) {
             dict_fts_builder_abort(builder);
             fts_post(ctx, NULL, dpath, FALSE, TRUE, 0, 0);
             continue;
@@ -599,7 +599,7 @@ static gpointer fts_build_worker(gpointer user_data)
             const FlatTreeEntry *ent = flat_index_get(dmmap->index, original_idx);
             if (!ent) continue;
 
-            const char *hw  = dmmap->data + ent->h_off;
+            const char *hw  = dmmap->index->headword_buf + ent->h_off;
             gsize        hwl = ent->h_len;
             const char *def = NULL;
             gsize        dl  = 0;

@@ -1082,7 +1082,7 @@ static gpointer sidebar_search_thread_func(gpointer user_data) {
                 const FlatTreeEntry *node = flat_index_get(entry->dict->index, pos);
                 if (!node) break;
 
-                const char *data_ptr = entry->dict->data ? entry->dict->data : entry->dict->index->mmap_data;
+                const char *data_ptr = entry->dict->index->headword_buf;
                 char *raw_word = g_strndup(data_ptr + node->h_off, node->h_len);
                 char *clean_word = normalize_headword_for_search(raw_word, TRUE);
 
@@ -1295,14 +1295,14 @@ static gpointer sidebar_search_thread_func(gpointer user_data) {
             state->current_pos++;
             if (state->current_pos >= state->current_dict_count) state->has_current_pos = FALSE;
 
-            const char *data_ptr = state->current_dict->dict->data ? state->current_dict->dict->data : state->current_dict->dict->index->mmap_data;
+            const char *data_ptr = state->current_dict->dict->index->headword_buf;
             if (!state->skip_fast_prefilter &&
                 !fast_strncasestr(data_ptr + node->h_off, node->h_len, state->query)) {
                 continue;
             }
         }
 
-        const char *data_ptr = state->current_dict->dict->data ? state->current_dict->dict->data : state->current_dict->dict->index->mmap_data;
+        const char *data_ptr = state->current_dict->dict->index->headword_buf;
         char *word = g_strndup(data_ptr + node->h_off, node->h_len);
         char *clean_word = normalize_headword_for_search(word, TRUE);
         if (!clean_word || text_has_replacement_char(clean_word)) {
@@ -3169,7 +3169,7 @@ static char* render_entry_def_to_html(DictEntry *entry, const FlatTreeEntry *res
         : "diction";
 
     dict_render_set_resource_reader(entry->dict->resource_reader);
-    const char *hw_data_ptr = entry->dict->data ? entry->dict->data : entry->dict->index->mmap_data;
+    const char *hw_data_ptr = entry->dict->index->headword_buf;
     char *html = dsl_render_body_only(
         def_ptr, def_len,
         hw_data_ptr + res->h_off, res->h_len,
@@ -3489,7 +3489,7 @@ static int append_exact_matches_html(GString *html_res, const char *query, gbool
         while (pos != (size_t)-1) {
             const FlatTreeEntry *res = flat_index_get(e->dict->index, pos);
             if (!res) break;
-            const char *data_ptr = e->dict->data ? e->dict->data : e->dict->index->mmap_data;
+            const char *data_ptr = e->dict->index->headword_buf;
             if (!flat_index_entry_matches_query(data_ptr, res, query, qlen)) break;
 
             ExactMatch *m = g_new0(ExactMatch, 1);
@@ -3961,7 +3961,7 @@ static gpointer random_word_thread_worker(gpointer data) {
             if (!node) break;
 
             /* This read might block on disk I/O, which is why we are in a background thread */
-            const char *data_ptr = target_e->dict->data ? target_e->dict->data : target_e->dict->index->mmap_data;
+            const char *data_ptr = target_e->dict->index->headword_buf;
             const char *raw_data = data_ptr + node->h_off;
             found_word = g_strndup(raw_data, node->h_len);
             clean_hw = normalize_headword_for_render(found_word, node->h_len, FALSE);
@@ -5540,8 +5540,10 @@ static gpointer dict_load_thread(gpointer user_data) {
     if (total_candidates > 0) {
         volatile gint completed_count = 0;
 
-        /* Ensure strictly sequential loading to maintain UI responsiveness and reduce I/O pressure */
-        guint n_workers = 1;
+        /* Parallelize dictionary loading to improve startup performance */
+        guint n_workers = (guint)g_get_num_processors();
+        if (n_workers < 2) n_workers = 2;
+        if (n_workers > 8) n_workers = 8; /* Cap at 8 to avoid excessive I/O pressure */
         GError *pool_error = NULL;
         GThreadPool *pool = g_thread_pool_new(load_one_dict_worker, NULL, (gint)n_workers, FALSE, &pool_error);
 
@@ -6547,7 +6549,7 @@ static int run_cli_search(const char *query, const char *in_dict) {
         while (pos != (size_t)-1) {
             const FlatTreeEntry *res = flat_index_get(e->dict->index, pos);
             if (!res) break;
-            const char *data_ptr = e->dict->data ? e->dict->data : e->dict->index->mmap_data;
+            const char *data_ptr = e->dict->index->headword_buf;
             if (!flat_index_entry_matches_query(data_ptr, res, normalized_query, strlen(normalized_query))) break;
 
             if (!dict_header_printed) {

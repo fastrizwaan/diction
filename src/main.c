@@ -1091,6 +1091,14 @@ static void sidebar_search_task_func(GTask *task, gpointer source_object, gpoint
                 }
 
                 char *word_key = g_utf8_casefold(clean_word, -1);
+                
+                if (!g_str_has_prefix(word_key, state->query_key)) {
+                    g_free(raw_word);
+                    g_free(word_key);
+                    if (clean_word) g_free(clean_word);
+                    break; /* Alphabetical prefix boundary crossed, stop scanning this dictionary */
+                }
+
                 SearchBucket bucket;
                 double score;
 
@@ -1515,7 +1523,7 @@ static void populate_search_sidebar_with_mode(const char *query, gboolean force_
     }
 
     GTask *task = g_task_new(NULL, NULL, NULL, NULL);
-    g_task_set_task_data(task, sidebar_search_state, (GDestroyNotify)sidebar_search_state_unref);
+    g_task_set_task_data(task, sidebar_search_state_ref(sidebar_search_state), (GDestroyNotify)sidebar_search_state_unref);
     g_task_run_in_thread(task, sidebar_search_task_func);
     g_object_unref(task);
 }

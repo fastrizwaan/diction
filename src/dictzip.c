@@ -152,11 +152,11 @@ unsigned char* dictzip_read(DictZip *dz, uint64_t offset, uint32_t length, size_
             dz->cache[cache_hit].last_used = ++dz->cache_clock;
         } else {
             if (fseek(dz->f, dz->offs[i], SEEK_SET) != 0) {
-                free(full_decomp); return NULL;
+                free(full_decomp); g_mutex_unlock(&dz->dz_mutex); return NULL;
             }
             unsigned char *comp = malloc(dz->lens[i]);
             if (!comp) {
-                free(full_decomp); return NULL;
+                free(full_decomp); g_mutex_unlock(&dz->dz_mutex); return NULL;
             }
             if (fread(comp, 1, dz->lens[i], dz->f) != dz->lens[i]) {
                 free(comp); free(full_decomp); g_mutex_unlock(&dz->dz_mutex); return NULL;

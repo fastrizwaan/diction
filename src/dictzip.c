@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <zlib.h>
+#include <glib.h>
 
 #define DZ_MAX_BLOCKS 65536
 
@@ -21,6 +22,7 @@ struct DictZip {
         uint64_t last_used;
     } cache[8];
     uint64_t cache_clock;
+    GMutex dz_mutex;
 };
 
 static uint16_t ru16(const unsigned char *p) { return p[0] | (p[1] << 8); }
@@ -101,6 +103,7 @@ DictZip* dictzip_open(const char *path) {
         dz->offs[i] = off;
         off += dz->lens[i];
     }
+    g_mutex_init(&dz->dz_mutex);
 
     return dz;
 }
@@ -112,11 +115,13 @@ unsigned char* dictzip_read(DictZip *dz, uint64_t offset, uint32_t length, size_
         *out_len = 0;
         return result;
     }
+    g_mutex_lock(&dz->dz_mutex);
     uint32_t start_block = offset / dz->chlen;
     uint32_t end_block = (offset + length - 1) / dz->chlen;
     
     if (end_block >= dz->chcnt) {
         printf("[DZ ERROR] end_block %u >= chcnt %u\n", end_block, dz->chcnt);
+        g_mutex_unlock(&dz->dz_mutex);
         return NULL;
     }
 
@@ -124,6 +129,7 @@ unsigned char* dictzip_read(DictZip *dz, uint64_t offset, uint32_t length, size_
     unsigned char *full_decomp = malloc(total_buf_size);
     if (!full_decomp) {
         printf("[DZ ERROR] Could not allocate full_decomp (%zu bytes)\n", total_buf_size);
+        g_mutex_unlock(&dz->dz_mutex);
         return NULL;
     }
     size_t decomp_ptr = 0;
@@ -153,7 +159,7 @@ unsigned char* dictzip_read(DictZip *dz, uint64_t offset, uint32_t length, size_
                 free(full_decomp); return NULL;
             }
             if (fread(comp, 1, dz->lens[i], dz->f) != dz->lens[i]) {
-                free(comp); free(full_decomp); return NULL;
+                free(comp); free(full_decomp); g_mutex_unlock(&dz->dz_mutex); return NULL;
             }
 
             z_stream strm = {0};
@@ -163,14 +169,14 @@ unsigned char* dictzip_read(DictZip *dz, uint64_t offset, uint32_t length, size_
             size_t block_buf_size = dz->chlen + 4096;
             unsigned char *block_buf = malloc(block_buf_size);
             if (!block_buf) {
-                free(comp); free(full_decomp); return NULL;
+                free(comp); free(full_decomp); g_mutex_unlock(&dz->dz_mutex); return NULL;
             }
             
             strm.next_out = block_buf;
             strm.avail_out = block_buf_size;
 
             if (inflateInit2(&strm, -15) != Z_OK) {
-                free(block_buf); free(comp); free(full_decomp); return NULL;
+                free(block_buf); free(comp); free(full_decomp); g_mutex_unlock(&dz->dz_mutex); return NULL;
             }
             
             int ret = inflate(&strm, Z_SYNC_FLUSH);
@@ -179,7 +185,7 @@ unsigned char* dictzip_read(DictZip *dz, uint64_t offset, uint32_t length, size_
             free(comp);
 
             if (ret != Z_STREAM_END && ret != Z_OK) {
-                free(block_buf); free(full_decomp); return NULL;
+                free(block_buf); free(full_decomp); g_mutex_unlock(&dz->dz_mutex); return NULL;
             }
 
             /* LRU replacement */
@@ -213,7 +219,7 @@ unsigned char* dictzip_read(DictZip *dz, uint64_t offset, uint32_t length, size_
     unsigned char *result = malloc(length + 2);
     if (!result) {
         printf("[DZ ERROR] Could not allocate result (%u bytes)\n", length + 2);
-        free(full_decomp); return NULL;
+        free(full_decomp); g_mutex_unlock(&dz->dz_mutex); return NULL;
     }
     memcpy(result, full_decomp + in_block_off, length);
     result[length] = '\0';
@@ -221,6 +227,7 @@ unsigned char* dictzip_read(DictZip *dz, uint64_t offset, uint32_t length, size_
     *out_len = length;
 
     free(full_decomp);
+    g_mutex_unlock(&dz->dz_mutex);
     return result;
 }
 
@@ -230,18 +237,22 @@ void dictzip_close(DictZip *dz) {
     free(dz->lens);
     free(dz->offs);
     for (int i = 0; i < 8; i++) free(dz->cache[i].buf);
+    g_mutex_clear(&dz->dz_mutex);
     free(dz);
 }
 
 uint64_t dictzip_get_uncompressed_size(DictZip *dz) {
     if (!dz || !dz->f) return 0;
+    g_mutex_lock(&dz->dz_mutex);
     long current = ftell(dz->f);
     fseek(dz->f, -4, SEEK_END);
     unsigned char buf[4];
     if (fread(buf, 1, 4, dz->f) != 4) {
         fseek(dz->f, current, SEEK_SET);
+        g_mutex_unlock(&dz->dz_mutex);
         return 0;
     }
     fseek(dz->f, current, SEEK_SET);
+    g_mutex_unlock(&dz->dz_mutex);
     return ru32(buf);
 }

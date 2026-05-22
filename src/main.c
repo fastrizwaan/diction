@@ -1297,6 +1297,21 @@ static void sidebar_search_task_func(GTask *task, gpointer source_object, gpoint
                 if (hw) {
                     if (!fast_strncasestr(hw, hw_len, state->query)) {
                         g_free(hw);
+                        
+                        /* Fast prefilter failed, but we STILL need to know if we crossed the prefix boundary! 
+                           Otherwise we will scan the whole dictionary failing fast_strncasestr. */
+                        char *word = flat_index_get_headword(state->current_dict->dict->index, state->current_pos - 1, NULL);
+                        char *clean_word = normalize_headword_for_search(word, TRUE);
+                        if (clean_word) {
+                            char *word_key = g_utf8_casefold(clean_word, -1);
+                            if (state->prefix_only && !g_str_has_prefix(word_key, state->query_key)) {
+                                state->has_current_pos = FALSE; /* Prefix match ended, skip rest of this dictionary */
+                            }
+                            g_free(word_key);
+                        }
+                        g_free(clean_word);
+                        g_free(word);
+                        
                         continue;
                     }
                     g_free(hw);
@@ -1314,6 +1329,14 @@ static void sidebar_search_task_func(GTask *task, gpointer source_object, gpoint
         }
 
         char *word_key = g_utf8_casefold(clean_word, -1);
+        
+        if (state->prefix_only && !g_str_has_prefix(word_key, state->query_key)) {
+            g_free(word);
+            g_free(clean_word);
+            g_free(word_key);
+            state->has_current_pos = FALSE; /* Prefix match ended, skip rest of this dictionary */
+            continue;
+        }
         SearchBucket bucket;
         double fuzzy_score = 0.0;
         gboolean is_valid_match = FALSE;

@@ -7,6 +7,7 @@
 #include <sqlite3.h>
 #include <stdio.h>
 
+static GMutex lazy_load_mutex;
 
 /* ── Path helper ─────────────────────────────────────────── */
 
@@ -105,9 +106,9 @@ int compare_headword(const char *data, const FlatTreeEntry *e,
     return compare_dsl_agnostic(data + e->h_off, e->h_len, query, qlen);
 }
 
-char* build_norm_key(const char *raw, size_t raw_len, size_t *out_len)
+void build_norm_key_gstring(const char *raw, size_t raw_len, GString *o)
 {
-    GString *o = g_string_sized_new(raw_len);
+    g_string_truncate(o, 0);
     size_t i = 0, sk;
     while (i < raw_len) {
         sk = skip_dsl_noise(raw+i, raw_len-i, true);
@@ -121,6 +122,12 @@ char* build_norm_key(const char *raw, size_t raw_len, size_t *out_len)
         char utf[6]; int l = g_unichar_to_utf8(base, utf);
         g_string_append_len(o, utf, l);
     }
+}
+
+char* build_norm_key(const char *raw, size_t raw_len, size_t *out_len)
+{
+    GString *o = g_string_sized_new(raw_len);
+    build_norm_key_gstring(raw, raw_len, o);
     *out_len = o->len;
     return g_string_free(o, FALSE);
 }
@@ -220,58 +227,35 @@ static void apply_pragmas(sqlite3 *db)
 
 /* ── Public API ──────────────────────────────────────────── */
 
-FlatIndex* flat_index_open(const char *db_path)
-{
-    if (!db_path) return NULL;
+static void flat_index_load_data(FlatIndex *idx) {
+    g_mutex_lock(&lazy_load_mutex);
+    if (idx->is_loaded) {
+        g_mutex_unlock(&lazy_load_mutex);
+        return;
+    }
 
     sqlite3 *db = NULL;
-    if (sqlite3_open_v2(db_path, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
+    if (sqlite3_open_v2(idx->db_path, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
         if (db) sqlite3_close(db);
-        return NULL;
+        g_mutex_unlock(&lazy_load_mutex);
+        return;
     }
     apply_pragmas(db);
 
     sqlite3_stmt *st = NULL;
-    sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM entries;", -1, &st, NULL);
-    if (sqlite3_step(st) != SQLITE_ROW) {
-        sqlite3_finalize(st); sqlite3_close(db); return NULL;
-    }
-    size_t n = (size_t)sqlite3_column_int64(st, 0);
-    sqlite3_finalize(st);
-
-    if (n == 0) {
-        sqlite3_close(db);
-        FlatIndex *idx = g_new0(FlatIndex, 1);
-        idx->db_path = g_strdup(db_path);
-        return idx;
-    }
-
-    sqlite3_prepare_v2(db,
+    if (sqlite3_prepare_v2(db,
         "SELECT headword, d_off, d_len, normalized FROM entries "
         "ORDER BY normalized;",
-        -1, &st, NULL);
+        -1, &st, NULL) != SQLITE_OK) {
+        sqlite3_close(db);
+        g_mutex_unlock(&lazy_load_mutex);
+        return;
+    }
 
-    FlatIndex *idx = g_new0(FlatIndex, 1);
+    size_t n = idx->count;
     idx->entries    = g_new(FlatTreeEntry, n);
     idx->sorted_ids = g_new(guint32, n);
     idx->norm_keys  = g_new(NormKey, n);
-    idx->db_path    = g_strdup(db_path);
-    idx->metadata   = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
-
-    /* Read metadata */
-    {
-        sqlite3_stmt *mst = NULL;
-        if (sqlite3_prepare_v2(db, "SELECT key, value FROM metadata;", -1, &mst, NULL) == SQLITE_OK) {
-            while (sqlite3_step(mst) == SQLITE_ROW) {
-                const char *key = (const char*)sqlite3_column_text(mst, 0);
-                const char *val = (const char*)sqlite3_column_text(mst, 1);
-                if (key && val) {
-                    g_hash_table_insert(idx->metadata, g_strdup(key), g_strdup(val));
-                }
-            }
-            sqlite3_finalize(mst);
-        }
-    }
 
     /* Accumulate headwords and norm keys in dynamic buffers */
     size_t hw_cap = n * 64, hw_len = 0;
@@ -318,11 +302,60 @@ FlatIndex* flat_index_open(const char *db_path)
     sqlite3_finalize(st);
     sqlite3_close(db);
 
-    idx->count   = n;
     idx->buf_size = hw_len;
     idx->norm_buf = nm_buf;
     idx->headword_buf = hw_buf;
+    idx->is_loaded = TRUE;
 
+    g_mutex_unlock(&lazy_load_mutex);
+}
+
+static inline void flat_index_ensure_loaded(FlatIndex *idx) {
+    if (idx && !idx->is_loaded && idx->count > 0) {
+        flat_index_load_data(idx);
+    }
+}
+
+FlatIndex* flat_index_open(const char *db_path)
+{
+    if (!db_path) return NULL;
+
+    sqlite3 *db = NULL;
+    if (sqlite3_open_v2(db_path, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
+        if (db) sqlite3_close(db);
+        return NULL;
+    }
+    apply_pragmas(db);
+
+    sqlite3_stmt *st = NULL;
+    sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM entries;", -1, &st, NULL);
+    if (sqlite3_step(st) != SQLITE_ROW) {
+        sqlite3_finalize(st); sqlite3_close(db); return NULL;
+    }
+    size_t n = (size_t)sqlite3_column_int64(st, 0);
+    sqlite3_finalize(st);
+
+    FlatIndex *idx = g_new0(FlatIndex, 1);
+    idx->count   = n;
+    idx->db_path = g_strdup(db_path);
+    idx->metadata = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+
+    /* Read metadata */
+    {
+        sqlite3_stmt *mst = NULL;
+        if (sqlite3_prepare_v2(db, "SELECT key, value FROM metadata;", -1, &mst, NULL) == SQLITE_OK) {
+            while (sqlite3_step(mst) == SQLITE_ROW) {
+                const char *key = (const char*)sqlite3_column_text(mst, 0);
+                const char *val = (const char*)sqlite3_column_text(mst, 1);
+                if (key && val) {
+                    g_hash_table_insert(idx->metadata, g_strdup(key), g_strdup(val));
+                }
+            }
+            sqlite3_finalize(mst);
+        }
+    }
+
+    sqlite3_close(db);
     return idx;
 }
 
@@ -347,12 +380,14 @@ void flat_index_close(FlatIndex *idx)
 /* Binary search helpers */
 
 static inline const char* entry_norm(const FlatIndex *idx, size_t i, size_t *len) {
+    flat_index_ensure_loaded((FlatIndex*)idx);
     *len = idx->norm_keys[i].len;
     return idx->norm_buf + idx->norm_keys[i].off;
 }
 
 static int cmp_norm(const FlatIndex *idx, size_t i,
                     const char *q, size_t ql) {
+    flat_index_ensure_loaded((FlatIndex*)idx);
     size_t el; const char *e = entry_norm(idx, i, &el);
     size_t ml = el < ql ? el : ql;
     int d = memcmp(e, q, ml);
@@ -364,6 +399,7 @@ static int cmp_norm(const FlatIndex *idx, size_t i,
 
 static int cmp_norm_prefix(const FlatIndex *idx, size_t i,
                            const char *p, size_t pl) {
+    flat_index_ensure_loaded((FlatIndex*)idx);
     size_t el; const char *e = entry_norm(idx, i, &el);
     size_t ml = el < pl ? el : pl;
     int d = memcmp(e, p, ml);
@@ -374,6 +410,7 @@ static int cmp_norm_prefix(const FlatIndex *idx, size_t i,
 
 static size_t search_exact(const FlatIndex *idx, const char *query)
 {
+    flat_index_ensure_loaded((FlatIndex*)idx);
     size_t ql = strlen(query);
     size_t nml = 0;
     char *nm = build_norm_key(query, ql, &nml);
@@ -392,6 +429,7 @@ static size_t search_exact(const FlatIndex *idx, const char *query)
 
 static size_t search_prefix(const FlatIndex *idx, const char *prefix)
 {
+    flat_index_ensure_loaded((FlatIndex*)idx);
     size_t pl = strlen(prefix);
     if (pl == 0) return 0;
     size_t nml = 0;
@@ -411,8 +449,9 @@ static size_t search_prefix(const FlatIndex *idx, const char *prefix)
 
 size_t flat_index_search(const FlatIndex *idx, const char *query)
 {
-    if (!idx || !idx->entries || idx->count == 0 || !query)
+    if (!idx || idx->count == 0 || !query)
         return (size_t)-1;
+    flat_index_ensure_loaded((FlatIndex*)idx);
     size_t r = search_exact(idx, query);
     if (r != (size_t)-1) return r;
     size_t ql = strlen(query);
@@ -426,15 +465,17 @@ size_t flat_index_search(const FlatIndex *idx, const char *query)
 
 size_t flat_index_search_fast(const FlatIndex *idx, const char *query)
 {
-    if (!idx || !idx->entries || idx->count == 0 || !query)
+    if (!idx || idx->count == 0 || !query)
         return (size_t)-1;
+    flat_index_ensure_loaded((FlatIndex*)idx);
     return search_exact(idx, query);
 }
 
 size_t flat_index_search_prefix(const FlatIndex *idx, const char *prefix)
 {
-    if (!idx || !idx->entries || idx->count == 0 || !prefix)
+    if (!idx || idx->count == 0 || !prefix)
         return (size_t)-1;
+    flat_index_ensure_loaded((FlatIndex*)idx);
     size_t r = search_prefix(idx, prefix);
     if (r != (size_t)-1) return r;
     size_t pl = strlen(prefix);
@@ -448,26 +489,30 @@ size_t flat_index_search_prefix(const FlatIndex *idx, const char *prefix)
 
 size_t flat_index_search_prefix_fast(const FlatIndex *idx, const char *prefix)
 {
-    if (!idx || !idx->entries || idx->count == 0 || !prefix)
+    if (!idx || idx->count == 0 || !prefix)
         return (size_t)-1;
+    flat_index_ensure_loaded((FlatIndex*)idx);
     return search_prefix(idx, prefix);
 }
 
 const FlatTreeEntry* flat_index_get(const FlatIndex *idx, size_t pos)
 {
-    if (!idx || !idx->entries || pos >= idx->count) return NULL;
+    if (!idx || pos >= idx->count) return NULL;
+    flat_index_ensure_loaded((FlatIndex*)idx);
     return &idx->entries[pos];
 }
 
 const FlatTreeEntry* flat_index_successor(const FlatIndex *idx, size_t pos)
 {
-    if (!idx || !idx->entries || pos + 1 >= idx->count) return NULL;
+    if (!idx || pos + 1 >= idx->count) return NULL;
+    flat_index_ensure_loaded((FlatIndex*)idx);
     return &idx->entries[pos + 1];
 }
 
 const FlatTreeEntry* flat_index_random(const FlatIndex *idx)
 {
-    if (!idx || !idx->entries || idx->count == 0) return NULL;
+    if (!idx || idx->count == 0) return NULL;
+    flat_index_ensure_loaded((FlatIndex*)idx);
     return &idx->entries[(size_t)rand() % idx->count];
 }
 
@@ -478,7 +523,9 @@ size_t flat_index_count(const FlatIndex *idx)
 
 bool flat_index_validate(const FlatIndex *idx)
 {
-    if (!idx || !idx->entries) return false;
+    if (!idx) return false;
+    flat_index_ensure_loaded((FlatIndex*)idx);
+    if (!idx->entries) return false;
     if (idx->count == 0) return true;
     size_t s[] = {0, idx->count > 1 ? idx->count - 1 : 0};
     size_t ns = idx->count > 1 ? 2 : 1;

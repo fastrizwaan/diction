@@ -4,6 +4,7 @@
  */
 
 #include "dict-mmap.h"
+#include "dict-cache.h"
 #include "dict-cache-builder.h"
 #include "langpair.h"
 #include "text-utils.h"
@@ -1488,50 +1489,73 @@ DictMmap *parse_mdx_file(const char *path, volatile gint *cancel_flag, gint expe
         close(cache_fd);
 
         DictMmap *dict = g_new0(DictMmap, 1);
-        dict->fd = -1; // Explicitly invalidate fd since mmap handles the memory mapping autonomously
+        dict->fd = -1;
         dict->data = dict_data;
         dict->size = dict_size;
-        dict->name = title;
         dict->source_dir = g_strdup(source_dir);
         dict->mdx_stylesheet = stylesheet ? g_strdup(stylesheet) : NULL;
-        dict->source_lang = s_lang;
-        dict->target_lang = t_lang;
-        dict->index = flat_index_open(dict->data, dict->size);
 
-        /* flat_index_open already reads the index from end of file.
-         * Just validate it. */
+        char *hw_path = dict_hw_index_path_for(path);
+        dict->index = flat_index_open(hw_path);
+        g_free(hw_path);
+
         if (dict->index && dict->index->count > 0) {
             if (!flat_index_validate(dict->index)) {
                 fprintf(stderr, "[MDX] Cache index validation failed for %s — rebuilding index.\n", path);
                 flat_index_close(dict->index);
-                dict->index = g_new0(FlatIndex, 1);
-                dict->index->mmap_data = dict->data;
-                dict->index->mmap_size = dict->size;
+                dict->index = NULL;
+            } else {
+                /* Retrieve metadata from index */
+                const char *m_name = flat_index_get_metadata(dict->index, "dict_name");
+                const char *m_src = flat_index_get_metadata(dict->index, "source_lang");
+                const char *m_tgt = flat_index_get_metadata(dict->index, "target_lang");
+                if (m_name) {
+                    g_free(title);
+                    title = g_strdup(m_name);
+                }
+                if (m_src) {
+                    g_free(s_lang);
+                    s_lang = g_strdup(m_src);
+                }
+                if (m_tgt) {
+                    g_free(t_lang);
+                    t_lang = g_strdup(m_tgt);
+                }
             }
         }
 
-        if (dict_cache_is_compressed(dict->data, dict->size)) {
-            const DictCacheHeader *hdr = (const DictCacheHeader*)dict->data;
-            if (hdr->chunk_count > 0) {
-                dict->is_compressed = TRUE;
-                dict->chunk_reader = dict_chunk_reader_new(dict->data, dict->size, hdr);
+        dict->name = title;
+        dict->source_lang = s_lang;
+        dict->target_lang = t_lang;
+
+        if (dict->index) {
+            if (dict_cache_is_compressed(dict->data, dict->size)) {
+                const DictCacheHeader *hdr = (const DictCacheHeader*)dict->data;
+                if (hdr->chunk_count > 0) {
+                    dict->is_compressed = TRUE;
+                    dict->chunk_reader = dict_chunk_reader_new(dict->data, dict->size, hdr);
+                }
             }
-        }
-        
-        if (!dict->is_compressed) {
-            dict->mdx_ctx = mdx_init_context(fh, is_v2, num_size, header_text_size, encoding_is_utf16, dict_encoding);
+            
+            if (!dict->is_compressed) {
+                dict->mdx_ctx = mdx_init_context(fh, is_v2, num_size, header_text_size, encoding_is_utf16, dict_encoding);
+            }
+
+            if (!(cancel_flag && g_atomic_int_get(cancel_flag) != expected)) {
+                dict->resource_dir = mdx_prepare_resource_dir(path, is_v2, num_size, encoding_is_utf16, encrypted, cancel_flag, expected, &dict->resource_reader);
+                mdx_detect_icon(dict, path);
+            }
+
+            g_free(stylesheet);
+            g_free(source_dir);
+            g_free(cache_path);
+            if (fh) fclose(fh);
+            return dict;
         }
 
-        if (!(cancel_flag && g_atomic_int_get(cancel_flag) != expected)) {
-            dict->resource_dir = mdx_prepare_resource_dir(path, is_v2, num_size, encoding_is_utf16, encrypted, cancel_flag, expected, &dict->resource_reader);
-            mdx_detect_icon(dict, path);
-        }
-
-        g_free(stylesheet);
-        g_free(source_dir);
-        g_free(cache_path);
-        if (fh) fclose(fh);
-        return dict;
+        /* If index is missing or invalid, we must rebuild everything */
+        munmap((void*)dict_data, dict_size);
+        dict_entry_unref((DictEntry*)dict);
     }
 
     /* ───────────────────────────── */
@@ -1787,20 +1811,8 @@ rebuild_cache:
 
     /* Sort entries for binary search */
     settings_scan_progress_notify(path, 85);
-    
-    /* We need to mmap the builder's file to sort. Builder keeps file open. */
+
     dict_cache_builder_flush(builder);
-    int sort_fd = open(cache_path, O_RDONLY);
-    if (sort_fd >= 0) {
-        struct stat st_tmp;
-        fstat(sort_fd, &st_tmp);
-        void *sort_mmap = mmap(NULL, (size_t)st_tmp.st_size, PROT_READ, MAP_PRIVATE, sort_fd, 0);
-        if (sort_mmap != MAP_FAILED) {
-            flat_index_sort_entries(tree_entries, valid_count, sort_mmap, (size_t)st_tmp.st_size);
-            munmap(sort_mmap, (size_t)st_tmp.st_size);
-        }
-        close(sort_fd);
-    }
 
     settings_scan_progress_notify(path, 95);
     dict_cache_builder_finalize_index_only(builder, tree_entries, (uint64_t)valid_count, 0, NULL);
@@ -1809,10 +1821,50 @@ rebuild_cache:
         fprintf(stderr, "[MDX] Parsed zero entries for %s\n", path);
     }
 
+    /* Build SQLite headword index */
+    char *hw_path = dict_hw_index_path_for(path);
+    {
+        int hw_fd = open(cache_path, O_RDONLY);
+        if (hw_fd >= 0) {
+            struct stat hw_st;
+            if (fstat(hw_fd, &hw_st) == 0 && hw_st.st_size > 0) {
+                const char *hw_map = mmap(NULL, (size_t)hw_st.st_size, PROT_READ, MAP_PRIVATE, hw_fd, 0);
+                if (hw_map != MAP_FAILED) {
+                    DictHwBuilder *hw = dict_hw_builder_new(hw_path);
+                    if (hw) {
+                        for (size_t i = 0; i < valid_count; i++) {
+                            if (i % 10000 == 0) {
+                                settings_scan_progress_notify(path, 95 + (int)(5.0 * i / valid_count));
+                            }
+                            dict_hw_builder_add(hw,
+                                hw_map + tree_entries[i].h_off,
+                                tree_entries[i].h_len,
+                                tree_entries[i].d_off,
+                                tree_entries[i].d_len);
+                        }
+                        dict_hw_builder_set_metadata(hw, "source_path", path);
+                        if (title) dict_hw_builder_set_metadata(hw, "dict_name", title);
+                        if (s_lang) dict_hw_builder_set_metadata(hw, "source_lang", s_lang);
+                        if (t_lang) dict_hw_builder_set_metadata(hw, "target_lang", t_lang);
+                        dict_hw_builder_finalize(hw);
+                        struct stat hw_src_st;
+                        if (stat(path, &hw_src_st) == 0) {
+                            struct utimbuf times = { .actime = hw_src_st.st_mtime, .modtime = hw_src_st.st_mtime };
+                            utime(hw_path, &times);
+                        }
+                    }
+                    munmap((void*)hw_map, (size_t)hw_st.st_size);
+                }
+            }
+            close(hw_fd);
+        }
+    }
+
     MdxContext *mdx_ctx = mdx_init_context(fh, is_v2, num_size, header_text_size, encoding_is_utf16, dict_encoding);
 
     dict_cache_builder_free(builder);
     const char *sources[] = { path };
+    dict_cache_sync_mtime(hw_path, sources, 1);
     dict_cache_sync_mtime(cache_path, sources, 1);
     fclose(fh);
     g_free(dict_encoding);
@@ -1827,6 +1879,7 @@ rebuild_cache:
         g_free(title);
         g_free(s_lang);
         g_free(t_lang);
+        g_free(hw_path);
         return NULL;
     }
     struct stat st_final;
@@ -1843,34 +1896,36 @@ rebuild_cache:
         g_free(title);
         g_free(s_lang);
         g_free(t_lang);
+        g_free(hw_path);
         return NULL;
     }
 
-    DictMmap *dict = g_new0(DictMmap, 1);
-    dict->fd = cache_fd;
-    close(dict->fd);
-    dict->fd = -1;
-    dict->data = dict_data;
-    dict->size = dict_size;
-    dict->name = title;
-    dict->source_dir = source_dir;
-    dict->mdx_stylesheet = stylesheet;
-    dict->mdx_ctx = mdx_ctx;
-    dict->index = flat_index_open(dict->data, dict->size);
+    DictMmap *dict_final = g_new0(DictMmap, 1);
+    dict_final->fd = cache_fd;
+    close(dict_final->fd);
+    dict_final->fd = -1;
+    dict_final->data = dict_data;
+    dict_final->size = dict_size;
+    dict_final->name = title;
+    dict_final->source_dir = source_dir;
+    dict_final->mdx_stylesheet = stylesheet;
+    dict_final->mdx_ctx = mdx_ctx;
+    dict_final->index = flat_index_open(hw_path);
 
-    if (dict_cache_is_compressed(dict->data, dict->size)) {
-        dict->is_compressed = TRUE;
-        dict->chunk_reader = dict_chunk_reader_new(dict->data, dict->size, (const DictCacheHeader*)dict->data);
+    if (dict_cache_is_compressed(dict_final->data, dict_final->size)) {
+        dict_final->is_compressed = TRUE;
+        dict_final->chunk_reader = dict_chunk_reader_new(dict_final->data, dict_final->size, (const DictCacheHeader*)dict_final->data);
     }
 
     g_free(tree_entries);
     g_free(cache_path);
+    g_free(hw_path);
 
-    dict->resource_dir = mdx_prepare_resource_dir(path, is_v2, num_size, encoding_is_utf16, encrypted, cancel_flag, expected, &dict->resource_reader);
-    mdx_detect_icon(dict, path);
+    dict_final->resource_dir = mdx_prepare_resource_dir(path, is_v2, num_size, encoding_is_utf16, encrypted, cancel_flag, expected, &dict_final->resource_reader);
+    mdx_detect_icon(dict_final, path);
     
     settings_scan_progress_notify(path, 100);
 
-    return dict;
+    return dict_final;
 }
 

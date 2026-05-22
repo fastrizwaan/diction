@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <stdint.h>
+#include <sqlite3.h>
 #include <utime.h>
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -121,7 +122,7 @@ static char *dsl_prepare_resource_dir(const char *path, ResourceReader **out_rea
     return resource_dir;
 }
 
-static void dsl_parse_header(const char *path, char **out_name, char **out_source_lang, char **out_target_lang) {
+void dsl_parse_header_internal(const char *path, char **out_name, char **out_source_lang, char **out_target_lang) {
     if (out_name) *out_name = NULL;
     if (out_source_lang) *out_source_lang = NULL;
     if (out_target_lang) *out_target_lang = NULL;
@@ -237,13 +238,12 @@ DictMmap* dict_mmap_open(const char *path, volatile gint *cancel_flag, gint expe
 
     dict_cache_ensure_dir();
 
-    // Get cache path for this dictionary
-    char *cache_path = dict_cache_path_for(path);
-    gboolean cache_exists = (access(cache_path, F_OK) == 0);
-    gboolean cache_valid = cache_exists && dict_cache_is_valid(cache_path, path);
-    if (!cache_valid && dict_cache_failure_is_current(cache_path, path)) {
+    char *hw_path = dict_hw_index_path_for(path);
+    gboolean hw_exists = (access(hw_path, F_OK) == 0);
+    gboolean hw_valid = hw_exists && dict_cache_is_valid(hw_path, path);
+    if (!hw_valid && dict_cache_failure_is_current(hw_path, path)) {
         fprintf(stderr, "[DSL] Skipping cached index failure for %s\n", path);
-        g_free(cache_path);
+        g_free(hw_path);
         return NULL;
     }
 
@@ -253,108 +253,88 @@ DictMmap* dict_mmap_open(const char *path, volatile gint *cancel_flag, gint expe
     dict->source_dir = g_path_get_dirname(path);
     dict->resource_dir = dsl_prepare_resource_dir(path, &dict->resource_reader);
 
-    {
-        char *name = NULL, *src_lang = NULL, *tgt_lang = NULL;
-        dsl_parse_header(path, &name, &src_lang, &tgt_lang);
-        if (name) {
-            g_free(dict->name);
-            dict->name = name;
-        }
-        dict->source_lang = src_lang;
-        dict->target_lang = tgt_lang;
-    }
-
-    if (!cache_valid) {
-        printf("[DSL] Building index-only cache for %s\n", path);
-        char *tmp_cache = g_strdup_printf("%s.tmp", cache_path);
-        
-        if (!build_dsl_index_only_cache(path, tmp_cache)) {
-            fprintf(stderr, "[DSL] Failed to build index cache for %s\n", path);
+    if (!hw_valid) {
+        printf("[DSL] Building SQLite headword index for %s\n", path);
+        if (!build_dsl_index_only_cache(path)) {
+            fprintf(stderr, "[DSL] Failed to build headword index for %s\n", path);
             const char *sources[] = { path };
-            dict_cache_mark_failure(cache_path, sources, 1);
-            unlink(tmp_cache);
-            g_free(tmp_cache);
-            g_free(cache_path);
+            dict_cache_mark_failure(hw_path, sources, 1);
+            g_free(hw_path);
             g_free(dict->source_dir);
             resource_reader_close(dict->resource_reader);
             g_free(dict);
             return NULL;
         }
-
         struct stat src_st;
         if (stat(path, &src_st) == 0) {
             struct utimbuf times = { .actime = src_st.st_mtime, .modtime = src_st.st_mtime };
-            utime(tmp_cache, &times);
-        }
-
-        if (rename(tmp_cache, cache_path) != 0) {
-            fprintf(stderr, "[DSL] Failed to rename temp cache to %s\n", cache_path);
-            unlink(tmp_cache);
-            g_free(tmp_cache);
-            g_free(cache_path);
-            g_free(dict->source_dir);
-            resource_reader_close(dict->resource_reader);
-            g_free(dict);
-            return NULL;
+            utime(hw_path, &times);
         }
         const char *sources[] = { path };
-        dict_cache_sync_mtime(cache_path, sources, 1);
-        dict_cache_clear_failure(cache_path);
-        g_free(tmp_cache);
+        dict_cache_sync_mtime(hw_path, sources, 1);
+        dict_cache_clear_failure(hw_path);
     } else {
-        printf("Loading Dictionary from cache: %s\n", cache_path);
+        printf("[DSL] Loading headword index from: %s\n", hw_path);
     }
 
-    dict->fd = open(cache_path, O_RDONLY);
-    if (dict->fd < 0) {
-        g_free(cache_path);
+    dict->index = flat_index_open(hw_path);
+    if (!dict->index) {
+        fprintf(stderr, "[DSL] Failed to open headword index: %s\n", hw_path);
+        g_free(hw_path);
         g_free(dict->source_dir);
         resource_reader_close(dict->resource_reader);
         g_free(dict);
         return NULL;
     }
 
-    struct stat st;
-    fstat(dict->fd, &st);
-    dict->size = st.st_size;
+    /* Get metadata from index if available */
+    const char *m_name = flat_index_get_metadata(dict->index, "dict_name");
+    const char *m_src = flat_index_get_metadata(dict->index, "source_lang");
+    const char *m_tgt = flat_index_get_metadata(dict->index, "target_lang");
+    const char *m_enc = flat_index_get_metadata(dict->index, "source_encoding");
 
-    void *map = mmap(NULL, dict->size, PROT_READ, MAP_SHARED, dict->fd, 0);
-    if (map == MAP_FAILED) {
-        close(dict->fd);
-        g_free(cache_path);
-        g_free(dict->source_dir);
-        resource_reader_close(dict->resource_reader);
-        g_free(dict);
-        return NULL;
+    if (m_name) dict->name = g_strdup(m_name);
+    if (m_src) dict->source_lang = g_strdup(m_src);
+    if (m_tgt) dict->target_lang = g_strdup(m_tgt);
+    if (m_enc) dict->source_encoding = atoi(m_enc);
+
+    /* Fallback to parsing header if metadata is missing (legacy caches) */
+    if (!dict->name) {
+        char *name = NULL, *src_lang = NULL, *tgt_lang = NULL;
+        dsl_parse_header_internal(path, &name, &src_lang, &tgt_lang);
+        if (name) dict->name = name;
+        if (src_lang) dict->source_lang = src_lang;
+        if (tgt_lang) dict->target_lang = tgt_lang;
     }
 
-    dict->data = (const char*)map;
-    close(dict->fd);
-    dict->fd = -1;
-    dict->index = flat_index_open(dict->data, dict->size);
-
-    if (dict_cache_is_compressed(dict->data, dict->size)) {
-        const DictCacheHeader *header = (const DictCacheHeader*)dict->data;
-        dict->is_compressed = TRUE;
-        if (header->chunk_count == 0) {
-            /* Index-only source-backed cache */
-            if (g_str_has_suffix(path, ".dz")) {
-                dict->source_dz = dictzip_open(path);
-            } else {
-                dict->source_fd = open(path, O_RDONLY);
-                if (dict->source_fd >= 0) {
-                    struct stat s_st;
-                    fstat(dict->source_fd, &s_st);
-                    dict->source_size = s_st.st_size;
-                    dict->source_mmap = mmap(NULL, dict->source_size, PROT_READ, MAP_SHARED, dict->source_fd, 0);
-                    close(dict->source_fd);
-                    dict->source_fd = -1;
-                }
+    /* If we still don't have an encoding, try to get it from DB (redundant if m_enc exists) */
+    if (!m_enc) {
+        sqlite3 *tmp = NULL;
+        if (sqlite3_open_v2(hw_path, &tmp, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK) {
+            sqlite3_stmt *meta_st = NULL;
+            sqlite3_prepare_v2(tmp,
+                "SELECT value FROM metadata WHERE key = 'source_encoding';",
+                -1, &meta_st, NULL);
+            if (sqlite3_step(meta_st) == SQLITE_ROW) {
+                dict->source_encoding = atoi((const char*)sqlite3_column_text(meta_st, 0));
             }
-            dict->source_encoding = header->source_encoding;
-        } else {
-            /* Legacy fully-compressed chunked cache */
-            dict->chunk_reader = dict_chunk_reader_new(dict->data, dict->size, header);
+            sqlite3_finalize(meta_st);
+            sqlite3_close(tmp);
+        }
+    }
+
+    /* Set up source access for definitions */
+    if (g_str_has_suffix(path, ".dz")) {
+        dict->source_dz = dictzip_open(path);
+    } else {
+        dict->source_fd = open(path, O_RDONLY);
+        if (dict->source_fd >= 0) {
+            struct stat s_st;
+            fstat(dict->source_fd, &s_st);
+            dict->source_size = s_st.st_size;
+            dict->source_mmap = mmap(NULL, dict->source_size, PROT_READ, MAP_SHARED, dict->source_fd, 0);
+            close(dict->source_fd);
+            dict->source_fd = -1;
         }
     }
 
@@ -364,6 +344,6 @@ DictMmap* dict_mmap_open(const char *path, volatile gint *cancel_flag, gint expe
         g_free(base);
     }
 
-    g_free(cache_path);
+    g_free(hw_path);
     return dict;
 }

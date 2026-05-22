@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <utime.h>
 #include <ctype.h>
 #include "dict-cache.h"
 #include "dict-cache-builder.h"
@@ -91,7 +92,9 @@ DictMmap* parse_dictd_file(const char *index_path, volatile gint *cancel_flag, g
                     dict->fd = -1;
                     dict->data = data;
                     dict->size = st.st_size;
-                    dict->index = flat_index_open(dict->data, dict->size);
+                    char *hw_path = dict_hw_index_path_for(index_path);
+                    dict->index = flat_index_open(hw_path);
+                    g_free(hw_path);
                     if (dict->index) {
                         fprintf(stderr, "[DICTD] Loaded cache for %s (%zu entries)\n", index_path, dict->index->count);
                     }
@@ -232,25 +235,45 @@ DictMmap* parse_dictd_file(const char *index_path, volatile gint *cancel_flag, g
     }
     g_array_free(index_entries, TRUE);
 
+    char *hw_path = dict_hw_index_path_for(index_path);
+
     if (count > 0) {
         dict_cache_builder_flush(builder);
-        
-        /* Sort entries by headword */
-        FILE *rf = fopen(cache_path, "rb");
-        if (rf) {
-            struct stat sort_st;
-            if (fstat(fileno(rf), &sort_st) == 0 && sort_st.st_size > 0) {
-                char *cache_data = malloc((size_t)sort_st.st_size);
-                if (fread(cache_data, 1, (size_t)sort_st.st_size, rf) == (size_t)sort_st.st_size) {
-                    flat_index_sort_entries(entries, count, cache_data, (size_t)sort_st.st_size);
-                }
-                free(cache_data);
-            }
-            fclose(rf);
-        }
 
         dict_cache_builder_finalize(builder, entries, count);
         fprintf(stderr, "[DICTD] Finalized cache with %zu entries\n", count);
+
+        /* Build SQLite headword index */
+        if (hw_path) {
+            int hw_fd = open(cache_path, O_RDONLY);
+            if (hw_fd >= 0) {
+                struct stat hw_st;
+                if (fstat(hw_fd, &hw_st) == 0 && hw_st.st_size > 0) {
+                    const char *hw_map = mmap(NULL, (size_t)hw_st.st_size, PROT_READ, MAP_PRIVATE, hw_fd, 0);
+                    if (hw_map != MAP_FAILED) {
+                        DictHwBuilder *hw = dict_hw_builder_new(hw_path);
+                        if (hw) {
+                            for (size_t i = 0; i < (size_t)count; i++) {
+                                dict_hw_builder_add(hw,
+                                    hw_map + entries[i].h_off,
+                                    entries[i].h_len,
+                                    entries[i].d_off,
+                                    entries[i].d_len);
+                            }
+                            dict_hw_builder_set_metadata(hw, "source_path", index_path);
+                            dict_hw_builder_finalize(hw);
+                            struct stat hw_src_st;
+                            if (stat(index_path, &hw_src_st) == 0) {
+                                struct utimbuf times = { .actime = hw_src_st.st_mtime, .modtime = hw_src_st.st_mtime };
+                                utime(hw_path, &times);
+                            }
+                        }
+                        munmap((void*)hw_map, (size_t)hw_st.st_size);
+                    }
+                }
+                close(hw_fd);
+            }
+        }
     }
 
     dict_cache_builder_free(builder);
@@ -261,6 +284,7 @@ DictMmap* parse_dictd_file(const char *index_path, volatile gint *cancel_flag, g
     /* Open the newly built cache */
     int fd = open(cache_path, O_RDONLY);
     if (fd < 0) {
+        g_free(hw_path);
         g_free(dict_path);
         g_free(cache_path);
         g_free(bookname);
@@ -271,6 +295,7 @@ DictMmap* parse_dictd_file(const char *index_path, volatile gint *cancel_flag, g
     const char *data = mmap(NULL, final_st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
     if (data == MAP_FAILED) {
         close(fd);
+        g_free(hw_path);
         g_free(dict_path);
         g_free(cache_path);
         g_free(bookname);
@@ -283,7 +308,7 @@ DictMmap* parse_dictd_file(const char *index_path, volatile gint *cancel_flag, g
     dict->fd = -1;
     dict->data = data;
     dict->size = final_st.st_size;
-    dict->index = flat_index_open(dict->data, dict->size);
+    dict->index = flat_index_open(hw_path);
     if (dict->index) {
         fprintf(stderr, "[DICTD] Built cache for %s (%zu entries)\n", index_path, dict->index->count);
     }
@@ -298,9 +323,14 @@ DictMmap* parse_dictd_file(const char *index_path, volatile gint *cancel_flag, g
     }
 
     /* Sync mtime */
+    {
+        const char *hw_sources[] = { index_path, dict_path };
+        dict_cache_sync_mtime(hw_path, hw_sources, 2);
+    }
     const char *sources[] = { index_path, dict_path };
     dict_cache_sync_mtime(cache_path, sources, 2);
 
+    g_free(hw_path);
     g_free(dict_path);
     g_free(cache_path);
     return dict;

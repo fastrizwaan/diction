@@ -16,6 +16,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <utime.h>
 #include <errno.h>
 #include "settings.h"
 #include "dict-cache-builder.h"
@@ -322,19 +323,43 @@ DictMmap* parse_slob_file(const char *path, volatile gint *cancel_flag, gint exp
         g_free(temp_refs); g_free(bin_cache_offsets); g_free(bin_cache_lens);
 
         dict_cache_builder_flush(builder);
-        int sort_fd = open(cache_path, O_RDONLY);
-        if (sort_fd >= 0) {
-            struct stat sort_st;
-            if (fstat(sort_fd, &sort_st) == 0 && sort_st.st_size > 0) {
-                const char *sort_map = mmap(NULL, (size_t)sort_st.st_size, PROT_READ, MAP_PRIVATE, sort_fd, 0);
-                if (sort_map != MAP_FAILED) {
-                    flat_index_sort_entries(final_entries, valid_cnt, sort_map, (size_t)sort_st.st_size);
-                    munmap((void*)sort_map, (size_t)sort_st.st_size);
-                }
-            }
-            close(sort_fd);
-        }
         dict_cache_builder_finalize(builder, final_entries, valid_cnt);
+
+        /* Build SQLite headword index */
+        if (valid_cnt > 0) {
+            char *hw_path = dict_hw_index_path_for(path);
+            int hw_fd = open(cache_path, O_RDONLY);
+            if (hw_fd >= 0) {
+                struct stat hw_st;
+                if (fstat(hw_fd, &hw_st) == 0 && hw_st.st_size > 0) {
+                    const char *hw_map = mmap(NULL, (size_t)hw_st.st_size, PROT_READ, MAP_PRIVATE, hw_fd, 0);
+                    if (hw_map != MAP_FAILED) {
+                        DictHwBuilder *hw = dict_hw_builder_new(hw_path);
+                        if (hw) {
+                            for (size_t i = 0; i < valid_cnt; i++) {
+                                dict_hw_builder_add(hw,
+                                    hw_map + final_entries[i].h_off,
+                                    final_entries[i].h_len,
+                                    final_entries[i].d_off,
+                                    final_entries[i].d_len);
+                            }
+                            dict_hw_builder_set_metadata(hw, "source_path", path);
+                            dict_hw_builder_finalize(hw);
+                            struct stat hw_src_st;
+                            if (stat(path, &hw_src_st) == 0) {
+                                struct utimbuf times = { .actime = hw_src_st.st_mtime, .modtime = hw_src_st.st_mtime };
+                                utime(hw_path, &times);
+                            }
+                        }
+                        munmap((void*)hw_map, (size_t)hw_st.st_size);
+                    }
+                }
+                close(hw_fd);
+            }
+            const char *hw_sources[] = { path };
+            dict_cache_sync_mtime(hw_path, hw_sources, 1);
+            g_free(hw_path);
+        }
         dict_cache_builder_free(builder);
         settings_scan_progress_notify(path, 95);
         dict_cache_sync_mtime(cache_path, &path, 1);
@@ -343,12 +368,14 @@ DictMmap* parse_slob_file(const char *path, volatile gint *cancel_flag, gint exp
     
     munmap(map, st_file.st_size); close(fd);
 
+    char *hw_path = dict_hw_index_path_for(path);
+
     int cache_fd = open(cache_path, O_RDONLY);
-    if (cache_fd < 0) { g_free(cache_path); g_free(title); return NULL; }
+    if (cache_fd < 0) { g_free(hw_path); g_free(cache_path); g_free(title); return NULL; }
     struct stat st_cache;
-    if (fstat(cache_fd, &st_cache) < 0) { close(cache_fd); g_free(cache_path); g_free(title); return NULL; }
+    if (fstat(cache_fd, &st_cache) < 0) { close(cache_fd); g_free(hw_path); g_free(cache_path); g_free(title); return NULL; }
     void *cache_map = mmap(NULL, st_cache.st_size, PROT_READ, MAP_PRIVATE, cache_fd, 0);
-    if (cache_map == MAP_FAILED) { close(cache_fd); g_free(cache_path); g_free(title); return NULL; }
+    if (cache_map == MAP_FAILED) { close(cache_fd); g_free(hw_path); g_free(cache_path); g_free(title); return NULL; }
 
     DictMmap *dm = g_new0(DictMmap, 1);
     dm->fd = cache_fd;
@@ -358,7 +385,8 @@ DictMmap* parse_slob_file(const char *path, volatile gint *cancel_flag, gint exp
     dm->size = st_cache.st_size;
     dm->name = title ? title : g_path_get_basename(path);
     dm->source_dir = g_path_get_dirname(path);
-    dm->index = flat_index_open(dm->data, dm->size);
+    dm->index = flat_index_open(hw_path);
+    g_free(hw_path);
     if (dict_cache_is_compressed(dm->data, dm->size)) {
         dm->is_compressed = TRUE;
         dm->chunk_reader = dict_chunk_reader_new(dm->data, dm->size, (const DictCacheHeader*)dm->data);

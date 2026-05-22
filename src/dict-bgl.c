@@ -460,7 +460,9 @@ DictMmap* parse_bgl_file(const char *path, volatile gint *cancel_flag, gint expe
         dict->data = dict_data;
         dict->size = dict_size;
         dict->resource_dir = find_bgl_resource_dir(path);
-        dict->index = flat_index_open(dict->data, dict->size);
+        char *hw_path = dict_hw_index_path_for(path);
+        dict->index = flat_index_open(hw_path);
+        g_free(hw_path);
         if (dict_cache_is_compressed(dict->data, dict->size)) {
             dict->is_compressed = TRUE;
             dict->chunk_reader = dict_chunk_reader_new(dict->data, dict->size, (const DictCacheHeader*)dict->data);
@@ -489,6 +491,8 @@ DictMmap* parse_bgl_file(const char *path, volatile gint *cancel_flag, gint expe
     if (!cache_valid) {
         printf("[BGL] Transcoding and building UTF-8 cache from source: %s\n", path);
 
+        char *hw_path = dict_hw_index_path_for(path);
+
         int64_t total_src_size = 0;
         {
             struct stat src_st;
@@ -499,11 +503,12 @@ DictMmap* parse_bgl_file(const char *path, volatile gint *cancel_flag, gint expe
         snprintf(tmp_raw, sizeof(tmp_raw), "%s.raw", cache_path);
         if (!dict_cache_prepare_target_path(tmp_raw, total_src_size > 0 ? (guint64) total_src_size : 0)) {
             gzclose(gz);
+            g_free(hw_path);
             g_free(cache_path);
             return NULL;
         }
         FILE *tf = fopen(tmp_raw, "wb");
-        if (!tf) { gzclose(gz); g_free(cache_path); return NULL; }
+        if (!tf) { gzclose(gz); g_free(hw_path); g_free(cache_path); return NULL; }
 
         unsigned char buf[65536];
         int n;
@@ -516,7 +521,7 @@ DictMmap* parse_bgl_file(const char *path, volatile gint *cancel_flag, gint expe
                 settings_scan_progress_notify(path, pct);
             }
             if (cancel_flag && g_atomic_int_get(cancel_flag) != expected) {
-                gzclose(gz); fclose(tf); unlink(tmp_raw); g_free(cache_path); return NULL;
+                gzclose(gz); fclose(tf); unlink(tmp_raw); g_free(hw_path); g_free(cache_path); return NULL;
             }
             fwrite(buf, 1, n, tf);
         }
@@ -532,6 +537,7 @@ DictMmap* parse_bgl_file(const char *path, volatile gint *cancel_flag, gint expe
             munmap((void*)raw_data, raw_st.st_size);
             close(raw_fd);
             unlink(tmp_raw);
+            g_free(hw_path);
             g_free(cache_path);
             return NULL;
         }
@@ -540,6 +546,7 @@ DictMmap* parse_bgl_file(const char *path, volatile gint *cancel_flag, gint expe
             munmap((void*)raw_data, raw_st.st_size);
             close(raw_fd);
             unlink(tmp_raw);
+            g_free(hw_path);
             g_free(cache_path);
             return NULL;
         }
@@ -555,22 +562,42 @@ DictMmap* parse_bgl_file(const char *path, volatile gint *cancel_flag, gint expe
 
         if (entry_count > 0 && entries) {
             dict_cache_builder_flush(builder);
-            
-            // Map the newly written strings to sort the entries!
-            int tmp_cache_fd = open(cache_path, O_RDONLY);
-            if (tmp_cache_fd >= 0) {
-                struct stat st_tmp;
-                if (fstat(tmp_cache_fd, &st_tmp) == 0 && st_tmp.st_size > 0) {
-                    const char *tmp_cache_data = mmap(NULL, (size_t)st_tmp.st_size, PROT_READ, MAP_PRIVATE, tmp_cache_fd, 0);
-                    if (tmp_cache_data != MAP_FAILED) {
-                        flat_index_sort_entries(entries, entry_count, tmp_cache_data, (size_t)st_tmp.st_size);
-                        munmap((void*)tmp_cache_data, (size_t)st_tmp.st_size);
-                    }
-                }
-                close(tmp_cache_fd);
-            }
 
             dict_cache_builder_finalize(builder, entries, (uint64_t)entry_count);
+
+            /* Build SQLite headword index */
+            if (hw_path) {
+                int hw_fd = open(cache_path, O_RDONLY);
+                if (hw_fd >= 0) {
+                    struct stat hw_st;
+                    if (fstat(hw_fd, &hw_st) == 0 && hw_st.st_size > 0) {
+                        const char *hw_map = mmap(NULL, (size_t)hw_st.st_size, PROT_READ, MAP_PRIVATE, hw_fd, 0);
+                        if (hw_map != MAP_FAILED) {
+                            DictHwBuilder *hw = dict_hw_builder_new(hw_path);
+                            if (hw) {
+                                for (size_t i = 0; i < entry_count; i++) {
+                                    dict_hw_builder_add(hw,
+                                        hw_map + entries[i].h_off,
+                                        entries[i].h_len,
+                                        entries[i].d_off,
+                                        entries[i].d_len);
+                                }
+                                dict_hw_builder_set_metadata(hw, "source_path", path);
+                                dict_hw_builder_finalize(hw);
+                                struct stat hw_src_st;
+                                if (stat(path, &hw_src_st) == 0) {
+                                    struct utimbuf times = { .actime = hw_src_st.st_mtime, .modtime = hw_src_st.st_mtime };
+                                    utime(hw_path, &times);
+                                }
+                            }
+                            munmap((void*)hw_map, (size_t)hw_st.st_size);
+                        }
+                    }
+                    close(hw_fd);
+                }
+                const char *hw_sources[] = { path };
+                dict_cache_sync_mtime(hw_path, hw_sources, 1);
+            }
         }
         dict_cache_builder_free(builder);
         g_free(entries);
@@ -584,13 +611,14 @@ DictMmap* parse_bgl_file(const char *path, volatile gint *cancel_flag, gint expe
         }
 
         cache_fd = open(cache_path, O_RDONLY);
-        if (cache_fd < 0) { g_free(cache_path); return NULL; }
+        if (cache_fd < 0) { g_free(hw_path); g_free(cache_path); return NULL; }
         struct stat st;
         fstat(cache_fd, &st);
         dict_size = st.st_size;
         dict_data = mmap(NULL, dict_size, PROT_READ, MAP_PRIVATE, cache_fd, 0);
         if (dict_data == MAP_FAILED) {
             close(cache_fd);
+            g_free(hw_path);
             g_free(cache_path);
             return NULL;
         }
@@ -604,7 +632,8 @@ DictMmap* parse_bgl_file(const char *path, volatile gint *cancel_flag, gint expe
         dict->size = dict_size;
         dict->name = dict_name;
         dict->resource_dir = find_bgl_resource_dir(path);
-        dict->index = flat_index_open(dict->data, dict->size);
+        dict->index = flat_index_open(hw_path);
+        g_free(hw_path);
         if (dict_cache_is_compressed(dict->data, dict->size)) {
             dict->is_compressed = TRUE;
             dict->chunk_reader = dict_chunk_reader_new(dict->data, dict->size, (const DictCacheHeader*)dict->data);

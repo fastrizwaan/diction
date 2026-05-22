@@ -9,6 +9,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <utime.h>
 #include <fcntl.h>
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -720,7 +721,9 @@ DictMmap* parse_xdxf_file(const char *path, volatile gint *cancel_flag, gint exp
                 g_free(archive_path);
 
                 dict->source_dir = g_canonicalize_filename(g_path_get_dirname(path), NULL);
-                dict->index = flat_index_open(data, size);
+                char *hw_path = dict_hw_index_path_for(path);
+                dict->index = flat_index_open(hw_path);
+                g_free(hw_path);
                 if (dict_cache_is_compressed(dict->data, dict->size)) {
                     dict->is_compressed = TRUE;
                     dict->chunk_reader = dict_chunk_reader_new(dict->data, dict->size, (const DictCacheHeader*)dict->data);
@@ -846,22 +849,47 @@ rebuild_xdxf_cache:
     }
 
     if (state.entries->len > 0) {
-        /* Sort entries for binary search */
         dict_cache_builder_flush(builder);
         
-        int sort_fd = open(cache_path, O_RDONLY);
-        if (sort_fd >= 0) {
-            struct stat st_tmp;
-            fstat(sort_fd, &st_tmp);
-            void *sort_mmap = mmap(NULL, (size_t)st_tmp.st_size, PROT_READ, MAP_PRIVATE, sort_fd, 0);
-            if (sort_mmap != MAP_FAILED) {
-                flat_index_sort_entries((TreeEntry*)state.entries->data, state.entries->len, sort_mmap, (size_t)st_tmp.st_size);
-                munmap(sort_mmap, (size_t)st_tmp.st_size);
-            }
-            close(sort_fd);
-        }
-        
         dict_cache_builder_finalize(builder, (TreeEntry*)state.entries->data, state.entries->len);
+
+        /* Build SQLite headword index */
+        {
+            char *hw_path = dict_hw_index_path_for(path);
+            int hw_fd = open(cache_path, O_RDONLY);
+            if (hw_fd >= 0) {
+                struct stat hw_st;
+                if (fstat(hw_fd, &hw_st) == 0 && hw_st.st_size > 0) {
+                    const char *hw_map = mmap(NULL, (size_t)hw_st.st_size, PROT_READ, MAP_PRIVATE, hw_fd, 0);
+                    if (hw_map != MAP_FAILED) {
+                        DictHwBuilder *hw = dict_hw_builder_new(hw_path);
+                        if (hw) {
+                            size_t n_entries = state.entries->len;
+                            TreeEntry *te = (TreeEntry*)state.entries->data;
+                            for (size_t i = 0; i < n_entries; i++) {
+                                dict_hw_builder_add(hw,
+                                    hw_map + te[i].h_off,
+                                    te[i].h_len,
+                                    te[i].d_off,
+                                    te[i].d_len);
+                            }
+                            dict_hw_builder_set_metadata(hw, "source_path", path);
+                            dict_hw_builder_finalize(hw);
+                            struct stat hw_src_st;
+                            if (stat(path, &hw_src_st) == 0) {
+                                struct utimbuf times = { .actime = hw_src_st.st_mtime, .modtime = hw_src_st.st_mtime };
+                                utime(hw_path, &times);
+                            }
+                        }
+                        munmap((void*)hw_map, (size_t)hw_st.st_size);
+                    }
+                }
+                close(hw_fd);
+            }
+            const char *hw_sources[] = { path };
+            dict_cache_sync_mtime(hw_path, hw_sources, 1);
+            g_free(hw_path);
+        }
     } else {
         fprintf(stderr, "[XDXF] No entries parsed from %s\n", xml_path);
         dict_cache_builder_free(builder);
@@ -930,7 +958,9 @@ rebuild_xdxf_cache:
     dict->name = state.dict_name;
     dict->source_lang = state.source_lang;
     dict->target_lang = state.target_lang;
-    dict->index = flat_index_open(data, size);
+    char *hw_path = dict_hw_index_path_for(path);
+    dict->index = flat_index_open(hw_path);
+    g_free(hw_path);
 
     if (dict_cache_is_compressed(dict->data, dict->size)) {
         dict->is_compressed = TRUE;

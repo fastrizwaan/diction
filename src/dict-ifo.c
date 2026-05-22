@@ -559,7 +559,9 @@ static DictMmap *open_cached_stardict(const char *cache_path, char *bookname, ch
     dict->size = st.st_size;
     dict->name = bookname;
     dict->resource_dir = resource_dir;
-    dict->index = flat_index_open(dict->data, dict->size);
+    char *hw_path = dict_hw_index_path_for(dict_path);
+    dict->index = flat_index_open(hw_path);
+    g_free(hw_path);
     if (dict_cache_is_compressed(dict->data, dict->size)) {
         const DictCacheHeader *header = (const DictCacheHeader*)dict->data;
         dict->is_compressed = TRUE;
@@ -591,14 +593,12 @@ static DictMmap *open_cached_stardict(const char *cache_path, char *bookname, ch
         if (!flat_index_validate(dict->index)) {
             fprintf(stderr, "[IFO] Cache index validation failed for %s — rebuilding index.\n", cache_path);
             flat_index_close(dict->index);
+            dict->index = NULL;
             if (dict->chunk_reader) {
                 dict_chunk_reader_free(dict->chunk_reader);
                 dict->chunk_reader = NULL;
                 dict->is_compressed = FALSE;
             }
-            dict->index = g_new0(FlatIndex, 1);
-            dict->index->mmap_data = dict->data;
-            dict->index->mmap_size = dict->size;
         }
     }
 
@@ -855,25 +855,42 @@ DictMmap* parse_stardict(const char *ifo_path, volatile gint *cancel_flag, gint 
     if (built && entry_count > 0 && entries) {
         dict_cache_builder_flush(builder);
 
-        /* Sort headwords using mmap(MAP_PRIVATE) of the partially-written cache —
-         * this avoids a full malloc+fread copy (fix for RAM bloat). */
-        int sort_fd = open(cache_path, O_RDONLY);
-        if (sort_fd >= 0) {
-            struct stat sort_st;
-            if (fstat(sort_fd, &sort_st) == 0 && sort_st.st_size > 0) {
-                void *sort_map = mmap(NULL, (size_t)sort_st.st_size, PROT_READ,
-                                     MAP_PRIVATE, sort_fd, 0);
-                if (sort_map != MAP_FAILED) {
-                    flat_index_sort_entries(entries, entry_count,
-                                           (const char *)sort_map,
-                                           (size_t)sort_st.st_size);
-                    munmap(sort_map, (size_t)sort_st.st_size);
-                }
-            }
-            close(sort_fd);
-        }
-
         dict_cache_builder_finalize_index_only(builder, entries, (uint64_t)entry_count, 0, sametypesequence);
+
+        /* Build SQLite headword index */
+        char *hw_path = dict_hw_index_path_for(dict_path);
+        {
+            int hw_fd = open(cache_path, O_RDONLY);
+            if (hw_fd >= 0) {
+                struct stat hw_st;
+                if (fstat(hw_fd, &hw_st) == 0 && hw_st.st_size > 0) {
+                    const char *hw_map = mmap(NULL, (size_t)hw_st.st_size, PROT_READ, MAP_PRIVATE, hw_fd, 0);
+                    if (hw_map != MAP_FAILED) {
+                        DictHwBuilder *hw = dict_hw_builder_new(hw_path);
+                        if (hw) {
+                            for (size_t i = 0; i < entry_count; i++) {
+                                dict_hw_builder_add(hw,
+                                    hw_map + entries[i].h_off,
+                                    entries[i].h_len,
+                                    entries[i].d_off,
+                                    entries[i].d_len);
+                            }
+                            dict_hw_builder_set_metadata(hw, "source_path", dict_path);
+                            dict_hw_builder_finalize(hw);
+                            struct stat hw_src_st;
+                            if (stat(dict_path, &hw_src_st) == 0) {
+                                struct utimbuf times = { .actime = hw_src_st.st_mtime, .modtime = hw_src_st.st_mtime };
+                                utime(hw_path, &times);
+                            }
+                        }
+                        munmap((void*)hw_map, (size_t)hw_st.st_size);
+                    }
+                }
+                close(hw_fd);
+            }
+            dict_cache_sync_mtime(hw_path, sources, G_N_ELEMENTS(sources));
+        }
+        g_free(hw_path);
     }
     dict_cache_builder_free(builder);
     dict_cache_sync_mtime(cache_path, sources, G_N_ELEMENTS(sources));

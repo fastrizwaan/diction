@@ -32,6 +32,7 @@ typedef struct {
     NormKey         *norm_keys;     /* parallel array: one per entry */
     char            *db_path;       /* path to .hw.sqlite file (informational) */
     GHashTable      *metadata;      /* key -> value mapping from metadata table */
+    gboolean         is_loaded;     /* TRUE if headwords and entries are in memory */
 } FlatIndex;
 
 /* Open a headword index from a SQLite database file. */
@@ -39,6 +40,10 @@ FlatIndex* flat_index_open(const char *db_path);
 
 /* Get a metadata value from the index. Returns NULL if not found. */
 const char* flat_index_get_metadata(const FlatIndex *idx, const char *key);
+
+/* Build a normalized key from a raw headword. */
+char* build_norm_key(const char *raw, size_t raw_len, size_t *out_len);
+void build_norm_key_gstring(const char *raw, size_t raw_len, GString *out);
 
 /* Free the FlatIndex (entries/headword_buf/norm cache). */
 void flat_index_close(FlatIndex *idx);

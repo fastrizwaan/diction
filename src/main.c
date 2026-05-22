@@ -1450,7 +1450,7 @@ static void populate_search_sidebar_with_mode(const char *query, gboolean force_
     sidebar_search_state = g_new0(SidebarSearchState, 1);
     sidebar_search_state->ref_count = 1;
 
-    sidebar_search_state->is_fts = force_fts || (clean && g_str_has_prefix(clean, "* "));
+    sidebar_search_state->is_fts = force_fts;
 
     /* Block FTS if the persistent index setting is disabled */
     if (sidebar_search_state->is_fts && !(app_settings && app_settings->fts_enabled)) {
@@ -1461,15 +1461,6 @@ static void populate_search_sidebar_with_mode(const char *query, gboolean force_
             "Full Text Search Unavailable",
             "Enable it in Preferences → System → Search.");
         return;
-    }
-
-    char *clean_query = clean;
-    if (sidebar_search_state->is_fts) {
-        if (clean && g_str_has_prefix(clean, "* ")) {
-            clean_query = g_strdup(clean + 2);
-            g_free(clean);
-            clean = clean_query;
-        }
     }
 
     sidebar_search_state->query = clean ? clean : g_strdup("");
@@ -3436,13 +3427,8 @@ static gboolean current_tab_is_full_text_search(void) {
 }
 
 static gboolean query_requests_full_text_search(const char *query_raw, gboolean preferred_fts) {
-    gboolean use_fts = preferred_fts;
-    char *clean_query = normalize_headword_for_search(query_raw, FALSE);
-    if (clean_query && g_str_has_prefix(clean_query, "* ")) {
-        use_fts = TRUE;
-    }
-    g_free(clean_query);
-    return use_fts;
+    (void)query_raw;
+    return preferred_fts;
 }
 
 static char *exact_lookup_definite_article_variant(const char *query) {
@@ -3738,11 +3724,7 @@ static void dispatch_async_webview_search(const char *query_raw, WebKitWebView *
         query_requests_full_text_search(is_sidebar_click ? current_search_query : query_raw, is_fts_tab) &&
         fts_highlight_query && *fts_highlight_query;
 
-    if (query && g_str_has_prefix(query, "* ")) {
-        char *stripped = g_strdup(query + 2);
-        g_free(query);
-        query = stripped;
-    }
+    /* Prefix logic removed */
 
     if (!query || strlen(query) == 0) {
         queue_fts_highlight_for_web_view(target_wv, NULL);

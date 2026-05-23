@@ -60,9 +60,14 @@ To bypass this limitation securely, Diction uses the `org.freedesktop.portal.Glo
 
 When triggered, Diction can be configured to instantly parse the current clipboard or pop the main window to the foreground, allowing dictionary access from anywhere in the OS without relying on the mouse.
 
-### GNOME Custom Keybindings Fallback
-Because the XDG Desktop Portal API for global shortcuts is relatively new, some desktop environments (like older versions of GNOME) may not support it flawlessly. 
+### Manual Fallback (CLI & Custom Shortcuts)
+Because the XDG Desktop Portal API for global shortcuts is relatively new, some desktop environments may not support it flawlessly. 
 
-As a fallback, users can bind Diction directly to their desktop environment's native keyboard shortcut system. Because Diction runs as a single-instance `GtkApplication`, executing the `/usr/local/bin/diction` command while the app is already running in the background will instantly trigger the `activate` signal and bring the main window forward.
+As a robust fallback, Diction supports a `--scan` command-line argument. Executing `diction --scan` will instantly spawn or signal the existing Diction instance, fetch the current clipboard content using system utilities (`wl-paste` or `xclip`), and display the definition in the popup window.
 
-For GNOME users, this can be configured via `gsettings`/`dconf` by appending a custom path to `org.gnome.settings-daemon.plugins.media-keys custom-keybindings`. A helper script (`setup-gnome-shortcut.sh`) is provided in the project root to automate this configuration.
+Users can bind this command directly to their desktop environment's native keyboard shortcut system (e.g., in KDE Plasma, XFCE, Cinnamon, or GNOME):
+
+- **Native/Host Installations**: The Diction UI provides an "Apply Shortcut" button that natively configures GNOME's `gsettings` via the C API to bind `Super+Alt+L` to the absolute execution path (e.g., `/usr/local/bin/diction --scan`).
+- **Flatpak Installations**: Because Flatpak strict sandboxing blocks direct host `dconf` manipulation, the UI intelligently detects the sandbox and transforms the GNOME setup button into a "Copy Command" button. This copies `flatpak run io.github.fastrizwaan.diction --scan` to the user's clipboard, allowing them to effortlessly paste it into their host system's shortcut settings.
+
+*Note on Wayland Security*: Wayland strictly forbids background applications from reading the clipboard natively. To bypass this when triggered via a global shortcut, Diction synchronously shells out to `wl-paste` (or `xclip` on X11). If Diction detects that it already owns the clipboard selection, it intelligently skips this external bypass to avoid Wayland deadlocks.

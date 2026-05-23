@@ -10,7 +10,7 @@ Instead of relying on websites or simple built-in dictionaries, Diction allows y
 ## ✨ Why use Diction?
 
 * 🚀 **Blazing Fast & Multi-Dictionary:** Search across dozens (or even hundreds!) of offline dictionaries simultaneously (up to the ~1000 open-file system limit). The results appear instantly as you type.
-* 🔍 **Global Scan Popup:** You don't even need to open the app! Just highlight a word in your web browser, PDF reader, or terminal, hit your custom keyboard shortcut (e.g., `Super+Alt+L`), and a small popup will appear right at your mouse cursor with the definition.
+* 🔍 **Global Scan Popup:** You don't even need to open the app! Just highlight a word in your web browser, PDF reader, or terminal, hit your custom keyboard shortcut (e.g., `Super+Alt+L`), and a small popup will appear right at your mouse cursor with the definition. This is powered by the `diction --scan` CLI argument, which intelligently bypasses Wayland focus restrictions using `wl-clipboard` (or `xclip` on X11).
 * 📚 **Supports Almost Everything:** You can easily find and download dictionary files online. Diction natively supports almost all popular formats without needing manual conversion:
   * **MDX / MDD** (MDict dictionaries, often containing images and audio)
   * **DSL / DSL.DZ** (ABBYY Lingvo dictionaries)
@@ -32,13 +32,12 @@ You will need a C compiler (`gcc`), `meson`, `ninja-build`, and development head
 **For Debian / Ubuntu:**
 ```bash
 sudo apt update
-sudo apt install build-essential meson ninja-build libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev libglib2.0-dev libjson-glib-dev zlib1g-dev libarchive-dev libzstd-dev liblzma-dev libbz2-dev
+sudo apt install build-essential meson ninja-build libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev libglib2.0-dev libjson-glib-dev zlib1g-dev libarchive-dev libzstd-dev liblzma-dev libbz2-dev wl-clipboard xclip
 ```
-
 
 **For Fedora / RHEL:**
 ```bash
-sudo dnf install gcc meson ninja-build gtk4-devel libadwaita-devel webkitgtk6.0-devel glib2-devel json-glib-devel zlib-devel libarchive-devel libzstd-devel xz-devel bzip2-devel
+sudo dnf install gcc meson ninja-build gtk4-devel libadwaita-devel webkitgtk6.0-devel glib2-devel json-glib-devel zlib-devel libarchive-devel libzstd-devel xz-devel bzip2-devel wl-clipboard xclip
 ```
 *(Note: On Fedora Silverblue or Kinoite, use `rpm-ostree install` instead of `dnf install`, or compile inside a `toolbox`/`distrobox` container.)*
 

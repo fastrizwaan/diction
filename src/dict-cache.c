@@ -351,6 +351,51 @@ void dict_cache_garbage_collect(const GPtrArray *active_paths) {
         }
     }
     g_free(fts_dir);
+
+    /* 3. Clean hw database directory */
+    char *hw_dir = g_build_filename(base, "diction", "hw", NULL);
+    GDir *hdir = g_dir_open(hw_dir, 0, NULL);
+    if (hdir) {
+        const char *name = NULL;
+        guint64 freed_bytes = 0;
+        guint64 deleted_count = 0;
+
+        while ((name = g_dir_read_name(hdir)) != NULL) {
+            if (strlen(name) >= 40) {
+                gboolean is_hex = TRUE;
+                for (int j = 0; j < 40; j++) {
+                    char c = name[j];
+                    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
+                        is_hex = FALSE;
+                        break;
+                    }
+                }
+                if (is_hex) {
+                    char hash_prefix[41];
+                    strncpy(hash_prefix, name, 40);
+                    hash_prefix[40] = '\0';
+
+                    if (!g_hash_table_contains(active_hashes, hash_prefix)) {
+                        char *file_path = g_build_filename(hw_dir, name, NULL);
+                        struct stat st;
+                        if (stat(file_path, &st) == 0) {
+                            freed_bytes += (guint64)st.st_size;
+                        }
+                        if (g_unlink(file_path) == 0) {
+                            deleted_count++;
+                        }
+                        g_free(file_path);
+                    }
+                }
+            }
+        }
+        g_dir_close(hdir);
+        if (deleted_count > 0) {
+            fprintf(stderr, "[CACHE GC] Cleaned up %" G_GUINT64_FORMAT " orphaned HW flat-index files, freeing %" G_GUINT64_FORMAT " bytes.\n",
+                    deleted_count, freed_bytes);
+        }
+    }
+    g_free(hw_dir);
     
     g_hash_table_unref(active_hashes);
 }

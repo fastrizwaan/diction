@@ -384,8 +384,14 @@ static void remove_cache_artifacts_for_path(const char *path) {
     const char *cache_base = g_get_user_cache_dir();
     char *cache_path = dict_cache_path_for(path);
     char *resource_dir = g_build_filename(cache_base, "diction", "resources", hash, NULL);
+    char *fts_db_path = g_build_filename(cache_base, "diction", "fts", hash, NULL);
+    char *fts_sqlite_path = g_strdup_printf("%s.sqlite", fts_db_path);
+    char *hw_path = g_build_filename(cache_base, "diction", "hw", hash, NULL);
+
     remove_path_recursive(cache_path);
     remove_path_recursive(resource_dir);
+    remove_path_recursive(fts_sqlite_path);
+    remove_path_recursive(hw_path);
 
     /* Clean up XDXF-specific cache artifacts */
     char *xdxf_res = g_strdup_printf("%s.res", cache_path);
@@ -411,6 +417,9 @@ static void remove_cache_artifacts_for_path(const char *path) {
 
     g_free(cache_path);
     g_free(resource_dir);
+    g_free(fts_db_path);
+    g_free(fts_sqlite_path);
+    g_free(hw_path);
     g_free(hash);
 
     if (ends_with_ci(path, ".mdx")) {

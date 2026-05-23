@@ -59,3 +59,10 @@ To bypass this limitation securely, Diction uses the `org.freedesktop.portal.Glo
 3. The desktop environment handles the keystroke listening globally. When the user presses the combination, the compositor sends an `Activated` DBus signal back to Diction.
 
 When triggered, Diction can be configured to instantly parse the current clipboard or pop the main window to the foreground, allowing dictionary access from anywhere in the OS without relying on the mouse.
+
+### GNOME Custom Keybindings Fallback
+Because the XDG Desktop Portal API for global shortcuts is relatively new, some desktop environments (like older versions of GNOME) may not support it flawlessly. 
+
+As a fallback, users can bind Diction directly to their desktop environment's native keyboard shortcut system. Because Diction runs as a single-instance `GtkApplication`, executing the `/usr/local/bin/diction` command while the app is already running in the background will instantly trigger the `activate` signal and bring the main window forward.
+
+For GNOME users, this can be configured via `gsettings`/`dconf` by appending a custom path to `org.gnome.settings-daemon.plugins.media-keys custom-keybindings`. A helper script (`setup-gnome-shortcut.sh`) is provided in the project root to automate this configuration.

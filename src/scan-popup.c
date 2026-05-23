@@ -36,15 +36,18 @@ static char *trim_whitespace(char *str) {
 }
 
 static gboolean scan_popup_try_show_for_word(const char *word) {
+    g_print("[DEBUG-SCAN] scan_popup_try_show_for_word() called with: '%s'\n", word ? word : "(null)");
     if (!word || !*word || !scan_word_callback) return FALSE;
 
     char *word_copy = g_strdup(word);
     char *clean_word = trim_whitespace(word_copy);
     if (!*clean_word) {
         g_free(word_copy);
+        g_print("[DEBUG-SCAN] clean_word was empty after trimming.\n");
         return FALSE;
     }
 
+    g_print("[DEBUG-SCAN] Calling scan_word_callback with: '%s'\n", clean_word);
     scan_word_callback(clean_word);
     g_free(word_copy);
 
@@ -121,9 +124,13 @@ static void read_clipboard_auto(GdkClipboard *clipboard, ScanReadMode mode) {
 }
 
 static void read_regular_clipboard_manual(void) {
+    g_print("[DEBUG-SCAN] read_regular_clipboard_manual() called.\n");
     if (regular_clipboard && scan_word_callback) {
+        g_print("[DEBUG-SCAN] Triggering regular clipboard read...\n");
         gdk_clipboard_read_text_async(regular_clipboard, NULL,
                                       on_clipboard_read, GINT_TO_POINTER(SCAN_READ_MANUAL_CLIPBOARD));
+    } else {
+        g_print("[DEBUG-SCAN] Regular clipboard or callback NULL.\n");
     }
 }
 
@@ -131,6 +138,8 @@ static void on_clipboard_read(GObject *source_object, GAsyncResult *res, gpointe
     ScanReadMode mode = GPOINTER_TO_INT(user_data);
     GdkClipboard *clip = GDK_CLIPBOARD(source_object);
     char *text = gdk_clipboard_read_text_finish(clip, res, NULL);
+    
+    g_print("[DEBUG-SCAN] on_clipboard_read() completed. Mode: %d. Text: '%s'\n", mode, text ? text : "(null)");
     
     if (text && *text) {
         if ((mode == SCAN_READ_AUTO_PRIMARY || mode == SCAN_READ_AUTO_CLIPBOARD) &&
@@ -241,12 +250,75 @@ gboolean scan_popup_is_enabled(void) {
     return scan_enabled;
 }
 
-void scan_popup_trigger_manual(void) {
-    if (primary_clipboard && scan_word_callback) {
-        gdk_clipboard_read_text_async(primary_clipboard, NULL,
-                                      on_clipboard_read,
-                                      GINT_TO_POINTER(SCAN_READ_MANUAL_PRIMARY));
-    } else {
-        read_regular_clipboard_manual();
+static gboolean delayed_clipboard_read_cb(gpointer data) {
+    GApplication *app = g_application_get_default();
+    if (!app) return G_SOURCE_CONTINUE;
+    
+    GtkWindow *win = gtk_application_get_active_window(GTK_APPLICATION(app));
+    if (!win) return G_SOURCE_CONTINUE;
+
+    if (gtk_window_is_active(win)) {
+        g_print("[DEBUG-SCAN] Window is now active, triggering GTK clipboard read...\n");
+        if (primary_clipboard && scan_word_callback) {
+            gdk_clipboard_read_text_async(primary_clipboard, NULL,
+                                          on_clipboard_read,
+                                          GINT_TO_POINTER(SCAN_READ_MANUAL_PRIMARY));
+        } else {
+            read_regular_clipboard_manual();
+        }
+        return G_SOURCE_REMOVE;
     }
+    
+    // Check timeout to prevent infinite loop (try for 2 seconds)
+    gint *attempts = (gint *)data;
+    if (++(*attempts) > 20) {
+        g_print("[DEBUG-SCAN] Timeout waiting for window focus. Forcing read anyway.\n");
+        if (primary_clipboard && scan_word_callback) {
+            gdk_clipboard_read_text_async(primary_clipboard, NULL,
+                                          on_clipboard_read,
+                                          GINT_TO_POINTER(SCAN_READ_MANUAL_PRIMARY));
+        } else {
+            read_regular_clipboard_manual();
+        }
+        g_free(attempts);
+        return G_SOURCE_REMOVE;
+    }
+
+    return G_SOURCE_CONTINUE;
+}
+
+void scan_popup_trigger_manual(void) {
+    g_print("[DEBUG-SCAN] scan_popup_trigger_manual() called.\n");
+    
+    char *text = NULL;
+    gchar *std_out = NULL;
+    
+    gboolean we_own_primary = primary_clipboard ? gdk_clipboard_is_local(primary_clipboard) : FALSE;
+    gboolean we_own_clipboard = regular_clipboard ? gdk_clipboard_is_local(regular_clipboard) : FALSE;
+
+    if (!we_own_primary && !we_own_clipboard) {
+        if (g_spawn_command_line_sync("wl-paste -p", &std_out, NULL, NULL, NULL) && std_out && *std_out) {
+            text = g_strdup(std_out);
+        } else if (g_spawn_command_line_sync("wl-paste", &std_out, NULL, NULL, NULL) && std_out && *std_out) {
+            text = g_strdup(std_out);
+        } else if (g_spawn_command_line_sync("xclip -o -selection primary", &std_out, NULL, NULL, NULL) && std_out && *std_out) {
+            text = g_strdup(std_out);
+        } else if (g_spawn_command_line_sync("xclip -o -selection clipboard", &std_out, NULL, NULL, NULL) && std_out && *std_out) {
+            text = g_strdup(std_out);
+        }
+        g_free(std_out);
+    } else {
+        g_print("[DEBUG-SCAN] We own the clipboard locally. Skipping wl-paste to avoid deadlock.\n");
+    }
+
+    if (text) {
+        g_print("[DEBUG-SCAN] Got text from wl-paste/xclip: '%s'\n", text);
+        (void)scan_popup_try_show_for_word(text);
+        g_free(text);
+        return;
+    }
+
+    g_print("[DEBUG-SCAN] Falling back to GTK clipboard. Waiting for window focus...\n");
+    gint *attempts = g_new0(gint, 1);
+    g_timeout_add(100, delayed_clipboard_read_cb, attempts);
 }

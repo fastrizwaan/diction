@@ -2572,6 +2572,90 @@ static void on_render_style_row_changed(AdwComboRow *row, GParamSpec *pspec, Set
         data->soft_reload_callback(data->user_data);
 }
 
+static void on_copy_flatpak_command_clicked(GtkButton *btn, gpointer user_data) {
+    (void)user_data;
+    GdkClipboard *clip = gdk_display_get_clipboard(gdk_display_get_default());
+    gdk_clipboard_set_text(clip, "flatpak run io.github.fastrizwaan.diction --scan");
+    gtk_button_set_label(btn, "Copied!");
+}
+
+static void on_register_gnome_shortcut_clicked(GtkButton *btn, SettingsDialogData *data) {
+    (void)data;
+    gtk_widget_set_sensitive(GTK_WIDGET(btn), FALSE);
+    gtk_button_set_label(btn, "Registering...");
+
+    char *exec_cmd = NULL;
+    if (g_file_test("/.flatpak-info", G_FILE_TEST_EXISTS)) {
+        exec_cmd = g_strdup("flatpak run io.github.fastrizwaan.diction --scan");
+    } else {
+        char *exe_path = g_file_read_link("/proc/self/exe", NULL);
+        if (exe_path) {
+            if (g_str_has_prefix(exe_path, "/var/usrlocal/")) {
+                char *clean_path = g_strdup_printf("/usr/local/%s", exe_path + 14);
+                exec_cmd = g_strdup_printf("%s --scan", clean_path);
+                g_free(clean_path);
+            } else {
+                exec_cmd = g_strdup_printf("%s --scan", exe_path);
+            }
+            g_free(exe_path);
+        } else {
+            exec_cmd = g_strdup("diction --scan");
+        }
+    }
+
+    GSettingsSchemaSource *schema_source = g_settings_schema_source_get_default();
+    GSettingsSchema *schema = schema_source ? g_settings_schema_source_lookup(schema_source, "org.gnome.settings-daemon.plugins.media-keys", TRUE) : NULL;
+    
+    if (!schema) {
+        gtk_button_set_label(btn, "Failed: GNOME schema not found");
+        g_free(exec_cmd);
+        return;
+    }
+    g_settings_schema_unref(schema);
+
+    GSettings *mk_settings = g_settings_new("org.gnome.settings-daemon.plugins.media-keys");
+    gchar **bindings = g_settings_get_strv(mk_settings, "custom-keybindings");
+
+    const gchar *custom_path = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/diction/";
+    gboolean found = FALSE;
+    if (bindings) {
+        for (int i = 0; bindings[i] != NULL; i++) {
+            if (g_strcmp0(bindings[i], custom_path) == 0) {
+                found = TRUE;
+                break;
+            }
+        }
+    }
+
+    GSettings *ck_settings = g_settings_new_with_path("org.gnome.settings-daemon.plugins.media-keys.custom-keybinding", custom_path);
+    g_settings_set_string(ck_settings, "name", "Launch Diction");
+    g_settings_set_string(ck_settings, "command", exec_cmd);
+    g_settings_set_string(ck_settings, "binding", "<Super><Alt>l");
+    g_object_unref(ck_settings);
+
+    if (!found) {
+        int count = 0;
+        if (bindings) {
+            while (bindings[count] != NULL) count++;
+        }
+        gchar **new_bindings = g_new0(gchar *, count + 2);
+        for (int i = 0; i < count; i++) {
+            new_bindings[i] = g_strdup(bindings[i]);
+        }
+        new_bindings[count] = g_strdup(custom_path);
+        
+        g_settings_set_strv(mk_settings, "custom-keybindings", (const gchar * const *)new_bindings);
+        g_strfreev(new_bindings);
+    }
+
+    if (bindings) g_strfreev(bindings);
+    g_object_unref(mk_settings);
+    g_settings_sync();
+
+    gtk_button_set_label(btn, "Registered!");
+    g_free(exec_cmd);
+}
+
 /* ---- Dialog closed ---- */
 
 static void on_dialog_closed(SettingsDialogData *data) {
@@ -2850,16 +2934,34 @@ GtkWidget* settings_dialog_new(GtkWindow *parent, AppSettings *settings,
 
     AdwPreferencesGroup *shortcut_group = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
     adw_preferences_group_set_title(shortcut_group, "Global Shortcut");
+    adw_preferences_group_set_description(shortcut_group, "Launch Diction or trigger Scan Popup anywhere");
     adw_preferences_page_add(system_page, shortcut_group);
 
-    GtkWidget *shortcut_row = adw_action_row_new();
-    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(shortcut_row), "Scan Selected Text");
-    adw_action_row_set_subtitle(ADW_ACTION_ROW(shortcut_row), "Super+Alt+L, requires XDG Desktop Portal");
+    AdwActionRow *xdg_row = ADW_ACTION_ROW(adw_action_row_new());
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(xdg_row), "XDG Desktop Portal");
+    adw_action_row_set_subtitle(xdg_row, "Super+Alt+L (Managed automatically by Wayland compositor)");
+    adw_preferences_group_add(shortcut_group, GTK_WIDGET(xdg_row));
+
+    AdwActionRow *gnome_row = ADW_ACTION_ROW(adw_action_row_new());
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(gnome_row), "GNOME Legacy Fallback");
+    adw_action_row_set_subtitle(gnome_row, "Binds Super+Alt+L to Diction --scan via gsettings");
     
-    AdwButtonRow *shortcut_btn_row = ADW_BUTTON_ROW(adw_button_row_new());
-    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(shortcut_btn_row), "Configure Global Shortcut");
-    // Handled in main.c during portal initialization as there's no native bind UI here
-    adw_preferences_group_add(shortcut_group, GTK_WIDGET(shortcut_row));
+    GtkWidget *gnome_btn = gtk_button_new_with_label("Apply Shortcut");
+    gtk_widget_set_valign(gnome_btn, GTK_ALIGN_CENTER);
+    gtk_widget_add_css_class(gnome_btn, "pill");
+    
+    if (g_file_test("/.flatpak-info", G_FILE_TEST_EXISTS)) {
+        adw_preferences_row_set_title(ADW_PREFERENCES_ROW(gnome_row), "Custom Shortcut Command");
+        adw_action_row_set_subtitle(gnome_row, "Paste into your system's Keyboard Settings");
+        gtk_button_set_label(GTK_BUTTON(gnome_btn), "Copy Command");
+        
+        g_signal_connect(gnome_btn, "clicked", G_CALLBACK(on_copy_flatpak_command_clicked), NULL);
+    } else {
+        g_signal_connect(gnome_btn, "clicked", G_CALLBACK(on_register_gnome_shortcut_clicked), data);
+    }
+    
+    adw_action_row_add_suffix(gnome_row, gnome_btn);
+    adw_preferences_group_add(shortcut_group, GTK_WIDGET(gnome_row));
 
     /* ============================================================
        Search group — FTS persistent index

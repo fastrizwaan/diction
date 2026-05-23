@@ -111,6 +111,7 @@ static void app_show_window(void);
 static gboolean dictionary_loading_in_progress = FALSE;
 static gint64 rescan_suppress_until = 0;
 static gboolean startup_random_word_pending = FALSE;
+static gboolean prevent_startup_random_word = FALSE;
 
 typedef enum {
     SIDEBAR_ROW_HINT = 0,
@@ -5783,9 +5784,14 @@ static void on_global_shortcut_activated(const char *activation_token, gpointer 
 }
 
 static void scan_word_callback(const char *word) {
-    if (!word || !*word || !main_window || !search_entry) return;
+    g_print("[DEBUG-SCAN] scan_word_callback called with: '%s'\n", word ? word : "(null)");
+    if (!word || !*word || !main_window || !search_entry) {
+        g_print("[DEBUG-SCAN] scan_word_callback returning early! word=%p, main_window=%p, search_entry=%p\n", word, main_window, search_entry);
+        return;
+    }
     
     is_small_scan_mode = TRUE;
+    g_print("[DEBUG-SCAN] Configuring scan popup window size and state...\n");
     
     if (gtk_window_is_maximized(main_window)) {
         gtk_window_unmaximize(main_window);
@@ -5804,6 +5810,7 @@ static void scan_word_callback(const char *word) {
     }
     gtk_window_present(main_window);
 
+    g_print("[DEBUG-SCAN] Setting search entry to: '%s'\n", word);
     gtk_editable_set_text(GTK_EDITABLE(search_entry), word);
     reveal_search_entry(FALSE);
 }
@@ -6403,6 +6410,9 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     if (needs_async_load) {
         startup_random_word_pending = (!search_entry ||
                                        strlen(gtk_editable_get_text(GTK_EDITABLE(search_entry))) == 0);
+        if (prevent_startup_random_word) {
+            startup_random_word_pending = FALSE;
+        }
         if (start_async_dict_loading(discover_from_dirs)) {
             startup_splash_show(app, main_window, G_CALLBACK(request_loader_cancel));
         } else {
@@ -6631,6 +6641,33 @@ static int run_cli_search(const char *query, const char *in_dict) {
     return 0;
 }
 
+static int on_command_line(GApplication *app, GApplicationCommandLine *cmdline, gpointer user_data) {
+    (void)user_data;
+    gchar **cmd_argv = g_application_command_line_get_arguments(cmdline, NULL);
+    gboolean trigger_scan = FALSE;
+
+    for (int i = 1; cmd_argv[i] != NULL; i++) {
+        if (g_strcmp0(cmd_argv[i], "--scan") == 0) {
+            trigger_scan = TRUE;
+        }
+    }
+    g_strfreev(cmd_argv);
+
+    if (!main_window) {
+        g_application_activate(app);
+    } else if (!trigger_scan) {
+        app_show_window();
+    }
+
+    if (trigger_scan) {
+        prevent_startup_random_word = TRUE;
+        startup_random_word_pending = FALSE;
+        scan_popup_trigger_manual();
+    }
+
+    return 0;
+}
+
 int main(int argc, char *argv[]) {
     // Disable compositing to fix rendering issues
     setenv("WEBKIT_DISABLE_COMPOSITING_MODE", "1", 1);
@@ -6648,12 +6685,18 @@ int main(int argc, char *argv[]) {
 
     /* Parse CLI arguments */
     char *cli_query = NULL;
+    gboolean free_cli_query = FALSE;
     char *in_dict = NULL;
     gboolean force_cli = FALSE;
+    gboolean trigger_scan_cli = FALSE;
 
     for (int i = 1; i < argc; i++) {
         if (g_str_has_prefix(argv[i], "--in-dict=")) {
             in_dict = argv[i] + 10;
+            force_cli = TRUE;
+        } else if (g_strcmp0(argv[i], "--scan") == 0) {
+            trigger_scan_cli = TRUE;
+        } else if (g_strcmp0(argv[i], "--cli") == 0) {
             force_cli = TRUE;
         } else if (argv[i][0] == '-') {
             // Ignore other flags for now or handle them
@@ -6667,12 +6710,37 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    if (force_cli && trigger_scan_cli && !cli_query) {
+        gchar *std_out = NULL;
+        if (g_spawn_command_line_sync("wl-paste -p", &std_out, NULL, NULL, NULL) && std_out && *std_out) {
+            cli_query = g_strdup(std_out);
+        } else if (g_spawn_command_line_sync("wl-paste", &std_out, NULL, NULL, NULL) && std_out && *std_out) {
+            cli_query = g_strdup(std_out);
+        } else if (g_spawn_command_line_sync("xclip -o -selection primary", &std_out, NULL, NULL, NULL) && std_out && *std_out) {
+            cli_query = g_strdup(std_out);
+        } else if (g_spawn_command_line_sync("xclip -o -selection clipboard", &std_out, NULL, NULL, NULL) && std_out && *std_out) {
+            cli_query = g_strdup(std_out);
+        }
+        g_free(std_out);
+
+        if (cli_query) {
+            free_cli_query = TRUE;
+            g_strstrip(cli_query);
+            if (!*cli_query) {
+                g_free(cli_query);
+                cli_query = NULL;
+                free_cli_query = FALSE;
+            }
+        }
+    }
+
     if (force_cli && cli_query) {
         int ret = run_cli_search(cli_query, in_dict);
         /* Cleanup and exit */
         if (app_settings) settings_free(app_settings);
         g_free(active_scope_id);
         dict_loader_free_list(all_dicts);
+        if (free_cli_query) g_free(cli_query);
         return ret;
     }
 
@@ -6723,7 +6791,7 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
-    AdwApplication *app = adw_application_new("io.github.fastrizwaan.diction", G_APPLICATION_DEFAULT_FLAGS);
+    AdwApplication *app = adw_application_new("io.github.fastrizwaan.diction", G_APPLICATION_HANDLES_COMMAND_LINE);
 
     // Add settings and about actions
     GSimpleAction *settings_action = g_simple_action_new("settings", NULL);
@@ -6742,10 +6810,10 @@ int main(int argc, char *argv[]) {
     g_object_unref(scan_action);
 
     g_signal_connect(app, "activate", G_CALLBACK(on_activate), NULL);
+    g_signal_connect(app, "command-line", G_CALLBACK(on_command_line), NULL);
     g_signal_connect(app, "shutdown", G_CALLBACK(on_app_shutdown), NULL);
 
-    char *empty[] = { argv[0], NULL };
-    int status = g_application_run(G_APPLICATION(app), 1, empty);
+    int status = g_application_run(G_APPLICATION(app), argc, argv);
 
     // Save settings on exit
     if (app_settings) {

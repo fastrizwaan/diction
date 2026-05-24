@@ -2572,7 +2572,11 @@ char* dict_render_shared_styles(int dark_mode, const char *theme_name, const cha
     buf_append_str(&b, dark_mode ? "#424242" : "#e0e0e0");
     buf_append_str(&b, "; padding: 0 2px; border-radius: 2px; }\n");
     buf_append_str(&b, ".xdxf-profile-lousy.xdxf-format-visual { white-space: pre-wrap; }\n");
-    buf_append_str(&b, ".xdxf-profile-lousy.xdxf-format-visual .xdxf-dtrn { display: inline; color: inherit !important; font-weight: inherit; line-height: 1.45; }\n");
+    buf_append_str(&b, ".xdxf-profile-lousy.xdxf-format-visual .xdxf-dtrn { display: inline; color: var(--trn-color); font-weight: inherit; line-height: 1.45; }\n");
+    buf_append_str(&b, ".xdxf-profile-lousy.xdxf-format-visual .xdxf-k { color: var(--heading-color); font-weight: bold; }\n");
+    buf_append_str(&b, ".xdxf-profile-lousy.xdxf-format-visual .xdxf-ex { color: var(--ex-color); font-style: italic; }\n");
+    buf_append_str(&b, ".xdxf-profile-lousy.xdxf-format-visual .xdxf-co > .xdxf-c > .xdxf-i { color: var(--pos-color); }\n");
+    buf_append_str(&b, ".xdxf-profile-lousy.xdxf-format-visual .xdxf-c[style*=\"teal\"] { color: var(--pos-color) !important; }\n");
     buf_append_str(&b, ".xdxf-profile-lousy.xdxf-format-visual .xdxf-c-roman { display: inline; font-size: 1.15em; font-weight: 800; color: var(--heading-color) !important; }\n");
     buf_append_str(&b, ".xdxf-profile-lousy.xdxf-format-visual .xdxf-c-roman ~ .xdxf-c-roman::before { content: \"\"; display: block; width: 100%; margin-top: 1.5em; margin-bottom: 0.5em; border-top: 1px solid var(--border-color); }\n");
     buf_append_str(&b, ".xdxf-profile-lousy.xdxf-format-visual .xdxf-c-num { display: inline; font-weight: bold; color: var(--heading-color) !important; }\n");

@@ -185,6 +185,7 @@ static gboolean xdxf_is_roman_marker_text(const char *text) {
         p++;
     }
     if (p == start) return FALSE;
+    if (*p == '.') p++;
     while (*p && g_ascii_isspace(*p)) p++;
     return (*p == '\0');
 }

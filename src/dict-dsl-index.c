@@ -13,7 +13,7 @@ typedef struct {
     uint32_t d_len;
 } DslIndexEntry;
 
-gboolean build_dsl_index_only_cache(const char *dsl_path)
+gboolean build_dsl_index_only_cache(const char *dsl_path, volatile gint *cancel_flag, gint expected)
 {
 
     DslScanner *s = dsl_scanner_open(dsl_path);
@@ -94,6 +94,10 @@ gboolean build_dsl_index_only_cache(const char *dsl_path)
     } while (0)
 
     while (1) {
+        if (cancel_flag && g_atomic_int_get(cancel_flag) != expected) {
+            break;
+        }
+
         int read_res = dsl_scanner_read_line(s, line_buf, line_cap, &line_len, &uncomp_offset, &uncomp_len);
         if (read_res == 0) break;
         if (line_len == 0) continue;
@@ -169,9 +173,10 @@ gboolean build_dsl_index_only_cache(const char *dsl_path)
     free(line_buf);
     dsl_scanner_close(s);
 
-    if (entry_count == 0) {
+    if (entry_count == 0 || (cancel_flag && g_atomic_int_get(cancel_flag) != expected)) {
         free(entries);
         dict_hw_builder_free(hw);
+        unlink(hw_path);
         g_free(hw_path);
         return FALSE;
     }

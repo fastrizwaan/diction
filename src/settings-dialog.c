@@ -918,6 +918,12 @@ static void on_fts_switch_toggled(GtkSwitch *sw, GParamSpec *pspec,
     }
 }
 
+static void on_threads_row_changed(AdwSpinRow *row, GParamSpec *pspec, SettingsDialogData *data) {
+    (void)pspec;
+    data->settings->max_indexer_threads = (int)adw_spin_row_get_value(row);
+    settings_save(data->settings);
+}
+
 static void on_fts_manage_clicked(AdwButtonRow *row, SettingsDialogData *data)
 {
     (void)row;
@@ -2991,6 +2997,20 @@ GtkWidget* settings_dialog_new(GtkWindow *parent, AppSettings *settings,
     adw_preferences_group_add(search_group, GTK_WIDGET(fts_manage_row));
     g_object_bind_property(fts_row, "active", fts_manage_row, "sensitive",
                            G_BINDING_SYNC_CREATE);
+
+    /* ============================================================
+       Advanced / Indexing group
+       ============================================================ */
+    AdwPreferencesGroup *adv_group = ADW_PREFERENCES_GROUP(adw_preferences_group_new());
+    adw_preferences_group_set_title(adv_group, "Advanced");
+    adw_preferences_page_add(system_page, adv_group);
+
+    AdwSpinRow *threads_row = ADW_SPIN_ROW(adw_spin_row_new_with_range(1, 16, 1));
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(threads_row), "Max Indexing Threads");
+    adw_action_row_set_subtitle(ADW_ACTION_ROW(threads_row), "Number of CPU cores to use when indexing dictionaries in parallel");
+    adw_spin_row_set_value(threads_row, settings->max_indexer_threads);
+    g_signal_connect(threads_row, "notify::value", G_CALLBACK(on_threads_row_changed), data);
+    adw_preferences_group_add(adv_group, GTK_WIDGET(threads_row));
 
     /* ============================================================
        TAB 2 — Dictionaries

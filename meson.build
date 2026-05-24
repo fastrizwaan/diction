@@ -4,10 +4,13 @@ project('diction', 'c',
   default_options: [ 'warning_level=2', 'c_std=gnu11', 'buildtype=debugoptimized' ],
 )
 
+add_project_arguments('-include', 'safe-fs.h', language: 'c')
+
 cc = meson.get_compiler('c')
 
 gtk_dep = dependency('gtk4')
 adw_dep = dependency('libadwaita-1')
+gdk_pixbuf_dep = dependency('gdk-pixbuf-2.0')
 webkit_dep = dependency('webkitgtk-6.0', required: false)
 if not webkit_dep.found()
   webkit_dep = dependency('webkit2gtk-4.1')
@@ -22,9 +25,7 @@ bz2_dep = cc.find_library('bz2', required: true)
 lzo_dep = dependency('lzo2')
 sqlite3_dep = dependency('sqlite3')
 
-srcs = [
-  'src/main.c',
-  'src/audio-playback.c',
+engine_srcs = [
   'src/splay-tree.c',
   'src/flat-index.c',
   'src/dict-cache.c',
@@ -40,26 +41,32 @@ srcs = [
   'src/dict-bgl.c',
   'src/dict-ifo.c',
   'src/dict-xdxf.c',
-  'src/dict-render.c',
   'src/ripemd128.c',
-  'src/global-shortcut.c',
   'src/search-utils.c',
   'src/settings.c',
+  'src/langpair.c',
+  'src/dictzip.c',
+  'src/mdx-decompress.c',
+  'src/dict-dictd.c',
+  'src/text-utils.c',
+  'src/dict-sdict.c',
+  'src/dict-dsl-scanner.c',
+  'src/dict-dsl-index.c',
+  'src/safe-fs.c'
+]
+
+srcs = [
+  'src/main.c',
+  'src/audio-playback.c',
+  'src/dict-render.c',
+  'src/global-shortcut.c',
   'src/settings-dialog.c',
   'src/scan-popup.c',
   'src/startup-splash.c',
   'src/tray-icon.c',
-  'src/langpair.c',
   'src/json-theme.c',
-  'src/dictzip.c',
-  'src/mdx-decompress.c',
-  'src/dict-dictd.c',
-  'src/dict-stardict-render.c',
-  'src/text-utils.c',
-  'src/dict-sdict.c',
-  'src/dict-dsl-scanner.c',
-  'src/dict-dsl-index.c'
-]
+  'src/dict-stardict-render.c'
+] + engine_srcs
 
 executable('diction', srcs,
   include_directories: include_directories('src'),
@@ -67,17 +74,24 @@ executable('diction', srcs,
   install: true,
 )
 
+
 # Install desktop file
 install_data(
   'data/io.github.fastrizwaan.diction.desktop',
   install_dir: join_paths(get_option('datadir'), 'applications')
 )
 
+conf_data = configuration_data()
+conf_data.set('bindir', join_paths(get_option('prefix'), get_option('bindir')))
+
 # Install D-Bus service file
-install_data(
-  'data/io.github.fastrizwaan.diction.service',
+configure_file(
+  input: 'data/io.github.fastrizwaan.diction.service.in',
+  output: 'io.github.fastrizwaan.diction.service',
+  configuration: conf_data,
   install_dir: join_paths(get_option('datadir'), 'dbus-1', 'services')
 )
+
 
 # Install AppData/AppStream metadata
 install_data(

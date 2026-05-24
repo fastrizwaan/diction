@@ -13,6 +13,7 @@
 #include <string.h>
 #include <strings.h>
 #include <zlib.h>
+#include <inttypes.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -1764,6 +1765,7 @@ rebuild_cache:
     if (kbi_data) {
         const unsigned char *ip = kbi_data, *ie = kbi_data + kbi_dlen;
         while (ip < ie && valid_count < num_entries) {
+            if (cancel_flag && g_atomic_int_get(cancel_flag) != expected) break;
             if (ip + num_size > ie) break;
             ip += num_size;
             
@@ -1795,6 +1797,7 @@ rebuild_cache:
                 if (kb_data) {
                     const unsigned char *kp_ent = kb_data, *ke_ent = kb_data + kb_dlen;
                     while (kp_ent < ke_ent && valid_count < num_entries) {
+                        if (cancel_flag && g_atomic_int_get(cancel_flag) != expected) break;
                         if (kp_ent + num_size > ke_ent) break;
                         uint64_t id = read_num(&kp_ent, num_size);
                         char word[1024];
@@ -1867,6 +1870,16 @@ rebuild_cache:
         g_free(kbi_data);
     } 
     
+    if (cancel_flag && g_atomic_int_get(cancel_flag) != expected) {
+        dict_cache_builder_free(builder);
+        unlink(cache_path);
+        g_free(cache_path);
+        g_free(stylesheet); g_free(title); g_free(s_lang); g_free(t_lang);
+        g_free(source_dir); g_free(dict_encoding); g_free(tree_entries);
+        if (fh) fclose(fh);
+        return NULL;
+    }
+
     settings_scan_progress_notify(path, 40);
 
     fseek(fh, 4 + header_text_size + 4 + kbh_size + (is_v2?4:0) + kbi_comp + kb_data_size, SEEK_SET);

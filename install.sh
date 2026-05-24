@@ -10,8 +10,11 @@ echo "Building and installing Diction..."
 # Create build directory if it doesn't exist
 if [ ! -d "build" ]; then
     echo "Setting up build directory..."
-    meson setup build
+    meson setup build --prefix=/usr/local
 fi
+
+meson setup --wipe build
+
 
 # Recompile the project
 echo "Compiling Diction..."

@@ -35,6 +35,10 @@ typedef struct DictMmap {
     char *icon_path;
     ResourceReader *resource_reader; /* lazy ZIP/MDD resource access */
     void *mdx_ctx; /* MdxContext for on-the-fly definition extraction */
+    
+    gboolean is_xdxf;
+    int xdxf_standard;
+    int xdxf_lousy_format;
 } DictMmap;
 
 /* Load/mmap a dictionary. `cancel_flag` may be NULL; if non-NULL the
@@ -48,6 +52,7 @@ DictMmap* parse_slob_file(const char *path, volatile gint *cancel_flag, gint exp
 DictMmap* parse_xdxf_file(const char *path, volatile gint *cancel_flag, gint expected);
 DictMmap* parse_sdict_file(const char *path, volatile gint *cancel_flag, gint expected);
 const char* mdx_get_definition_on_the_fly(DictMmap *dict, const FlatTreeEntry *entry, size_t *out_len, char **out_to_free);
+const char* xdxf_get_definition_on_the_fly(DictMmap *dict, const FlatTreeEntry *entry, size_t *out_len, char **out_to_free);
 void mdx_free_context(void *ctx_ptr);
 void dict_mmap_close(DictMmap *dict);
 

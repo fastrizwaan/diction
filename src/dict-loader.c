@@ -89,6 +89,15 @@ static const char* dict_get_definition_raw(DictMmap *dict, const FlatTreeEntry *
     if (out_len) *out_len = entry->d_len;
     if (out_to_free) *out_to_free = NULL;
 
+    /* Moved up: on-the-fly extractors must intercept before source_mmap returns raw data */
+    if (dict->mdx_ctx) {
+        return mdx_get_definition_on_the_fly(dict, entry, out_len, out_to_free);
+    }
+
+    if (dict->is_xdxf) {
+        return xdxf_get_definition_on_the_fly(dict, entry, out_len, out_to_free);
+    }
+
     /* 1. Direct memory map read for plain source-backed dicts (e.g., .dsl, .dict) */
     if (dict->source_mmap) {
         if (dict->stardict_sts) {
@@ -152,10 +161,6 @@ static const char* dict_get_definition_raw(DictMmap *dict, const FlatTreeEntry *
         if (out_len) *out_len = raw_len;
         if (out_to_free) *out_to_free = (char*)raw;
         return (char*)raw;
-    }
-
-    if (dict->mdx_ctx) {
-        return mdx_get_definition_on_the_fly(dict, entry, out_len, out_to_free);
     }
 
     /* 3. Chunked self-contained format (DCMP) */

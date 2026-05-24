@@ -227,8 +227,7 @@ void dsl_parse_header_internal(const char *path, char **out_name, char **out_sou
 
 /* New signature accepts cancel flag and expected generation for cooperative cancellation. */
 DictMmap* dict_mmap_open(const char *path, volatile gint *cancel_flag, gint expected) {
-    (void)cancel_flag;
-    (void)expected;
+    if (cancel_flag && g_atomic_int_get(cancel_flag) != expected) return NULL;
     if (!path) return NULL;
     size_t path_len = strlen(path);
     if (path_len > 4 && strcasecmp(path + path_len - 4, ".mdx") == 0) {
@@ -287,7 +286,7 @@ DictMmap* dict_mmap_open(const char *path, volatile gint *cancel_flag, gint expe
 
     if (!hw_valid) {
         printf("[DSL] Building SQLite headword index for %s\n", path);
-        if (!build_dsl_index_only_cache(path)) {
+        if (!build_dsl_index_only_cache(path, cancel_flag, expected)) {
             fprintf(stderr, "[DSL] Failed to build headword index for %s\n", path);
             const char *sources[] = { path };
             dict_cache_mark_failure(hw_path, sources, 1);

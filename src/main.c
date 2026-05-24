@@ -3941,14 +3941,19 @@ static void on_search_changed(GtkEditable *entry, gpointer user_data) {
 
 static gboolean on_random_word_found_idle(gpointer user_data);
 
+static gboolean random_word_in_progress = FALSE;
+
 typedef struct {
     char *word;
     char *clean_hw;
+    char *dict_name;
 } RandomWordIdleData;
 
 static gboolean on_random_word_found_idle(gpointer user_data) {
+    random_word_in_progress = FALSE;
     RandomWordIdleData *id = user_data;
     if (id->clean_hw) {
+        g_print("[DEBUG] Random Word: '%s' from dictionary: '%s'\n", id->clean_hw, id->dict_name ? id->dict_name : "Unknown");
         gtk_editable_set_text(GTK_EDITABLE(search_entry), id->clean_hw);
         if (search_button_label) {
             gtk_label_set_text(GTK_LABEL(search_button_label), id->clean_hw);
@@ -3958,6 +3963,7 @@ static gboolean on_random_word_found_idle(gpointer user_data) {
     }
     g_free(id->word);
     g_free(id->clean_hw);
+    g_free(id->dict_name);
     g_free(id);
     return G_SOURCE_REMOVE;
 }
@@ -4022,9 +4028,14 @@ static gpointer random_word_thread_worker(gpointer data) {
             RandomWordIdleData *id = g_new0(RandomWordIdleData, 1);
             id->word = found_word;
             id->clean_hw = clean_hw;
+            id->dict_name = g_strdup(target_e->name);
             g_idle_add(on_random_word_found_idle, id);
+        } else {
+            g_idle_add(on_random_word_found_idle, g_new0(RandomWordIdleData, 1));
         }
         dict_entry_unref(target_e);
+    } else {
+        g_idle_add(on_random_word_found_idle, g_new0(RandomWordIdleData, 1));
     }
 
     return NULL;
@@ -4033,6 +4044,8 @@ static gpointer random_word_thread_worker(gpointer data) {
 static void on_random_clicked(GtkButton *btn, gpointer user_data) {
     (void)btn; (void)user_data;
     if (!all_dicts) return;
+    if (random_word_in_progress) return;
+    random_word_in_progress = TRUE;
     /* Launch background thread to avoid UI freeze during I/O */
     g_thread_unref(g_thread_new("random-word-picker", random_word_thread_worker, NULL));
 }
@@ -5138,6 +5151,10 @@ static void collect_dictionary_candidate_paths_with_find(const char *dirpath,
 
     gchar **argv = (gchar **)g_ptr_array_free(argv_array, FALSE);
     
+    char *cmd_joined = g_strjoinv(" ", argv);
+    fprintf(stderr, "DEBUG: executing %s\n", cmd_joined);
+    g_free(cmd_joined);
+    
     GError *err = NULL;
     GSubprocessLauncher *launcher = g_subprocess_launcher_new(G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_SILENCE);
     GSubprocess *sub = g_subprocess_launcher_spawnv(launcher, (const gchar * const *)argv, &err);
@@ -5583,9 +5600,9 @@ static gpointer dict_load_thread(gpointer user_data) {
         volatile gint completed_count = 0;
 
         /* Parallelize dictionary loading to improve startup performance */
-        guint n_workers = (guint)g_get_num_processors();
-        if (n_workers < 2) n_workers = 2;
-        if (n_workers > 8) n_workers = 8; /* Cap at 8 to avoid excessive I/O pressure */
+        guint n_workers = (guint)app_settings->max_indexer_threads;
+        if (n_workers < 1) n_workers = 1;
+        if (n_workers > 16) n_workers = 16;
         GError *pool_error = NULL;
         GThreadPool *pool = g_thread_pool_new(load_one_dict_worker, NULL, (gint)n_workers, FALSE, &pool_error);
 
@@ -6645,30 +6662,69 @@ static int on_command_line(GApplication *app, GApplicationCommandLine *cmdline, 
     (void)user_data;
     gchar **cmd_argv = g_application_command_line_get_arguments(cmdline, NULL);
     gboolean trigger_scan = FALSE;
+    gboolean trigger_search = FALSE;
+    char *scan_word = NULL;
+    char *search_word = NULL;
 
     for (int i = 1; cmd_argv[i] != NULL; i++) {
         if (g_strcmp0(cmd_argv[i], "--scan") == 0) {
             trigger_scan = TRUE;
+            if (cmd_argv[i+1] != NULL && !g_str_has_prefix(cmd_argv[i+1], "--")) {
+                scan_word = g_strdup(cmd_argv[i+1]);
+                i++; // Skip the word
+            }
+        } else if (g_strcmp0(cmd_argv[i], "--search") == 0) {
+            trigger_search = TRUE;
+            if (cmd_argv[i+1] != NULL && !g_str_has_prefix(cmd_argv[i+1], "--")) {
+                search_word = g_strdup(cmd_argv[i+1]);
+                i++; // Skip the word
+            }
         }
     }
     g_strfreev(cmd_argv);
 
     if (!main_window) {
         g_application_activate(app);
-    } else if (!trigger_scan) {
+    } else if (!trigger_scan && !trigger_search) {
         app_show_window();
     }
 
     if (trigger_scan) {
         prevent_startup_random_word = TRUE;
         startup_random_word_pending = FALSE;
-        scan_popup_trigger_manual();
+        if (scan_word) {
+            scan_popup_show_for_word(scan_word);
+            g_free(scan_word);
+        } else {
+            scan_popup_trigger_manual();
+        }
+    } else if (trigger_search) {
+        prevent_startup_random_word = TRUE;
+        startup_random_word_pending = FALSE;
+        app_show_window();
+        if (search_word && search_entry) {
+            gtk_editable_set_text(GTK_EDITABLE(search_entry), search_word);
+            g_free(search_word);
+        }
     }
 
     return 0;
 }
 
+static GLogWriterOutput custom_log_writer(GLogLevelFlags log_level, const GLogField *fields, gsize n_fields, gpointer user_data) {
+    for (gsize i = 0; i < n_fields; i++) {
+        if (g_strcmp0(fields[i].key, "MESSAGE") == 0) {
+            const char *msg = fields[i].value;
+            if (msg && g_str_has_prefix(msg, "Error releasing name") && strstr(msg, "Sandboxed.WebProcess")) {
+                return G_LOG_WRITER_HANDLED;
+            }
+        }
+    }
+    return g_log_writer_default(log_level, fields, n_fields, user_data);
+}
+
 int main(int argc, char *argv[]) {
+    g_log_set_writer_func(custom_log_writer, NULL, NULL);
     // Disable compositing to fix rendering issues
     setenv("WEBKIT_DISABLE_COMPOSITING_MODE", "1", 1);
     // Disable AT-SPI bridge to prevent GTK4 accessibility/tooltip crashes
@@ -6696,6 +6752,9 @@ int main(int argc, char *argv[]) {
             force_cli = TRUE;
         } else if (g_strcmp0(argv[i], "--scan") == 0) {
             trigger_scan_cli = TRUE;
+            if (i + 1 < argc && argv[i+1][0] != '-') i++; // skip the word so it's not cli_query
+        } else if (g_strcmp0(argv[i], "--search") == 0) {
+            if (i + 1 < argc && argv[i+1][0] != '-') i++; // skip the word so it's not cli_query
         } else if (g_strcmp0(argv[i], "--cli") == 0) {
             force_cli = TRUE;
         } else if (argv[i][0] == '-') {

@@ -1006,6 +1006,7 @@ AppSettings* settings_load(void) {
     settings->scan_modifier_key = g_strdup("none");
     settings->global_shortcut = g_strdup("");
     settings->fts_enabled = FALSE;
+    settings->max_indexer_threads = 2;
     g_mutex_init(&settings->mutex);
 
     char *path = get_settings_file_path();
@@ -1116,6 +1117,11 @@ AppSettings* settings_load(void) {
     }
     if (json_object_has_member(obj, "fts_enabled"))
         settings->fts_enabled = json_object_get_boolean_member(obj, "fts_enabled");
+    if (json_object_has_member(obj, "max_indexer_threads")) {
+        settings->max_indexer_threads = (int)json_object_get_int_member(obj, "max_indexer_threads");
+        if (settings->max_indexer_threads < 1) settings->max_indexer_threads = 1;
+        if (settings->max_indexer_threads > 16) settings->max_indexer_threads = 16;
+    }
 
     // Dictionary directories
     JsonArray *dirs = json_object_has_member(obj, "dictionary_dirs")
@@ -1244,6 +1250,7 @@ void settings_save(AppSettings *settings) {
     json_object_set_string_member(root, "global_shortcut",
         settings->global_shortcut ? settings->global_shortcut : "");
     json_object_set_boolean_member(root, "fts_enabled", settings->fts_enabled);
+    json_object_set_int_member(root, "max_indexer_threads", settings->max_indexer_threads);
 
     // Dictionary directories
     JsonArray *dirs = json_array_new();

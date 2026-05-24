@@ -1,7 +1,9 @@
 #pragma once
 
+#ifndef DICTION_NO_GTK
 #include <gtk/gtk.h>
 #include <adwaita.h>
+#endif
 #include <json-glib/json-glib.h>
 #include "dict-loader.h"
 
@@ -42,6 +44,7 @@ typedef struct {
     char    *scan_modifier_key;   // "none", "ctrl", "alt", "meta"
     char    *global_shortcut;     // Shortcut key string (e.g. "<Ctrl>F12")
     gboolean fts_enabled;         // Enable persistent SQLite FTS index
+    int      max_indexer_threads; // Max threads for parallel dictionary indexing
     GMutex   mutex;
 } AppSettings;
 
@@ -50,6 +53,7 @@ AppSettings* settings_load(void);
 void settings_save(AppSettings *settings);
 void settings_free(AppSettings *settings);
 
+#ifndef DICTION_NO_GTK
 // Settings dialog
 GtkWidget* settings_dialog_new(GtkWindow *parent, AppSettings *settings,
                                AdwStyleManager *style_manager,
@@ -59,6 +63,7 @@ GtkWidget* settings_dialog_new(GtkWindow *parent, AppSettings *settings,
 void settings_dialog_set_font_callback(GtkWidget *dialog_widget,
                                        void (*cb)(void *), void *user_data);
 void settings_dialog_run(GtkWidget *dialog);
+#endif
 
 // Helper functions
 void settings_add_directory(AppSettings *settings, const char *path);

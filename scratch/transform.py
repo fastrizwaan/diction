@@ -1,4 +1,7 @@
+import os, sys
 
+def generate_new_c():
+    code = """
 #include "dict-mmap.h"
 #include "flat-index.h"
 #include "dict-cache.h"
@@ -27,7 +30,7 @@ static int ends_with_ci(const char *s, const char *suffix) {
     return strcasecmp(s + sl - xl, suffix) == 0;
 }
 
-static char* extract_xdxf_xml_from_archive(const char *archive_path, const char *target_dir, volatile gint *cancel_flag, gint expected) {
+static char* extract_xdxf_xml_from_archive(const char *archive_path, const char *target_dir) {
     settings_scan_progress_notify(archive_path, 5);
     struct archive *a = archive_read_new();
     struct archive_entry *entry;
@@ -44,9 +47,6 @@ static char* extract_xdxf_xml_from_archive(const char *archive_path, const char 
     g_mkdir_with_parents(target_dir, 0755);
 
     while (archive_read_next_header(a, &entry) == ARCHIVE_OK) {
-        if (cancel_flag && g_atomic_int_get(cancel_flag) != expected) {
-            break;
-        }
         const char *name = archive_entry_pathname(entry);
         if (!name) {
             archive_read_data_skip(a);
@@ -71,20 +71,7 @@ static char* extract_xdxf_xml_from_archive(const char *archive_path, const char 
             }
             int fd = open(extracted_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
             if (fd >= 0) {
-                char buffer[32768];
-                int bytes_read;
-                while ((bytes_read = archive_read_data(a, buffer, sizeof(buffer))) > 0) {
-                    if (cancel_flag && g_atomic_int_get(cancel_flag) != expected) {
-                        close(fd);
-                        unlink(extracted_path);
-                        g_free(extracted_path);
-                        if (first_xdxf_path) { g_free(first_xdxf_path); first_xdxf_path = NULL; }
-                        archive_read_close(a);
-                        archive_read_free(a);
-                        return NULL;
-                    }
-                    write(fd, buffer, bytes_read);
-                }
+                archive_read_data_into_fd(a, fd);
                 close(fd);
                 settings_scan_progress_notify(archive_path, 15);
             }
@@ -100,7 +87,7 @@ static char* extract_xdxf_xml_from_archive(const char *archive_path, const char 
     return first_xdxf_path;
 }
 
-static char* decompress_xdxf_dz(const char *dz_path, const char *temp_dir, volatile gint *cancel_flag, gint expected) {
+static char* decompress_xdxf_dz(const char *dz_path, const char *temp_dir) {
     gzFile gz = gzopen(dz_path, "rb");
     if (!gz) return NULL;
     settings_scan_progress_notify(dz_path, 5);
@@ -124,12 +111,6 @@ static char* decompress_xdxf_dz(const char *dz_path, const char *temp_dir, volat
 
     char buf[65536]; int n;
     while ((n = gzread(gz, buf, sizeof(buf))) > 0) {
-        if (cancel_flag && g_atomic_int_get(cancel_flag) != expected) {
-            fclose(out); gzclose(gz);
-            unlink(out_path);
-            g_free(out_path);
-            return NULL;
-        }
         fwrite(buf, 1, n, out);
     }
     fclose(out); gzclose(gz);
@@ -147,7 +128,7 @@ static int xdxf_detect_standard_from_file(const char *xml_path) {
     char sniff[8193];
     size_t n = fread(sniff, 1, sizeof(sniff) - 1, fp);
     fclose(fp);
-    sniff[n] = '\0';
+    sniff[n] = '\\0';
     if (g_strstr_len(sniff, (gssize)n, "xdxf_lousy.dtd") != NULL) {
         return XDXF_STANDARD_LOUSY;
     }
@@ -186,7 +167,7 @@ static gboolean xdxf_is_roman_marker_text(const char *text) {
     }
     if (p == start) return FALSE;
     while (*p && g_ascii_isspace(*p)) p++;
-    return (*p == '\0');
+    return (*p == '\\0');
 }
 
 static char *xdxf_collapse_whitespace(const char *text, gboolean trim_edges) {
@@ -203,7 +184,7 @@ static char *xdxf_collapse_whitespace(const char *text, gboolean trim_edges) {
         } else {
             char utf8[7] = {0};
             gint len = g_unichar_to_utf8(ch, utf8);
-            utf8[len] = '\0';
+            utf8[len] = '\\0';
             g_string_append(collapsed, utf8);
             in_ws = FALSE;
         }
@@ -265,7 +246,7 @@ const char* xdxf_get_definition_on_the_fly(DictMmap *dict, const FlatTreeEntry *
     int ar_lousy_format = dict->xdxf_lousy_format;
 
     // Start wrapper
-    g_string_append_printf(def_str, "<div class=\"dictionary-entry xdxf-ar %s %s\">",
+    g_string_append_printf(def_str, "<div class=\\"dictionary-entry xdxf-ar %s %s\\">",
                            xdxf_profile_class(dict->xdxf_standard),
                            xdxf_lousy_format_class(ar_lousy_format));
 
@@ -287,7 +268,7 @@ const char* xdxf_get_definition_on_the_fly(DictMmap *dict, const FlatTreeEntry *
                 // since we already wrote the opening div tag. This is okay for now.
             } else if (xmlStrEqual(inner_name, (const xmlChar*)"def")) {
                 pending_space = FALSE; has_inline_content = FALSE; def_nesting++;
-                g_string_append_printf(def_str, "<div class=\"xdxf-def xdxf-def-lvl-%d\">", def_nesting);
+                g_string_append_printf(def_str, "<div class=\\"xdxf-def xdxf-def-lvl-%d\\">", def_nesting);
             } else if (xmlStrEqual(inner_name, (const xmlChar*)"k")) {
                 int k_depth = xmlTextReaderDepth(reader);
                 while (xmlTextReaderRead(reader) == 1 && xmlTextReaderDepth(reader) > k_depth) {}
@@ -295,9 +276,9 @@ const char* xdxf_get_definition_on_the_fly(DictMmap *dict, const FlatTreeEntry *
                 xdxf_flush_pending_space(def_str, &pending_space, has_inline_content);
                 xmlChar *href_attr = xmlTextReaderGetAttribute(reader, (const xmlChar*)"href");
                 if (href_attr) {
-                    g_string_append_printf(def_str, "<a class=\"xdxf-a\" href=\"%s\">", (const char*)href_attr);
+                    g_string_append_printf(def_str, "<a class=\\"xdxf-a\\" href=\\"%s\\">", (const char*)href_attr);
                     xmlFree(href_attr);
-                } else g_string_append(def_str, "<a class=\"xdxf-a\">");
+                } else g_string_append(def_str, "<a class=\\"xdxf-a\\">");
                 has_inline_content = TRUE;
             } else if (xmlStrEqual(inner_name, (const xmlChar*)"b") || xmlStrEqual(inner_name, (const xmlChar*)"i") ||
                        xmlStrEqual(inner_name, (const xmlChar*)"u") || xmlStrEqual(inner_name, (const xmlChar*)"sub") ||
@@ -307,7 +288,7 @@ const char* xdxf_get_definition_on_the_fly(DictMmap *dict, const FlatTreeEntry *
                        xmlStrEqual(inner_name, (const xmlChar*)"span") || xmlStrEqual(inner_name, (const xmlChar*)"br") ||
                        xmlStrEqual(inner_name, (const xmlChar*)"hr") || xmlStrEqual(inner_name, (const xmlChar*)"blockquote")) {
                 xdxf_flush_pending_space(def_str, &pending_space, has_inline_content);
-                g_string_append_printf(def_str, "<%s class=\"xdxf-%s\">", (const char*)inner_name, (const char*)inner_name);
+                g_string_append_printf(def_str, "<%s class=\\"xdxf-%s\\">", (const char*)inner_name, (const char*)inner_name);
                 has_inline_content = TRUE;
             } else if (xmlStrEqual(inner_name, (const xmlChar*)"c")) {
                 xdxf_flush_pending_space(def_str, &pending_space, has_inline_content);
@@ -331,26 +312,26 @@ const char* xdxf_get_definition_on_the_fly(DictMmap *dict, const FlatTreeEntry *
                             }
                         }
                         if (is_numeric_marker) {
-                            g_string_append_printf(def_str, "<span class=\"xdxf-c xdxf-c-blue-num\" style=\"color: %s;\">", c_attr_str);
+                            g_string_append_printf(def_str, "<span class=\\"xdxf-c xdxf-c-blue-num\\" style=\\"color: %s;\\">", c_attr_str);
                         } else if (is_roman_marker) {
-                            if (seen_roman_section) g_string_append_printf(def_str, "<span class=\"xdxf-c xdxf-c-blue-roman xdxf-c-blue-roman-break\" style=\"color: %s;\">", c_attr_str);
-                            else g_string_append_printf(def_str, "<span class=\"xdxf-c xdxf-c-blue-roman\" style=\"color: %s;\">", c_attr_str);
+                            if (seen_roman_section) g_string_append_printf(def_str, "<span class=\\"xdxf-c xdxf-c-blue-roman xdxf-c-blue-roman-break\\" style=\\"color: %s;\\">", c_attr_str);
+                            else g_string_append_printf(def_str, "<span class=\\"xdxf-c xdxf-c-blue-roman\\" style=\\"color: %s;\\">", c_attr_str);
                             seen_roman_section = TRUE;
                         } else {
-                            g_string_append_printf(def_str, "<span class=\"xdxf-c\" style=\"color: %s;\">", c_attr_str);
+                            g_string_append_printf(def_str, "<span class=\\"xdxf-c\\" style=\\"color: %s;\\">", c_attr_str);
                         }
                     } else {
-                        g_string_append_printf(def_str, "<span class=\"xdxf-c\" style=\"color: %s;\">", c_attr_str);
+                        g_string_append_printf(def_str, "<span class=\\"xdxf-c\\" style=\\"color: %s;\\">", c_attr_str);
                     }
                     xmlFree(c_attr);
-                } else g_string_append(def_str, "<span class=\"xdxf-c\">");
+                } else g_string_append(def_str, "<span class=\\"xdxf-c\\">");
                 has_inline_content = TRUE;
             } else if (xmlStrEqual(inner_name, (const xmlChar*)"kref")) {
                 xdxf_flush_pending_space(def_str, &pending_space, has_inline_content);
                 xmlChar *k_attr = xmlTextReaderGetAttribute(reader, (const xmlChar*)"k");
                 if (k_attr) {
                     char *uri_attr = g_uri_escape_string((const char*)k_attr, NULL, TRUE);
-                    g_string_append_printf(def_str, "<a href=\"dict://%s\" class=\"xdxf-kref\">", uri_attr);
+                    g_string_append_printf(def_str, "<a href=\\"dict://%s\\" class=\\"xdxf-kref\\">", uri_attr);
                     g_free(uri_attr); xmlFree(k_attr);
                 } else {
                     if (xmlTextReaderExpand(reader) != NULL) {
@@ -358,19 +339,19 @@ const char* xdxf_get_definition_on_the_fly(DictMmap *dict, const FlatTreeEntry *
                         xmlChar *val = xmlNodeGetContent(node);
                         if (val) {
                             char *uri_word = g_uri_escape_string((const char*)val, NULL, TRUE);
-                            g_string_append_printf(def_str, "<a href=\"dict://%s\" class=\"xdxf-kref\">", uri_word);
+                            g_string_append_printf(def_str, "<a href=\\"dict://%s\\" class=\\"xdxf-kref\\">", uri_word);
                             g_free(uri_word); xmlFree(val);
-                        } else g_string_append(def_str, "<a href=\"dict://\" class=\"xdxf-kref\">");
-                    } else g_string_append(def_str, "<a href=\"dict://\" class=\"xdxf-kref\">");
+                        } else g_string_append(def_str, "<a href=\\"dict://\\" class=\\"xdxf-kref\\">");
+                    } else g_string_append(def_str, "<a href=\\"dict://\\" class=\\"xdxf-kref\\">");
                 }
                 has_inline_content = TRUE;
             } else if (xmlStrEqual(inner_name, (const xmlChar*)"iref")) {
                 xdxf_flush_pending_space(def_str, &pending_space, has_inline_content);
                 xmlChar *href = xmlTextReaderGetAttribute(reader, (const xmlChar*)"href");
                 if (href) {
-                    g_string_append_printf(def_str, "<a class=\"xdxf-iref\" href=\"%s\">", (const char*)href);
+                    g_string_append_printf(def_str, "<a class=\\"xdxf-iref\\" href=\\"%s\\">", (const char*)href);
                     xmlFree(href);
-                } else g_string_append(def_str, "<a class=\"xdxf-iref\">");
+                } else g_string_append(def_str, "<a class=\\"xdxf-iref\\">");
                 has_inline_content = TRUE;
             } else if (xmlStrEqual(inner_name, (const xmlChar*)"rref")) {
                 xdxf_flush_pending_space(def_str, &pending_space, has_inline_content);
@@ -379,16 +360,16 @@ const char* xdxf_get_definition_on_the_fly(DictMmap *dict, const FlatTreeEntry *
                 if (lctn) {
                     const char *l = (const char*)lctn;
                     if (g_str_has_suffix(l, ".ogg") || g_str_has_suffix(l, ".wav") || g_str_has_suffix(l, ".mp3") || g_str_has_suffix(l, ".opus")) {
-                        g_string_append_printf(def_str, "<a class=\"xdxf-rref xdxf-snd\" href=\"sound://%s\">🔊</a>", l);
+                        g_string_append_printf(def_str, "<a class=\\"xdxf-rref xdxf-snd\\" href=\\"sound://%s\\">🔊</a>", l);
                     } else {
-                        g_string_append_printf(def_str, "<img class=\"xdxf-rref xdxf-img\" src=\"%s\" />", l);
+                        g_string_append_printf(def_str, "<img class=\\"xdxf-rref xdxf-img\\" src=\\"%s\\" />", l);
                     }
                     xmlFree(lctn);
                 }
                 has_inline_content = TRUE; pending_space = TRUE;
             } else {
                 xdxf_flush_pending_space(def_str, &pending_space, has_inline_content);
-                g_string_append_printf(def_str, "<span class=\"xdxf-%s\">", (const char*)inner_name);
+                g_string_append_printf(def_str, "<span class=\\"xdxf-%s\\">", (const char*)inner_name);
                 has_inline_content = TRUE;
             }
         } else if (inner_type == XML_READER_TYPE_END_ELEMENT) {
@@ -461,6 +442,7 @@ static void extract_keys_and_add(const char *ar_start, size_t d_len, size_t d_of
 static void parse_xdxf_metadata_from_file(const char *xml_path, char **name, char **slang, char **tlang, int *lousy_format) {
     xmlTextReaderPtr reader = xmlReaderForFile(xml_path, NULL, XML_PARSE_HUGE);
     if (!reader) return;
+    int depth_limit = 2;
     while (xmlTextReaderRead(reader) == 1) {
         if (xmlTextReaderNodeType(reader) == XML_READER_TYPE_ELEMENT) {
             const xmlChar *n = xmlTextReaderConstLocalName(reader);
@@ -585,10 +567,10 @@ DictMmap* parse_xdxf_file(const char *path, volatile gint *cancel_flag, gint exp
 
     if (needs_build) {
         if (ends_with_ci(path, ".tar.bz2") || ends_with_ci(path, ".tar.gz") || ends_with_ci(path, ".tar.xz") || ends_with_ci(path, ".tgz") || ends_with_ci(path, ".zip")) {
-            xml_path = extract_xdxf_xml_from_archive(path, res_dir, cancel_flag, expected);
+            xml_path = extract_xdxf_xml_from_archive(path, res_dir);
         } else if (ends_with_ci(path, ".xdxf.dz")) {
             g_mkdir_with_parents(res_dir, 0755);
-            xml_path = decompress_xdxf_dz(path, res_dir, cancel_flag, expected);
+            xml_path = decompress_xdxf_dz(path, res_dir);
         } else {
             xml_path = g_strdup(path);
         }
@@ -599,10 +581,9 @@ DictMmap* parse_xdxf_file(const char *path, volatile gint *cancel_flag, gint exp
 
         if (ends_with_ci(xml_path, ".xdxf.dz")) {
             char *temp_dir = g_path_get_dirname(xml_path);
-            char *uncompressed_xml = decompress_xdxf_dz(xml_path, res_dir, cancel_flag, expected);
-            if (xml_path && g_strcmp0(xml_path, path) != 0) g_unlink(xml_path);
-            g_free(xml_path);
-            xml_path = uncompressed_xml;
+            char *new_xml_path = decompress_xdxf_dz(xml_path, temp_dir);
+            if (xml_path != path) { unlink(xml_path); g_free(xml_path); }
+            xml_path = new_xml_path;
             g_free(temp_dir);
         }
 
@@ -612,13 +593,11 @@ DictMmap* parse_xdxf_file(const char *path, volatile gint *cancel_flag, gint exp
 
         build_xdxf_index_only_cache(xml_path, path, hw_path, cancel_flag, expected);
 
-        if (xml_path && g_strcmp0(xml_path, path) != 0) {
+        if (xml_path != path) {
             // we extracted a temp xml, if it was just uncompressed locally, delete it, or keep it in res_dir
             if (!ends_with_ci(path, ".tar.bz2") && !ends_with_ci(path, ".tar.gz") && !ends_with_ci(path, ".tar.xz") && !ends_with_ci(path, ".zip") && !ends_with_ci(path, ".tgz")) {
                 unlink(xml_path); 
             }
-            g_free(xml_path);
-        } else if (xml_path) {
             g_free(xml_path);
         }
     }
@@ -664,3 +643,9 @@ DictMmap* parse_xdxf_file(const char *path, volatile gint *cancel_flag, gint exp
     settings_scan_progress_notify(path, 100);
     return dict;
 }
+"""
+    with open("/var/home/rizvan/diction/src/dict-xdxf.c", "w") as f:
+        f.write(code)
+
+if __name__ == "__main__":
+    generate_new_c()

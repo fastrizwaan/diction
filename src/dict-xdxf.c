@@ -180,13 +180,22 @@ static gboolean xdxf_is_roman_marker_text(const char *text) {
     if (!*p) return FALSE;
     const char *start = p;
     while (*p) {
-        char ch = g_ascii_toupper(*p);
+        char ch = *p;
         if (!(ch == 'I' || ch == 'V' || ch == 'X' || ch == 'L' || ch == 'C' || ch == 'D' || ch == 'M')) break;
         p++;
     }
     if (p == start) return FALSE;
     while (*p && g_ascii_isspace(*p)) p++;
     return (*p == '\0');
+}
+
+static gboolean xdxf_is_letter_marker_text(const char *text) {
+    if (!text) return FALSE;
+    const char *p = text;
+    while (*p && g_ascii_isspace(*p)) p++;
+    if (!g_ascii_isalpha(*p)) return FALSE;
+    p++;
+    return (*p == '.');
 }
 
 static char *xdxf_collapse_whitespace(const char *text, gboolean trim_edges) {
@@ -216,16 +225,24 @@ static char *xdxf_collapse_whitespace(const char *text, gboolean trim_edges) {
     return g_string_free(collapsed, FALSE);
 }
 
-static void xdxf_append_collapsed_escaped_text(GString *out, const char *text, gboolean trim_edges) {
+static void xdxf_append_escaped_text(GString *out, const char *text, gboolean trim_edges, gboolean preserve_ws) {
     if (!out || !text || !*text) return;
-    char *collapsed = xdxf_collapse_whitespace(text, trim_edges);
-    if (!collapsed || !*collapsed) { g_free(collapsed); return; }
-    if (out->len == 0) g_strchug(collapsed);
-    else if (g_ascii_isspace(out->str[out->len - 1])) g_strchug(collapsed);
-    if (!*collapsed) { g_free(collapsed); return; }
-    char *escaped = g_markup_escape_text(collapsed, -1);
+    char *processed = NULL;
+    if (preserve_ws) {
+        processed = g_strdup(text);
+        if (trim_edges) g_strstrip(processed);
+    } else {
+        processed = xdxf_collapse_whitespace(text, trim_edges);
+    }
+    if (!processed || !*processed) { g_free(processed); return; }
+    if (!preserve_ws) {
+        if (out->len == 0) g_strchug(processed);
+        else if (g_ascii_isspace(out->str[out->len - 1])) g_strchug(processed);
+    }
+    if (!*processed) { g_free(processed); return; }
+    char *escaped = g_markup_escape_text(processed, -1);
     g_string_append(out, escaped);
-    g_free(escaped); g_free(collapsed);
+    g_free(escaped); g_free(processed);
 }
 
 static void xdxf_append_space_if_needed(GString *out) {
@@ -234,9 +251,13 @@ static void xdxf_append_space_if_needed(GString *out) {
     g_string_append_c(out, ' ');
 }
 
-static void xdxf_flush_pending_space(GString *out, gboolean *pending_space, gboolean has_inline_content) {
+static void xdxf_flush_pending_space(GString *out, gboolean *pending_space, gboolean has_inline_content, gboolean preserve_ws) {
     if (!pending_space || !*pending_space) return;
-    if (has_inline_content) xdxf_append_space_if_needed(out);
+    if (preserve_ws) {
+        g_string_append_c(out, ' '); // just flush a single space if pending, though preserve_ws usually doesn't have pending spaces.
+    } else {
+        if (has_inline_content) xdxf_append_space_if_needed(out);
+    }
     *pending_space = FALSE;
 }
 
@@ -261,8 +282,9 @@ const char* xdxf_get_definition_on_the_fly(DictMmap *dict, const FlatTreeEntry *
     int def_nesting = 0;
     gboolean pending_space = FALSE;
     gboolean has_inline_content = FALSE;
-    gboolean seen_roman_section = FALSE;
+    gboolean in_rref = FALSE;
     int ar_lousy_format = dict->xdxf_lousy_format;
+    gboolean apply_special_formatting = (dict->xdxf_standard == XDXF_STANDARD_LOUSY && ar_lousy_format == XDXF_LOUSY_FORMAT_VISUAL);
 
     // Start wrapper
     g_string_append_printf(def_str, "<div class=\"dictionary-entry xdxf-ar %s %s\">",
@@ -292,7 +314,7 @@ const char* xdxf_get_definition_on_the_fly(DictMmap *dict, const FlatTreeEntry *
                 int k_depth = xmlTextReaderDepth(reader);
                 while (xmlTextReaderRead(reader) == 1 && xmlTextReaderDepth(reader) > k_depth) {}
             } else if (xmlStrEqual(inner_name, (const xmlChar*)"a")) {
-                xdxf_flush_pending_space(def_str, &pending_space, has_inline_content);
+                xdxf_flush_pending_space(def_str, &pending_space, has_inline_content, apply_special_formatting);
                 xmlChar *href_attr = xmlTextReaderGetAttribute(reader, (const xmlChar*)"href");
                 if (href_attr) {
                     g_string_append_printf(def_str, "<a class=\"xdxf-a\" href=\"%s\">", (const char*)href_attr);
@@ -306,36 +328,34 @@ const char* xdxf_get_definition_on_the_fly(DictMmap *dict, const FlatTreeEntry *
                        xmlStrEqual(inner_name, (const xmlChar*)"p") || xmlStrEqual(inner_name, (const xmlChar*)"div") ||
                        xmlStrEqual(inner_name, (const xmlChar*)"span") || xmlStrEqual(inner_name, (const xmlChar*)"br") ||
                        xmlStrEqual(inner_name, (const xmlChar*)"hr") || xmlStrEqual(inner_name, (const xmlChar*)"blockquote")) {
-                xdxf_flush_pending_space(def_str, &pending_space, has_inline_content);
+                xdxf_flush_pending_space(def_str, &pending_space, has_inline_content, apply_special_formatting);
                 g_string_append_printf(def_str, "<%s class=\"xdxf-%s\">", (const char*)inner_name, (const char*)inner_name);
                 has_inline_content = TRUE;
             } else if (xmlStrEqual(inner_name, (const xmlChar*)"c")) {
-                xdxf_flush_pending_space(def_str, &pending_space, has_inline_content);
+                xdxf_flush_pending_space(def_str, &pending_space, has_inline_content, apply_special_formatting);
                 xmlChar *c_attr = xmlTextReaderGetAttribute(reader, (const xmlChar*)"c");
                 if (c_attr) {
                     const char *c_attr_str = (const char*)c_attr;
-                    gboolean apply_special_formatting = (dict->xdxf_standard == XDXF_STANDARD_LOUSY && ar_lousy_format == XDXF_LOUSY_FORMAT_VISUAL);
                     if (apply_special_formatting) {
-                        gboolean is_blue = (g_ascii_strcasecmp(c_attr_str, "blue") == 0);
                         gboolean is_numeric_marker = FALSE;
                         gboolean is_roman_marker = FALSE;
-                        if (is_blue) {
-                            xmlNodePtr c_node = xmlTextReaderExpand(reader);
-                            if (c_node) {
-                                xmlChar *c_val = xmlNodeGetContent(c_node);
-                                if (c_val) {
-                                    is_numeric_marker = xdxf_is_number_marker_text((const char*)c_val);
-                                    if (!is_numeric_marker) is_roman_marker = xdxf_is_roman_marker_text((const char*)c_val);
-                                    xmlFree(c_val);
-                                }
+                        gboolean is_letter_marker = FALSE;
+                        xmlNodePtr c_node = xmlTextReaderExpand(reader);
+                        if (c_node) {
+                            xmlChar *c_val = xmlNodeGetContent(c_node);
+                            if (c_val) {
+                                is_numeric_marker = xdxf_is_number_marker_text((const char*)c_val);
+                                if (!is_numeric_marker) is_roman_marker = xdxf_is_roman_marker_text((const char*)c_val);
+                                if (!is_numeric_marker && !is_roman_marker) is_letter_marker = xdxf_is_letter_marker_text((const char*)c_val);
+                                xmlFree(c_val);
                             }
                         }
                         if (is_numeric_marker) {
-                            g_string_append_printf(def_str, "<span class=\"xdxf-c xdxf-c-blue-num\" style=\"color: %s;\">", c_attr_str);
+                            g_string_append_printf(def_str, "<span class=\"xdxf-c xdxf-c-num\" style=\"color: %s;\">", c_attr_str);
                         } else if (is_roman_marker) {
-                            if (seen_roman_section) g_string_append_printf(def_str, "<span class=\"xdxf-c xdxf-c-blue-roman xdxf-c-blue-roman-break\" style=\"color: %s;\">", c_attr_str);
-                            else g_string_append_printf(def_str, "<span class=\"xdxf-c xdxf-c-blue-roman\" style=\"color: %s;\">", c_attr_str);
-                            seen_roman_section = TRUE;
+                            g_string_append_printf(def_str, "<span class=\"xdxf-c xdxf-c-roman\" style=\"color: %s;\">", c_attr_str);
+                        } else if (is_letter_marker) {
+                            g_string_append_printf(def_str, "<span class=\"xdxf-c xdxf-c-letter\" style=\"color: %s;\">", c_attr_str);
                         } else {
                             g_string_append_printf(def_str, "<span class=\"xdxf-c\" style=\"color: %s;\">", c_attr_str);
                         }
@@ -346,7 +366,7 @@ const char* xdxf_get_definition_on_the_fly(DictMmap *dict, const FlatTreeEntry *
                 } else g_string_append(def_str, "<span class=\"xdxf-c\">");
                 has_inline_content = TRUE;
             } else if (xmlStrEqual(inner_name, (const xmlChar*)"kref")) {
-                xdxf_flush_pending_space(def_str, &pending_space, has_inline_content);
+                xdxf_flush_pending_space(def_str, &pending_space, has_inline_content, apply_special_formatting);
                 xmlChar *k_attr = xmlTextReaderGetAttribute(reader, (const xmlChar*)"k");
                 if (k_attr) {
                     char *uri_attr = g_uri_escape_string((const char*)k_attr, NULL, TRUE);
@@ -365,7 +385,7 @@ const char* xdxf_get_definition_on_the_fly(DictMmap *dict, const FlatTreeEntry *
                 }
                 has_inline_content = TRUE;
             } else if (xmlStrEqual(inner_name, (const xmlChar*)"iref")) {
-                xdxf_flush_pending_space(def_str, &pending_space, has_inline_content);
+                xdxf_flush_pending_space(def_str, &pending_space, has_inline_content, apply_special_formatting);
                 xmlChar *href = xmlTextReaderGetAttribute(reader, (const xmlChar*)"href");
                 if (href) {
                     g_string_append_printf(def_str, "<a class=\"xdxf-iref\" href=\"%s\">", (const char*)href);
@@ -373,7 +393,7 @@ const char* xdxf_get_definition_on_the_fly(DictMmap *dict, const FlatTreeEntry *
                 } else g_string_append(def_str, "<a class=\"xdxf-iref\">");
                 has_inline_content = TRUE;
             } else if (xmlStrEqual(inner_name, (const xmlChar*)"rref")) {
-                xdxf_flush_pending_space(def_str, &pending_space, has_inline_content);
+                xdxf_flush_pending_space(def_str, &pending_space, has_inline_content, apply_special_formatting);
                 if (has_inline_content) xdxf_append_space_if_needed(def_str);
                 xmlChar *lctn = xmlTextReaderGetAttribute(reader, (const xmlChar*)"lctn");
                 if (lctn) {
@@ -384,10 +404,16 @@ const char* xdxf_get_definition_on_the_fly(DictMmap *dict, const FlatTreeEntry *
                         g_string_append_printf(def_str, "<img class=\"xdxf-rref xdxf-img\" src=\"%s\" />", l);
                     }
                     xmlFree(lctn);
+                } else {
+                    in_rref = TRUE;
                 }
                 has_inline_content = TRUE; pending_space = TRUE;
+            } else if (xmlStrEqual(inner_name, (const xmlChar*)"co")) {
+                xdxf_flush_pending_space(def_str, &pending_space, has_inline_content, apply_special_formatting);
+                g_string_append(def_str, "<span class=\"xdxf-co\">");
+                has_inline_content = TRUE;
             } else {
-                xdxf_flush_pending_space(def_str, &pending_space, has_inline_content);
+                xdxf_flush_pending_space(def_str, &pending_space, has_inline_content, apply_special_formatting);
                 g_string_append_printf(def_str, "<span class=\"xdxf-%s\">", (const char*)inner_name);
                 has_inline_content = TRUE;
             }
@@ -404,7 +430,11 @@ const char* xdxf_get_definition_on_the_fly(DictMmap *dict, const FlatTreeEntry *
                 g_string_append_printf(def_str, "</%s>", (const char*)inner_name);
             } else if (xmlStrEqual(inner_name, (const xmlChar*)"kref") || xmlStrEqual(inner_name, (const xmlChar*)"a") ||
                        xmlStrEqual(inner_name, (const xmlChar*)"iref") || xmlStrEqual(inner_name, (const xmlChar*)"rref")) {
-                g_string_append(def_str, "</a>");
+                if (xmlStrEqual(inner_name, (const xmlChar*)"rref")) {
+                    in_rref = FALSE;
+                } else {
+                    g_string_append(def_str, "</a>");
+                }
             } else if (xmlStrEqual(inner_name, (const xmlChar*)"def")) {
                 pending_space = FALSE; has_inline_content = FALSE;
                 g_string_append(def_str, "</div>");
@@ -415,12 +445,33 @@ const char* xdxf_get_definition_on_the_fly(DictMmap *dict, const FlatTreeEntry *
         } else if (inner_type == XML_READER_TYPE_TEXT || inner_type == XML_READER_TYPE_CDATA) {
             const xmlChar *value = xmlTextReaderConstValue(reader);
             if (value) {
-                xdxf_flush_pending_space(def_str, &pending_space, has_inline_content);
-                xdxf_append_collapsed_escaped_text(def_str, (const char*)value, FALSE);
-                has_inline_content = TRUE;
+                if (in_rref) {
+                    char *stripped = g_strstrip(g_strdup((const char*)value));
+                    if (g_str_has_suffix(stripped, ".ogg") || g_str_has_suffix(stripped, ".wav") || g_str_has_suffix(stripped, ".mp3") || g_str_has_suffix(stripped, ".opus")) {
+                        g_string_append_printf(def_str, "<a class=\"xdxf-rref xdxf-snd\" href=\"sound://%s\">🔊</a>", stripped);
+                    } else {
+                        g_string_append_printf(def_str, "<img class=\"xdxf-rref xdxf-img\" src=\"%s\" />", stripped);
+                    }
+                    g_free(stripped);
+                    has_inline_content = TRUE;
+                } else {
+                    xdxf_flush_pending_space(def_str, &pending_space, has_inline_content, apply_special_formatting);
+                    xdxf_append_escaped_text(def_str, (const char*)value, FALSE, apply_special_formatting);
+                    has_inline_content = TRUE;
+                }
             }
         } else if (inner_type == XML_READER_TYPE_WHITESPACE || inner_type == XML_READER_TYPE_SIGNIFICANT_WHITESPACE) {
-            pending_space = TRUE; continue;
+            if (apply_special_formatting) {
+                const xmlChar *value = xmlTextReaderConstValue(reader);
+                if (value) {
+                    char *escaped = g_markup_escape_text((const char*)value, -1);
+                    g_string_append(def_str, escaped);
+                    g_free(escaped);
+                }
+            } else {
+                pending_space = TRUE;
+            }
+            continue;
         }
     }
     g_string_append(def_str, "</div>");

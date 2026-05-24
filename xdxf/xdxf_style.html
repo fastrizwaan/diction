@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dictionary Entry: bridge</title>
+<style>
+  body {
+    background-color: #f8fafc;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    padding: 40px 20px;
+    margin: 0;
+    color: #1e293b;
+  }
+
+  .dict-entry {
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    max-width: 680px;
+    width: 100%;
+    margin: 0 auto;
+    padding: 32px;
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
+    line-height: 1.6;
+  }
+
+  .dict-word-title {
+    font-size: 32px;
+    font-weight: 800;
+    color: #0f172a;
+    margin: 0 0 20px 0;
+    border-bottom: 2px solid #f1f5f9;
+    padding-bottom: 12px;
+    letter-spacing: -0.5px;
+  }
+
+  .homograph-section {
+    margin-bottom: 28px;
+  }
+  
+  .homograph-section:not(:first-of-type) {
+    border-top: 1px solid #f1f5f9;
+    padding-top: 20px;
+  }
+
+  .homograph-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+
+  .roman-numeral {
+    font-size: 18px;
+    font-weight: 800;
+    color: #2f4f4f; /* darkslategray equivalent */
+  }
+
+  .pos-tag {
+    font-style: italic;
+    font-size: 15px;
+    color: #64748b;
+    font-weight: 600;
+  }
+
+  .inflection-block {
+    color: #475569;
+    font-size: 14px;
+    font-weight: 500;
+  }
+
+  .audio-btn {
+    background: #f1f5f9;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    padding: 2px 6px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #475569;
+    transition: background 0.2s;
+  }
+
+  .audio-btn:hover {
+    background: #e2e8f0;
+  }
+
+  .etymology-box {
+    background: #f8fafc;
+    border-left: 3px solid #cbd5e1;
+    padding: 10px 14px;
+    margin: 12px 0;
+    font-size: 14px;
+    color: #475569;
+    border-radius: 0 6px 6px 0;
+  }
+
+  .def-list {
+    margin-left: 8px;
+    margin-top: 12px;
+  }
+
+  .def-number {
+    font-weight: 800;
+    color: #2f4f4f;
+    margin-right: 4px;
+  }
+
+  .def-letter {
+    font-weight: 800;
+    color: #2f4f4f;
+    margin-right: 4px;
+  }
+
+  .sub-def-block {
+    margin-left: 20px;
+    margin-top: 4px;
+  }
+
+  .sub-def-row {
+    margin-bottom: 6px;
+  }
+
+  .teal-text {
+    color: #008080; /* teal equivalent */
+    font-style: italic;
+  }
+
+  .kref-link {
+    color: #2563eb;
+    text-decoration: none;
+    font-weight: 500;
+  }
+
+  .kref-link:hover {
+    text-decoration: underline;
+  }
+
+  .verbal-illustration {
+    display: block;
+    margin-left: 20px;
+    color: #475569;
+    font-size: 14px;
+    font-style: italic;
+    background: #f8fafc;
+    padding: 2px 8px;
+    border-radius: 4px;
+    width: fit-content;
+    margin-top: 4px;
+    border: 1px dashed #e2e8f0;
+  }
+
+  .runon-form {
+    margin-top: 16px;
+    padding-left: 8px;
+    font-size: 15px;
+  }
+
+  .runon-word {
+    font-weight: bold;
+    color: #0f172a;
+  }
+
+  .media-card {
+    margin-top: 18px;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 12px;
+    background-color: #fafafa;
+    display: flex;
+    gap: 16px;
+    align-items: center;
+  }
+
+  .media-placeholder {
+    width: 90px;
+    height: 60px;
+    background: #e2e8f0;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    color: #64748b;
+    font-weight: bold;
+    text-transform: uppercase;
+    flex-shrink: 0;
+  }
+
+  .media-caption {
+    font-size: 13px;
+    color: #475569;
+    line-height: 1.4;
+  }
+</style>
+</head>
+<body>
+
+<article class="dict-entry">
+  <h1 class="dict-word-title">bridge</h1>
+
+  <section class="homograph-section">
+    <div class="homograph-header">
+      <span class="roman-numeral">I.</span>
+      <button class="audio-btn" onclick="alert('Playing sound profile: bridge01.wav')">🔊 \ˈbrij\</button>
+      <span class="pos-tag">noun</span>
+    </div>
+
+    <div class="etymology-box">
+      <div><strong>Etymology:</strong> Middle English <i>brigge,</i> from Old English <i>brycg;</i> akin to Old High German <i>brucka</i> bridge, Old Church Slavic <i>brŭvŭno</i> beam</div>
+      <div style="margin-top: 4px;"><strong>Date:</strong> before 12th century</div>
+    </div>
+
+    <div class="def-list">
+      <div style="margin-bottom: 12px;">
+        <span class="def-number">1.</span>
+        <div class="sub-def-block">
+          <div class="sub-def-row"><span class="def-letter">a.</span> <b>:</b> a structure carrying a pathway or roadway over a depression or obstacle</div>
+          <div class="sub-def-row"><span class="def-letter">b.</span> <b>:</b> a time, place, or means of connection or transition</div>
+        </div>
+      </div>
+
+      <div style="margin-bottom: 12px;">
+        <span class="def-number">2.</span> <b>:</b> something resembling a bridge in form or function: as
+        <div class="sub-def-block">
+          <div class="sub-def-row"><span class="def-letter">a.</span> <b>:</b> the upper bony part of the nose; <span class="teal-text">also</span> <b>:</b> the part of a pair of glasses that rests upon it</div>
+          <div class="sub-def-row"><span class="def-letter">b.</span> <b>:</b> a piece raising the strings of a musical instrument — see <a class="kref-link" href="#">violin</a> illustration</div>
+          <div class="sub-def-row"><span class="def-letter">c.</span> <b>:</b> the forward part of a ship's superstructure from which the ship is navigated</div>
+          <div class="sub-def-row"><span class="def-letter">d.</span> <b>:</b> <a class="kref-link" href="#">gantry</a> 2b</div>
+          <div class="sub-def-row"><span class="def-letter">e.</span> <b>:</b> the hand as a rest for a billiards or pool cue; <span class="teal-text">also</span> <b>:</b> a device used as a cue rest</div>
+        </div>
+      </div>
+
+      <div style="margin-bottom: 12px;">
+        <span class="def-number">3.</span>
+        <div class="sub-def-block">
+          <div class="sub-def-row"><span class="def-letter">a.</span> <b>:</b> a musical passage linking two sections of a composition</div>
+          <div class="sub-def-row"><span class="def-letter">b.</span> <b>:</b> a partial denture anchored to adjacent teeth</div>
+          <div class="sub-def-row"><span class="def-letter">c.</span> <b>:</b> a connection (as an atom or group of atoms) that joins two different parts of a molecule (as opposite sides of a ring)</div>
+        </div>
+      </div>
+
+      <div>
+        <span class="def-number">4.</span> <b>:</b> an electrical instrument or network for measuring or comparing resistances, inductances, capacitances, or impedances by comparing the ratio of two opposing voltages to a known ratio
+      </div>
+    </div>
+
+    <div class="runon-form">
+      <span class="runon-word">• bridge·less</span>
+      <button class="audio-btn" onclick="alert('Playing sound profile: bridge02.wav')">🔊 \-ləs\</button>
+      <span class="pos-tag" style="font-size: 14px; margin-left: 4px;">adjective</span>
+    </div>
+
+    <div class="media-card">
+      <div class="media-placeholder">bridge.jpg</div>
+      <div class="media-caption">
+        <strong style="color: #0f172a;">bridge 1a:</strong> <i>1</i> beam, <i>2</i> truss, <i>3</i> arch, <i>4</i> suspension, <i>5</i> cable-stayed
+      </div>
+    </div>
+  </section>
+
+  <section class="homograph-section">
+    <div class="homograph-header">
+      <span class="roman-numeral">II.</span>
+      <span class="pos-tag">transitive verb</span>
+      <span class="inflection-block">(<b>bridged</b> ; <b>bridg·ing</b>)</span>
+    </div>
+    
+    <div style="font-size: 13px; color: #64748b; margin-bottom: 12px; padding-left: 2px;"><strong>Date:</strong> before 12th century</div>
+
+    <div class="def-list">
+      <div style="margin-bottom: 8px;">
+        <span class="def-number">1.</span> <b>:</b> to make a bridge over or across
+        <span class="verbal-illustration">bridge the gap</span>
+        <div class="sub-def-block" style="margin-top: 4px;"><span class="teal-text" style="margin-right: 4px;">also</span> <b>:</b> to join by a bridge</div>
+      </div>
+
+      <div>
+        <span class="def-number">2.</span> <b>:</b> to provide with a bridge
+      </div>
+    </div>
+
+    <div class="runon-form">
+      <span class="runon-word">• bridge·able</span>
+      <button class="audio-btn" onclick="alert('Playing sound profile: bridge03.wav')">🔊 \Ref\</button>
+      <span class="pos-tag" style="font-size: 14px; margin-left: 4px;">adjective</span>
+    </div>
+  </section>
+
+  <section class="homograph-section">
+    <div class="homograph-header">
+      <span class="roman-numeral">III.</span>
+      <span class="pos-tag">noun</span>
+    </div>
+
+    <div class="etymology-box">
+      <div><strong>Etymology:</strong> alteration of earlier <i>biritch,</i> of unknown origin</div>
+      <div style="margin-top: 4px;"><strong>Date:</strong> circa 1897</div>
+    </div>
+
+    <div class="def-list" style="padding-left: 2px;">
+      <b>:</b> any of various card games for usually four players in two partnerships that bid for the right to declare a trump suit, seek to win tricks equal to the final bid, and play with the hand of declarer's partner exposed and played by declarer; <span class="teal-text">especially</span> <b>:</b> <a class="kref-link" href="#">contract bridge</a>
+    </div>
+  </section>
+</article>
+
+</body>
+</html>

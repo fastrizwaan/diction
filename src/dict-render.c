@@ -2571,11 +2571,12 @@ char* dict_render_shared_styles(int dark_mode, const char *theme_name, const cha
     buf_append_str(&b, ".xdxf-profile-strict .xdxf-mrkd { background-color: ");
     buf_append_str(&b, dark_mode ? "#424242" : "#e0e0e0");
     buf_append_str(&b, "; padding: 0 2px; border-radius: 2px; }\n");
-    buf_append_str(&b, ".xdxf-profile-lousy.xdxf-format-logical .xdxf-dtrn { display: inline; color: inherit !important; font-weight: inherit; }\n");
+    buf_append_str(&b, ".xdxf-profile-lousy.xdxf-format-visual { white-space: pre-wrap; }\n");
     buf_append_str(&b, ".xdxf-profile-lousy.xdxf-format-visual .xdxf-dtrn { display: inline; color: inherit !important; font-weight: inherit; line-height: 1.45; }\n");
-    buf_append_str(&b, ".xdxf-profile-lousy.xdxf-format-visual .xdxf-c[style*=\"blue\"] { display: inline; min-width: 0; margin-left: 0; }\n");
-    buf_append_str(&b, ".xdxf-profile-lousy.xdxf-format-visual .xdxf-c-blue-roman-break::before { content: \"\\A\"; white-space: pre; }\n");
-    buf_append_str(&b, ".xdxf-profile-lousy.xdxf-format-visual .xdxf-c-blue-num::before { content: \"\\A  \"; white-space: pre; }\n");
+    buf_append_str(&b, ".xdxf-profile-lousy.xdxf-format-visual .xdxf-c-roman { display: inline; font-size: 1.15em; font-weight: 800; color: var(--heading-color) !important; }\n");
+    buf_append_str(&b, ".xdxf-profile-lousy.xdxf-format-visual .xdxf-c-roman ~ .xdxf-c-roman::before { content: \"\"; display: block; width: 100%; margin-top: 1.5em; margin-bottom: 0.5em; border-top: 1px solid var(--border-color); }\n");
+    buf_append_str(&b, ".xdxf-profile-lousy.xdxf-format-visual .xdxf-c-num { display: inline; font-weight: bold; color: var(--heading-color) !important; }\n");
+    buf_append_str(&b, ".xdxf-profile-lousy.xdxf-format-visual .xdxf-c-letter { display: inline; font-weight: bold; color: var(--heading-color) !important; }\n");
     /* Normalize h1/h2/h3 sizes inside entry bodies — MDX dicts often use h1 for headwords */
     buf_append_str(&b, ".rendered-entry-body h1,.rendered-entry h1,.wic h1"
         "{font-size:1.15em;font-weight:bold;margin:0.25em 0 0.15em 0;line-height:1.3;}");

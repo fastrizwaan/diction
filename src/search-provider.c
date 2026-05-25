@@ -11,6 +11,8 @@
 static GPtrArray *active_dicts = NULL;
 static AppSettings *app_settings = NULL;
 GMutex dict_loader_mutex;
+static GMainLoop *loop = NULL;
+static guint idle_timeout_id = 0;
 
 void settings_scan_progress_notify(const char *path, int percent) {
     (void)path; (void)percent;
@@ -20,27 +22,43 @@ void settings_scan_notify(const char *name, const char *path, int event_type) {
     (void)name; (void)path; (void)event_type;
 }
 
+static gboolean on_idle_timeout(gpointer data) {
+    (void)data;
+    if (loop) g_main_loop_quit(loop);
+    return G_SOURCE_REMOVE;
+}
+
+static void reset_idle_timeout(void) {
+    if (idle_timeout_id != 0) {
+        g_source_remove(idle_timeout_id);
+    }
+    idle_timeout_id = g_timeout_add_seconds(10, on_idle_timeout, NULL);
+}
+
 static void load_dictionaries(void) {
     if (active_dicts) return;
     
     app_settings = settings_load();
     active_dicts = g_ptr_array_new_with_free_func((GDestroyNotify)dict_loader_free_list);
     
-    if (!app_settings || !app_settings->dictionary_dirs) return;
+    if (!app_settings) return;
     
-    for (guint i = 0; i < app_settings->dictionary_dirs->len; i++) {
-        const char *dir_path = g_ptr_array_index(app_settings->dictionary_dirs, i);
-        DictEntry *head = dict_loader_scan_directory(dir_path);
-        if (head) {
-            DictEntry *curr = head;
-            while (curr) {
-                // Ensure dict is loaded
-                if (!curr->dict) {
-                    curr->dict = dict_load_any(curr->path, curr->format, NULL, 0);
+    if (app_settings->dictionary_dirs) {
+        for (guint i = 0; i < app_settings->dictionary_dirs->len; i++) {
+            const char *dir_path = g_ptr_array_index(app_settings->dictionary_dirs, i);
+            DictEntry *head = dict_loader_scan_directory(dir_path);
+            if (head) {
+                DictEntry *curr = head;
+                while (curr) {
+                    if (settings_dictionary_enabled_by_path(app_settings, curr->path, TRUE)) {
+                        if (!curr->dict) {
+                            curr->dict = dict_load_any(curr->path, curr->format, NULL, 0);
+                        }
+                    }
+                    curr = curr->next;
                 }
-                curr = curr->next;
+                g_ptr_array_add(active_dicts, head);
             }
-            g_ptr_array_add(active_dicts, head);
         }
     }
 }
@@ -89,6 +107,7 @@ static gboolean handle_get_initial_result_set(
     (void)object;
     (void)user_data;
     
+    reset_idle_timeout();
     load_dictionaries();
     
     char *query = g_strjoinv(" ", (gchar **)terms);
@@ -157,6 +176,7 @@ static gboolean handle_get_result_metas(
     (void)object;
     (void)user_data;
     
+    reset_idle_timeout();
     load_dictionaries();
     
     GVariantBuilder builder;
@@ -234,6 +254,8 @@ static gboolean handle_activate_result(
     (void)timestamp;
     (void)user_data;
     
+    reset_idle_timeout();
+    
     char **parts = g_strsplit(identifier, "::", 2);
     if (g_strv_length(parts) == 2) {
         const char *term = parts[1];
@@ -257,6 +279,8 @@ static gboolean handle_launch_search(
     (void)object;
     (void)timestamp;
     (void)user_data;
+    
+    reset_idle_timeout();
     
     char *query = g_strjoinv(" ", (gchar **)terms);
     char *command = g_strdup_printf("diction --scan \"%s\"", query);
@@ -290,8 +314,9 @@ static void on_bus_acquired(GDBusConnection *connection, const gchar *name, gpoi
 int main(int argc, char *argv[]) {
     (void)argc;
     (void)argv;
-    // Keep it alive
-    g_autoptr(GMainLoop) loop = g_main_loop_new(NULL, FALSE);
+    
+    loop = g_main_loop_new(NULL, FALSE);
+    reset_idle_timeout();
     
     g_bus_own_name(G_BUS_TYPE_SESSION,
                    "io.github.fastrizwaan.diction.SearchProvider",

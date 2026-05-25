@@ -17,8 +17,9 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <unistd.h>
 #include "dictzip.h"
+#include <errno.h>
+volatile gboolean g_emfile_hit = FALSE;
 
 extern GMutex dict_loader_mutex;
 
@@ -464,6 +465,17 @@ void dict_mmap_ensure_icon(DictMmap *dict) {
 }
 
 DictMmap* dict_load_any(const char *path, DictFormat fmt, volatile gint *cancel_flag, gint expected_generation) {
+    if (g_atomic_int_get((int *)&g_emfile_hit)) {
+        return NULL;
+    }
+
+    char *hw_path = dict_cache_path_for(path);
+    if (hw_path && dict_cache_failure_is_current(hw_path, path)) {
+        g_free(hw_path);
+        return NULL;
+    }
+
+    gint64 start_time = g_get_monotonic_time();
     DictMmap *dict = NULL;
     switch (fmt) {
         case DICT_FORMAT_DSL:
@@ -499,7 +511,30 @@ DictMmap* dict_load_any(const char *path, DictFormat fmt, volatile gint *cancel_
             break;
     }
 
-    /* Icon detection is now deferred to dict_mmap_get_icon or similar lazy calls */
+    gint64 duration = g_get_monotonic_time() - start_time;
+
+    if (dict) {
+        if (hw_path) {
+            dict_cache_clear_failure(hw_path);
+        }
+        fprintf(stderr, "[LOADER] SUCCESS %s loaded in %" G_GINT64_FORMAT " us\n", path, duration);
+    } else {
+        gboolean is_cancelled = (cancel_flag && g_atomic_int_get(cancel_flag) != expected_generation);
+        if (errno == EMFILE || errno == ENFILE) {
+            g_atomic_int_set((int *)&g_emfile_hit, TRUE);
+            fprintf(stderr, "[LOADER] ulimit hit (EMFILE/ENFILE) loading %s. Aborting further loads.\n", path);
+        } else if (!is_cancelled && hw_path) {
+            const char *sources[] = { path };
+            dict_cache_mark_failure(hw_path, sources, 1);
+            fprintf(stderr, "[LOADER] FAILURE %s marked as failed in %" G_GINT64_FORMAT " us\n", path, duration);
+        } else {
+            fprintf(stderr, "[LOADER] SKIPPED %s (cancelled/emfile) in %" G_GINT64_FORMAT " us\n", path, duration);
+        }
+    }
+
+    if (hw_path) {
+        g_free(hw_path);
+    }
     return dict;
 }
 

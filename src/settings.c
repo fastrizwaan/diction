@@ -1006,7 +1006,7 @@ AppSettings* settings_load(void) {
     settings->scan_modifier_key = g_strdup("none");
     settings->global_shortcut = g_strdup("");
     settings->fts_enabled = FALSE;
-    settings->max_indexer_threads = 2;
+    settings->max_indexer_threads = 1;
     g_mutex_init(&settings->mutex);
 
     char *path = get_settings_file_path();

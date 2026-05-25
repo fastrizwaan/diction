@@ -226,6 +226,7 @@ static void execute_search_now_for_query(const char *query_raw, gboolean push_hi
 static void activate_dictionary_entry(DictEntry *e);
 static void set_active_entry(DictEntry *new_entry);
 static void finalize_dictionary_loading(gboolean allow_random_word, gboolean sync_settings_from_loaded);
+static void create_main_window(GtkApplication *app);
 static gboolean on_dict_loaded_idle(gpointer user_data);
 static void apply_font_to_webview(void *user_data);
 static void reveal_search_entry(gboolean select_text);
@@ -4685,6 +4686,12 @@ static void reload_dictionaries_from_settings(void *user_data) {
 
 static void finalize_dictionary_loading(gboolean allow_random_word, gboolean sync_settings_from_loaded) {
     dictionary_loading_in_progress = FALSE;
+    if (!main_window) {
+        GApplication *app = g_application_get_default();
+        if (app) {
+            create_main_window(GTK_APPLICATION(app));
+        }
+    }
     if (sync_settings_from_loaded) {
         sync_settings_dictionaries_from_loaded();
     }
@@ -5377,9 +5384,10 @@ static gboolean on_dict_loaded_idle(gpointer user_data) {
         DictEntry *e = ld->entry;
         e->next = NULL;
 
-        // Inform settings dialog(s) of finished entry
+        /* Notify active scan dialogs that this dictionary is finished loading */
         extern void settings_scan_notify(const char *name, const char *path, int event_type);
-        /* settings_scan_notify(e->name ? e->name : "(Unknown)", e->path ? e->path : "", DICT_LOADER_EVENT_FINISHED); */ // Consolidate into one place later
+        settings_scan_notify(e->name, e->path, DICT_LOADER_EVENT_FINISHED);
+
         if (app_settings && !settings_dictionary_enabled_by_path(app_settings, e->path, TRUE)) {
             dict_entry_unref(e);
             g_free(ld->status_text);
@@ -5481,10 +5489,6 @@ static gboolean on_dict_loaded_idle(gpointer user_data) {
         }
 
         // maybe_show_startup_random_word(); // Removed from here to coalesce
-
-        /* Notify active scan dialogs that this dictionary is finished loading */
-        extern void settings_scan_notify(const char *name, const char *path, int event_type);
-        settings_scan_notify(e->name, e->path, DICT_LOADER_EVENT_FINISHED);
     }
 
     if (ld->kind == LOAD_IDLE_DONE) {
@@ -5509,6 +5513,13 @@ static void load_one_dict_worker(gpointer data, gpointer user_data) {
     (void)user_data;
     LoadOneArgs *la = data;
     if (la->generation != g_atomic_int_get(&loader_generation)) {
+        g_free(la);
+        return;
+    }
+
+    extern gboolean g_emfile_hit;
+    if (g_emfile_hit) {
+        g_atomic_int_add(la->completed, 1);
         g_free(la);
         return;
     }
@@ -5603,7 +5614,7 @@ static gpointer dict_load_thread(gpointer user_data) {
         /* Parallelize dictionary loading to improve startup performance */
         guint n_workers = (guint)app_settings->max_indexer_threads;
         if (n_workers < 1) n_workers = 1;
-        if (n_workers > 16) n_workers = 16;
+        if (n_workers > 4) n_workers = 4;
         GError *pool_error = NULL;
         GThreadPool *pool = g_thread_pool_new(load_one_dict_worker, NULL, (gint)n_workers, FALSE, &pool_error);
 
@@ -5632,6 +5643,8 @@ static gpointer dict_load_thread(gpointer user_data) {
             }
             for (guint i = 0; i < candidate_paths->len && i < (guint)MAX_DICTS; i++) {
                 if (args->generation != g_atomic_int_get(&loader_generation)) break;
+                extern gboolean g_emfile_hit;
+                if (g_emfile_hit) continue;
 
                 const char *path = g_ptr_array_index(candidate_paths, i);
                 DictFormat fmt = dict_detect_format(path);
@@ -5959,10 +5972,8 @@ static void on_scope_button_active_changed(GtkMenuButton *btn, GParamSpec *pspec
     }
 }
 
-static void on_activate(GtkApplication *app, gpointer user_data) {
-    (void)user_data;
+static void create_main_window(GtkApplication *app) {
     if (main_window) {
-        app_show_window();
         return;
     }
     AdwApplicationWindow *window = ADW_APPLICATION_WINDOW(adw_application_window_new(app));
@@ -6343,12 +6354,8 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
     const char *zoom_reset_accels[] = { "<Primary>0", "<Primary>KP_0", NULL };
     gtk_application_set_accels_for_action(GTK_APPLICATION(app), "app.zoom-reset", zoom_reset_accels);
 
-    gboolean had_cached_entries = FALSE;
-    gboolean discover_from_dirs = FALSE;
     if (!all_dicts && app_settings) {
-        had_cached_entries = rebuild_dict_entries_from_settings() > 0;
-        discover_from_dirs = app_settings->dictionary_dirs &&
-                             app_settings->dictionary_dirs->len > 0;
+        rebuild_dict_entries_from_settings();
     }
     refresh_dictionary_directory_monitors();
 
@@ -6417,29 +6424,48 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
 
     apply_font_to_webview(NULL);
 
+    global_shortcut_setup(on_global_shortcut_activated, NULL);
+}
+
+static void on_activate(GtkApplication *app, gpointer user_data) {
+    (void)user_data;
+    if (main_window) {
+        app_show_window();
+        return;
+    }
+
+    gboolean had_cached_entries = FALSE;
+    gboolean discover_from_dirs = FALSE;
+    if (!all_dicts && app_settings) {
+        had_cached_entries = rebuild_dict_entries_from_settings() > 0;
+        // Do NOT discover from directories on startup. This causes massive slowdowns
+        // if broken files exist or if thousands of files need to be stat'd.
+        // Users must click "Rescan" in preferences to discover new files.
+        discover_from_dirs = FALSE;
+    }
+
     gboolean needs_async_load = discover_from_dirs || had_cached_entries;
-    render_idle_page_to_webview(
-        web_view,
-        needs_async_load ? "Loading dictionaries..." : "Diction",
-        needs_async_load ? "Please wait." : "Start typing to search...");
 
     // Start async loading for configured directories so startup scan/progress
     // remains visible. The loaders should hit valid caches instead of rebuilding.
     if (needs_async_load) {
-        startup_random_word_pending = (!search_entry ||
-                                       strlen(gtk_editable_get_text(GTK_EDITABLE(search_entry))) == 0);
+        startup_random_word_pending = TRUE;
         if (prevent_startup_random_word) {
             startup_random_word_pending = FALSE;
         }
         if (start_async_dict_loading(discover_from_dirs)) {
-            startup_splash_show(app, main_window, G_CALLBACK(request_loader_cancel));
+            // Show the splash screen immediately, with no parent
+            startup_splash_show(app, NULL, G_CALLBACK(request_loader_cancel));
         } else {
             startup_random_word_pending = FALSE;
+            create_main_window(app);
             finalize_dictionary_loading(TRUE, discover_from_dirs);
-            gtk_window_present(GTK_WINDOW(window));
+            gtk_window_present(GTK_WINDOW(main_window));
         }
     } else {
         startup_random_word_pending = FALSE;
+        create_main_window(app);
+        
         // CLI-mode: dicts already loaded synchronously, just populate
         populate_dict_sidebar();
         if (all_dicts) {
@@ -6450,15 +6476,13 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
             web_view,
             "Welcome to Diction",
             "Select a dictionary from the sidebar and start searching.");
-        gtk_window_present(GTK_WINDOW(window));
+        gtk_window_present(GTK_WINDOW(main_window));
     }
 
     /* Debug: auto-open preferences for integrated scanning if requested. */
     if (getenv("DICTION_DEBUG_AUTO_SCAN")) {
         show_settings_dialog(NULL, NULL, app);
     }
-
-    global_shortcut_setup(on_global_shortcut_activated, NULL);
 }
 
 

@@ -61,6 +61,22 @@ static void load_dictionaries(void) {
             }
         }
     }
+    
+    // Load manual/imported dictionaries not covered by directory scans
+    if (app_settings->dictionaries) {
+        for (guint i = 0; i < app_settings->dictionaries->len; i++) {
+            DictConfig *cfg = g_ptr_array_index(app_settings->dictionaries, i);
+            if (cfg && cfg->enabled && (g_strcmp0(cfg->source, "manual") == 0 || g_strcmp0(cfg->source, "imported") == 0)) {
+                DictEntry *entry = g_new0(DictEntry, 1);
+                entry->path = g_strdup(cfg->path);
+                entry->dict_id = g_strdup(cfg->id);
+                entry->name = g_strdup(cfg->name);
+                entry->format = cfg->format;
+                entry->dict = dict_load_any(entry->path, entry->format, NULL, 0);
+                g_ptr_array_add(active_dicts, entry);
+            }
+        }
+    }
 }
 
 // Helper to strip HTML tags for snippet description

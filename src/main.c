@@ -6,6 +6,7 @@
 #include "langpair.h"
 #include <webkit/webkit.h>
 #include <sys/stat.h>
+#include <sys/resource.h>
 #include <fcntl.h>
 #include "dict-mmap.h"
 #include "dict-loader.h"
@@ -6725,6 +6726,13 @@ static GLogWriterOutput custom_log_writer(GLogLevelFlags log_level, const GLogFi
 }
 
 int main(int argc, char *argv[]) {
+    // Maximize file descriptor limit
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
+        rl.rlim_cur = rl.rlim_max;
+        setrlimit(RLIMIT_NOFILE, &rl);
+    }
+
     g_log_set_writer_func(custom_log_writer, NULL, NULL);
     // Disable compositing to fix rendering issues
     setenv("WEBKIT_DISABLE_COMPOSITING_MODE", "1", 1);

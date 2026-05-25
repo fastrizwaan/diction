@@ -7,6 +7,7 @@
 #include <gio/gio.h>
 #include <string.h>
 #include <ctype.h>
+#include <sys/resource.h>
 
 static GPtrArray *active_dicts = NULL;
 static AppSettings *app_settings = NULL;
@@ -346,6 +347,13 @@ static void on_bus_acquired(GDBusConnection *connection, const gchar *name, gpoi
 int main(int argc, char *argv[]) {
     (void)argc;
     (void)argv;
+    
+    // Maximize file descriptor limit
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
+        rl.rlim_cur = rl.rlim_max;
+        setrlimit(RLIMIT_NOFILE, &rl);
+    }
     
     loop = g_main_loop_new(NULL, FALSE);
     reset_idle_timeout();

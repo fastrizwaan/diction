@@ -68,6 +68,21 @@ srcs = [
   'src/dict-stardict-render.c'
 ] + engine_srcs
 
+gnome = import('gnome')
+search_provider_dbus = gnome.gdbus_codegen('search-provider-generated',
+  'data/org.gnome.Shell.SearchProvider2.xml',
+  interface_prefix: 'org.gnome.Shell.',
+  namespace: 'DictionSearchProvider'
+)
+
+executable('diction-search-provider',
+  ['src/search-provider.c', search_provider_dbus] + engine_srcs,
+  include_directories: include_directories('src'),
+  c_args: '-DDICTION_NO_GTK',
+  dependencies: [ dependency('glib-2.0'), dependency('gio-unix-2.0'), gdk_pixbuf_dep, zlib_dep, json_dep, archive_dep, zstd_dep, lzma_dep, bz2_dep, lzo_dep, xml_dep, sqlite3_dep ],
+  install: true
+)
+
 executable('diction', srcs,
   include_directories: include_directories('src'),
   dependencies: [ gtk_dep, adw_dep, webkit_dep, zlib_dep, json_dep, archive_dep, zstd_dep, lzma_dep, bz2_dep, lzo_dep, xml_dep, sqlite3_dep ],
@@ -92,6 +107,17 @@ configure_file(
   install_dir: join_paths(get_option('datadir'), 'dbus-1', 'services')
 )
 
+configure_file(
+  input: 'data/io.github.fastrizwaan.diction.SearchProvider.service.in',
+  output: 'io.github.fastrizwaan.diction.SearchProvider.service',
+  configuration: conf_data,
+  install_dir: join_paths(get_option('datadir'), 'dbus-1', 'services')
+)
+
+install_data(
+  'data/io.github.fastrizwaan.diction.search-provider.ini',
+  install_dir: join_paths(get_option('datadir'), 'gnome-shell', 'search-providers')
+)
 
 # Install AppData/AppStream metadata
 install_data(

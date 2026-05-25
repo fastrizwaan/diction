@@ -714,19 +714,44 @@ DictEntry* dict_loader_scan_directory(const char *dirpath) {
     return head;
 }
 
-void dict_loader_scan_directory_streaming(const char *dirpath, DictLoaderCallback callback, void *user_data, volatile gint *cancel_flag, gint expected_generation, GCancellable *cancellable) {
-    if (!dirpath || !callback) return;
+void dict_loader_scan_paths_streaming(char **paths, int n_paths, DictLoaderCallback callback, void *user_data, volatile gint *cancel_flag, gint expected_generation, GCancellable *cancellable) {
+    if (!paths || n_paths <= 0 || !callback) return;
 
     GList *candidates = NULL;
     gboolean has_find = g_file_test("/usr/bin/find", G_FILE_TEST_EXISTS);
+    GHashTable *seen_dsl_families = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
 
-    if (has_find) {
-        discover_with_find(dirpath, &candidates, cancel_flag, expected_generation, cancellable);
-    } else {
-        GHashTable *seen_dsl_families = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
-        scan_recursive(dirpath, &candidates, seen_dsl_families, cancel_flag, expected_generation, 0);
-        g_hash_table_unref(seen_dsl_families);
+    for (int i = 0; i < n_paths; i++) {
+        if (cancel_flag && g_atomic_int_get(cancel_flag) != expected_generation) break;
+        if (cancellable && g_cancellable_is_cancelled(cancellable)) break;
+
+        const char *path = paths[i];
+        if (!path || !*path) continue;
+
+        if (g_file_test(path, G_FILE_TEST_IS_DIR)) {
+            if (has_find) {
+                discover_with_find(path, &candidates, cancel_flag, expected_generation, cancellable);
+            } else {
+                scan_recursive(path, &candidates, seen_dsl_families, cancel_flag, expected_generation, 0);
+            }
+        } else {
+            /* Direct file */
+            DictFormat fmt = dict_detect_format(path);
+            if (fmt != DICT_FORMAT_UNKNOWN) {
+                DictCandidate *c = g_new0(DictCandidate, 1);
+                c->path = g_strdup(path);
+                c->format = fmt;
+                
+                char *basename = g_path_get_basename(path);
+                c->name = g_strdup(basename);
+                g_free(basename);
+
+                candidates = g_list_prepend(candidates, c);
+            }
+        }
     }
+    
+    g_hash_table_unref(seen_dsl_families);
     
     candidates = g_list_reverse(candidates);
 

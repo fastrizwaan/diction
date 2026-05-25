@@ -6551,6 +6551,7 @@ static int run_cli_search(const char *query, const char *in_dict) {
                     e->ref_count = 1;
                     e->name = g_strdup(cfg->name ? cfg->name : "dictionary");
                     e->path = g_strdup(cfg->path);
+                    e->dict_id = g_strdup(cfg->id);
                     e->format = fmt;
                     e->dict = d;
                     e->next = all_dicts;

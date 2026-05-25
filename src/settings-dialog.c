@@ -295,8 +295,7 @@ static void on_add_directory_response(GObject *source, GAsyncResult *result, gpo
         char *path = g_file_get_path(file);
         if (path) {
             /* Add to settings so the main loader picks it up. */
-            guint before = data->settings->dictionary_dirs->len;
-            settings_add_directory(data->settings, path);
+            gboolean added = settings_add_directory(data->settings, path);
 
             /* Force a directory rescan so that if a parent directory is being added
                after its subdirectories were already added, the parent's other
@@ -308,14 +307,14 @@ static void on_add_directory_response(GObject *source, GAsyncResult *result, gpo
             char **dirs = g_new0(char *, 2);
             dirs[0] = g_strdup(path);
             dirs[1] = NULL;
-            extern void show_scan_dialog_for_dirs(SettingsDialogData *data, char **dirs, int n_dirs, gboolean call_reload);
-            show_scan_dialog_for_dirs(data, dirs, 1, TRUE);
+            extern void show_scan_dialog_for_paths(SettingsDialogData *data, char **paths, int n_paths, gboolean call_reload, gboolean is_import);
+            show_scan_dialog_for_paths(data, dirs, 1, TRUE, FALSE);
 
             /* Update the dir list in preferences */
             update_dir_list(data);
 
             char *name = g_path_get_basename(path);
-            char *message = data->settings->dictionary_dirs->len > before
+            char *message = added
                 ? g_strdup_printf("Added folder: %s", name)
                 : g_strdup_printf("Folder already added: %s", name);
             present_dictionary_feedback(data, 0, 0, 0, message);
@@ -415,8 +414,8 @@ static void on_rescan_directories(GtkButton *btn, SettingsDialogData *data) {
     dirs[n] = NULL;
     extern void force_next_dictionary_directory_rescan(void);
     force_next_dictionary_directory_rescan();
-    extern void show_scan_dialog_for_dirs(SettingsDialogData *data, char **dirs, int n_dirs, gboolean call_reload);
-    show_scan_dialog_for_dirs(data, dirs, n, TRUE);
+    extern void show_scan_dialog_for_paths(SettingsDialogData *data, char **paths, int n_paths, gboolean call_reload, gboolean is_import);
+    show_scan_dialog_for_paths(data, dirs, n, TRUE, FALSE);
 }
 
 /* ================================================================
@@ -1335,69 +1334,12 @@ static gpointer scan_thread_func(gpointer user_data) {
     ctx->generation = 1;
     gint expected = ctx->generation;
 
-    for (int i = 0; i < args->n_dirs; i++) {
-        if (g_atomic_int_get(&ctx->generation) != expected) break;
-        /* Update status for current directory */
-        char status_buf[256];
-        g_snprintf(status_buf, sizeof(status_buf), "Scanning %d of %d:\n%s",
-                   i + 1, args->n_dirs, args->dirs[i]);
-        /* Update status label on main thread */
-        ScanIdleData *st = g_new0(ScanIdleData, 1);
-        st->ctx = scan_context_ref(ctx);
-        st->name = g_strdup(status_buf);
-        st->path = g_strdup("");
-        st->event_type = (int)DICT_LOADER_EVENT_STARTED;
-        g_idle_add(scan_idle_add_entry, st);
-
-        dict_loader_scan_directory_streaming(args->dirs[i], scan_worker_callback, ctx, &ctx->generation, expected, NULL);
-    }
-
-    /* Signal completion */
-    ScanIdleData *done = g_new0(ScanIdleData, 1);
-    done->ctx = scan_context_ref(ctx);
-    done->name = g_strdup("done");
-    done->path = g_strdup("");
-    done->event_type = -1;
-    g_idle_add(scan_idle_add_entry, done);
-
-    /* Free thread args */
-    for (int i = 0; i < args->n_dirs; i++)
-        g_free(args->dirs[i]);
-    g_free(args->dirs);
-    g_free(args);
-    scan_context_unref(ctx);
-    return NULL;
-}
-
-static gpointer file_import_thread_func(gpointer data) {
-    ScanThreadArgs *args = data;
-    ScanContext *ctx = args->ctx;
-    GListModel *files = args->files;
-    gboolean is_import = args->is_import;
-
-    guint n = g_list_model_get_n_items(files);
-    for (guint i = 0; i < n && !ctx->cancelled; i++) {
-        GObject *obj = g_list_model_get_item(files, i);
-        GFile *file = G_FILE(obj);
-        char *path = g_file_get_path(file);
-        if (!path) {
-            g_object_unref(obj);
-            continue;
-        }
-
-        char *name = settings_resolve_dictionary_name(path);
-        
-        /* Post DISCOVERED event */
-        ScanIdleData *sid = g_new0(ScanIdleData, 1);
-        sid->ctx = scan_context_ref(ctx);
-        sid->name = g_strdup(name);
-        sid->path = normalize_scan_path(path);
-        sid->event_type = SCAN_EVENT_DISCOVERED;
-        g_idle_add(scan_idle_add_entry, sid);
-
-        if (is_import) {
-            /* Post IMPORT_START */
-            sid = g_new0(ScanIdleData, 1);
+    if (args->is_import) {
+        for (int i = 0; i < args->n_dirs; i++) {
+            if (g_atomic_int_get(&ctx->generation) != expected) break;
+            const char *path = args->dirs[i];
+            
+            ScanIdleData *sid = g_new0(ScanIdleData, 1);
             sid->ctx = scan_context_ref(ctx);
             sid->path = normalize_scan_path(path);
             sid->event_type = SCAN_EVENT_IMPORT_START;
@@ -1416,42 +1358,58 @@ static gpointer file_import_thread_func(gpointer data) {
                 sid->event_type = SCAN_EVENT_IMPORT_FAILURE;
                 g_idle_add(scan_idle_add_entry, sid);
             }
-        } else {
-            /* Link: just add it */
-            settings_add_dictionary(ctx->data->settings, name, path);
-            sid = g_new0(ScanIdleData, 1);
-            sid->ctx = scan_context_ref(ctx);
-            sid->path = normalize_scan_path(path);
-            sid->event_type = SCAN_EVENT_IMPORT_SUCCESS; // reusing success status for linking too
-            g_idle_add(scan_idle_add_entry, sid);
         }
-
-        g_free(name);
-        g_free(path);
-        g_object_unref(obj);
     }
 
-    /* Trigger the main loader reload now that the copy/link phase is done.
-     * We don't send a -1 event here because we want the dialog to stay open
-     * while the main loader actually parses the files. */
-    if (!ctx->cancelled && ctx->data && ctx->data->reload_callback) {
-        ctx->data->reload_callback(ctx->data->user_data);
-    }
+    /* Update status label on main thread */
+    ScanIdleData *st = g_new0(ScanIdleData, 1);
+    st->ctx = scan_context_ref(ctx);
+    st->name = g_strdup("Scanning...");
+    st->path = g_strdup("");
+    st->event_type = (int)DICT_LOADER_EVENT_STARTED;
+    g_idle_add(scan_idle_add_entry, st);
+
+    dict_loader_scan_paths_streaming(args->dirs, args->n_dirs, scan_worker_callback, ctx, &ctx->generation, expected, NULL);
+
+    /* Signal completion */
+    ScanIdleData *done = g_new0(ScanIdleData, 1);
+    done->ctx = scan_context_ref(ctx);
+    done->name = g_strdup("done");
+    done->path = g_strdup("");
+    done->event_type = -1;
+    g_idle_add(scan_idle_add_entry, done);
 
     /* Free thread args */
-    g_object_unref(files);
+    for (int i = 0; i < args->n_dirs; i++)
+        g_free(args->dirs[i]);
+    g_free(args->dirs);
     g_free(args);
     scan_context_unref(ctx);
     return NULL;
 }
 
-void show_scan_dialog_for_files(SettingsDialogData *data, GListModel *files, gboolean is_import) {
-    int n_files = (int)g_list_model_get_n_items(files);
-    
-    /* We reuse the folder-scan dialog UI logic. 
-     * call_reload=TRUE so it persists until the main loader finishes. */
+/* Public helper used by handlers above */
+typedef struct {
+    void (*cb)(void*);
+    void *data;
+} ReloadArgs;
+
+static gboolean idle_reload_callback(gpointer user_data) {
+    ReloadArgs *a = user_data;
+    if (a->cb) a->cb(a->data);
+    g_free(a);
+    return G_SOURCE_REMOVE;
+}
+
+void show_scan_dialog_for_paths(SettingsDialogData *data, char **paths, int n_paths, gboolean call_reload, gboolean is_import) {
+    if (!paths || n_paths == 0 || !settings_dialog_is_active(data)) {
+        for (int i = 0; i < n_paths; i++) g_free(paths[i]);
+        g_free(paths);
+        return;
+    }
+
     AdwDialog *dialog = adw_dialog_new();
-    adw_dialog_set_title(dialog, is_import ? "Importing Dictionaries" : "Adding Dictionaries");
+    adw_dialog_set_title(dialog, "Adding Dictionaries");
     adw_dialog_set_content_width(dialog, 720);
     adw_dialog_set_content_height(dialog, 520);
     adw_dialog_set_follows_content_size(dialog, FALSE);
@@ -1459,7 +1417,7 @@ void show_scan_dialog_for_files(SettingsDialogData *data, GListModel *files, gbo
     GtkWidget *toolbar_view = adw_toolbar_view_new();
     GtkWidget *header_bar = adw_header_bar_new();
     gtk_widget_add_css_class(header_bar, "flat");
-    GtkWidget *title = gtk_label_new(is_import ? "Importing Dictionaries" : "Adding Dictionaries");
+    GtkWidget *title = gtk_label_new("Adding Dictionaries");
     gtk_widget_add_css_class(title, "title");
     adw_header_bar_set_title_widget(ADW_HEADER_BAR(header_bar), title);
     adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(toolbar_view), header_bar);
@@ -1475,14 +1433,14 @@ void show_scan_dialog_for_files(SettingsDialogData *data, GListModel *files, gbo
     gtk_spinner_start(GTK_SPINNER(spinner));
     gtk_box_append(GTK_BOX(status_box), spinner);
 
-    GtkWidget *status = gtk_label_new(is_import ? "Importing files..." : "Adding files...");
+    GtkWidget *status = gtk_label_new("Preparing scan...");
     gtk_label_set_wrap(GTK_LABEL(status), TRUE);
     gtk_label_set_xalign(GTK_LABEL(status), 0.0f);
     gtk_widget_set_hexpand(status, TRUE);
     gtk_box_append(GTK_BOX(status_box), status);
     gtk_box_append(GTK_BOX(content), status_box);
 
-    GtkWidget *description = gtk_label_new("Processing files. They will be loaded automatically when finished.");
+    GtkWidget *description = gtk_label_new("Dictionaries will be loaded automatically when finished.");
     gtk_label_set_xalign(GTK_LABEL(description), 0.0f);
     gtk_widget_add_css_class(description, "dim-label");
     gtk_box_append(GTK_BOX(content), description);
@@ -1508,9 +1466,10 @@ void show_scan_dialog_for_files(SettingsDialogData *data, GListModel *files, gbo
     gtk_widget_set_hexpand(spacer, TRUE);
     gtk_box_append(GTK_BOX(footer), spacer);
 
-    GtkWidget *cancel_btn = gtk_button_new_with_label("Cancel");
+    GtkWidget *cancel_btn = gtk_button_new_with_label("Stop Scan");
     GtkWidget *close_btn = gtk_button_new_with_label("Close");
     gtk_widget_set_sensitive(close_btn, FALSE);
+    gtk_widget_remove_css_class(close_btn, "suggested-action");
     gtk_box_append(GTK_BOX(footer), cancel_btn);
     gtk_box_append(GTK_BOX(footer), close_btn);
     adw_toolbar_view_add_bottom_bar(ADW_TOOLBAR_VIEW(toolbar_view), footer);
@@ -1526,39 +1485,57 @@ void show_scan_dialog_for_files(SettingsDialogData *data, GListModel *files, gbo
     ctx->cancel_btn = cancel_btn;
     ctx->close_btn = close_btn;
     ctx->found_count = 0;
-    ctx->total_dirs = n_files;
-    ctx->call_reload = TRUE; /* Persist until loader finishes */
+    ctx->total_dirs = n_paths;
+    ctx->call_reload = call_reload;
     ctx->ref_count = 1;
-
-    /* Register context so main loader can notify it */
-    ctx->n_scan_dirs = n_files;
-    ctx->scan_dirs = g_new0(char *, n_files + 1);
-    for (int i = 0; i < n_files; i++) {
-        GObject *obj = g_list_model_get_item(files, (guint)i);
-        char *path = g_file_get_path(G_FILE(obj));
-        ctx->scan_dirs[i] = normalize_scan_path(path);
-        g_free(path);
-        g_object_unref(obj);
-    }
-    
-    g_mutex_lock(&active_scan_contexts_mutex);
-    active_scan_contexts = g_list_prepend(active_scan_contexts, ctx);
-    g_mutex_unlock(&active_scan_contexts_mutex);
 
     g_signal_connect(cancel_btn, "clicked", G_CALLBACK(on_scan_cancel_clicked), ctx);
     g_signal_connect(close_btn, "clicked", G_CALLBACK(on_scan_close_clicked), ctx);
     g_signal_connect_swapped(dialog, "closed", G_CALLBACK(on_scan_dialog_closed), ctx);
 
+    if (call_reload) {
+        ctx->scan_dirs = g_new0(char *, n_paths + 1);
+        for (int i = 0; i < n_paths; i++) ctx->scan_dirs[i] = normalize_scan_path(paths[i]);
+        ctx->n_scan_dirs = n_paths;
+
+        /* Register context so main loader can notify it */
+        g_mutex_lock(&active_scan_contexts_mutex);
+        active_scan_contexts = g_list_prepend(active_scan_contexts, ctx);
+        g_mutex_unlock(&active_scan_contexts_mutex);
+
+        adw_dialog_present(ADW_DIALOG(dialog), GTK_WIDGET(data->dialog));
+
+        if (data->reload_callback) {
+            ReloadArgs *ra = g_new0(ReloadArgs, 1);
+            ra->cb = data->reload_callback;
+            ra->data = data->user_data;
+            g_timeout_add(150, idle_reload_callback, ra);
+        }
+
+        for (int i = 0; i < n_paths; i++) g_free(paths[i]);
+        g_free(paths);
+        return;
+    }
+
+    /* Present dialog for local scanning (not integrated). */
     adw_dialog_present(ADW_DIALOG(dialog), GTK_WIDGET(data->dialog));
 
+    /* Start scanning thread */
     ScanThreadArgs *args = g_new0(ScanThreadArgs, 1);
     args->ctx = ctx;
-    args->files = g_object_ref(files);
+    args->n_dirs = n_paths;
     args->is_import = is_import;
+    args->dirs = g_new0(char *, n_paths + 1);
+    for (int i = 0; i < n_paths; i++)
+        args->dirs[i] = g_strdup(paths[i]);
+    args->dirs[n_paths] = NULL;
 
     scan_context_ref(ctx);
-    GThread *t = g_thread_new("settings-file-import", file_import_thread_func, args);
+    GThread *t = g_thread_new("settings-scan", scan_thread_func, args);
     g_thread_unref(t);
+
+    for (int i = 0; i < n_paths; i++) g_free(paths[i]);
+    g_free(paths);
 }
 
 static void on_scan_cancel_clicked(GtkButton *btn, ScanContext *ctx) {
@@ -1684,164 +1661,7 @@ void settings_scan_progress_notify(const char *path, int percent) {
     g_free(canonical_path);
 }
 
-/* Public helper used by handlers above */
-typedef struct {
-    void (*cb)(void*);
-    void *data;
-} ReloadArgs;
 
-static gboolean idle_reload_callback(gpointer user_data) {
-    ReloadArgs *a = user_data;
-    if (a->cb) a->cb(a->data);
-    g_free(a);
-    return G_SOURCE_REMOVE;
-}
-
-void show_scan_dialog_for_dirs(SettingsDialogData *data, char **dirs, int n_dirs, gboolean call_reload) {
-    AdwDialog *dialog = adw_dialog_new();
-    adw_dialog_set_title(dialog, "Scanning Dictionaries");
-    adw_dialog_set_content_width(dialog, 720);
-    adw_dialog_set_content_height(dialog, 520);
-    adw_dialog_set_follows_content_size(dialog, FALSE);
-
-    GtkWidget *toolbar_view = adw_toolbar_view_new();
-
-    GtkWidget *header_bar = adw_header_bar_new();
-    gtk_widget_add_css_class(header_bar, "flat");
-    GtkWidget *title = gtk_label_new("Scanning Dictionaries");
-    gtk_widget_add_css_class(title, "title");
-    adw_header_bar_set_title_widget(ADW_HEADER_BAR(header_bar), title);
-    adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(toolbar_view), header_bar);
-
-    GtkWidget *content = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
-    gtk_widget_set_margin_top(content, 18);
-    gtk_widget_set_margin_bottom(content, 18);
-    gtk_widget_set_margin_start(content, 18);
-    gtk_widget_set_margin_end(content, 18);
-
-    GtkWidget *status_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
-    GtkWidget *spinner = gtk_spinner_new();
-    gtk_spinner_start(GTK_SPINNER(spinner));
-    gtk_box_append(GTK_BOX(status_box), spinner);
-
-    GtkWidget *status = gtk_label_new("Preparing dictionary scan…");
-    gtk_label_set_wrap(GTK_LABEL(status), TRUE);
-    gtk_label_set_xalign(GTK_LABEL(status), 0.0f);
-    gtk_widget_set_hexpand(status, TRUE);
-    gtk_box_append(GTK_BOX(status_box), status);
-    gtk_box_append(GTK_BOX(content), status_box);
-
-    GtkWidget *description = gtk_label_new("Files appear as they are discovered. The currently loading entry moves to the top.");
-    gtk_label_set_xalign(GTK_LABEL(description), 0.0f);
-    gtk_widget_add_css_class(description, "dim-label");
-    gtk_box_append(GTK_BOX(content), description);
-
-    GtkWidget *scroller = gtk_scrolled_window_new();
-    gtk_widget_set_vexpand(scroller, TRUE);
-    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroller),
-                                   GTK_POLICY_NEVER,
-                                   GTK_POLICY_AUTOMATIC);
-
-    GtkListBox *list = GTK_LIST_BOX(gtk_list_box_new());
-    gtk_list_box_set_selection_mode(list, GTK_SELECTION_NONE);
-    gtk_widget_add_css_class(GTK_WIDGET(list), "boxed-list");
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroller), GTK_WIDGET(list));
-    gtk_box_append(GTK_BOX(content), scroller);
-
-    adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(toolbar_view), content);
-
-    GtkWidget *footer = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
-    gtk_widget_set_margin_top(footer, 12);
-    gtk_widget_set_margin_bottom(footer, 12);
-    gtk_widget_set_margin_start(footer, 18);
-    gtk_widget_set_margin_end(footer, 18);
-    GtkWidget *spacer = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-    gtk_widget_set_hexpand(spacer, TRUE);
-    gtk_box_append(GTK_BOX(footer), spacer);
-
-    GtkWidget *cancel_btn = gtk_button_new_with_label("Stop Scan");
-    GtkWidget *close_btn = gtk_button_new_with_label("Close");
-    gtk_widget_set_sensitive(close_btn, FALSE);
-    gtk_widget_remove_css_class(close_btn, "suggested-action");
-    gtk_box_append(GTK_BOX(footer), cancel_btn);
-    gtk_box_append(GTK_BOX(footer), close_btn);
-    adw_toolbar_view_add_bottom_bar(ADW_TOOLBAR_VIEW(toolbar_view), footer);
-
-    adw_dialog_set_child(dialog, toolbar_view);
-
-    /* Create context */
-    ScanContext *ctx = g_new0(ScanContext, 1);
-    ctx->data = data;
-    ctx->dialog = dialog;
-    ctx->list = list;
-    ctx->status_label = status;
-    ctx->spinner = spinner;
-    ctx->cancel_btn = cancel_btn;
-    ctx->close_btn = close_btn;
-    ctx->found_count = 0;
-    ctx->total_dirs = n_dirs;
-    ctx->call_reload = call_reload;
-    ctx->ref_count = 1;
-
-    /* Present dialog and either integrate with the main loader or
-     * perform a local scan depending on `call_reload`. */
-    g_signal_connect(cancel_btn, "clicked", G_CALLBACK(on_scan_cancel_clicked), ctx);
-    g_signal_connect(close_btn, "clicked", G_CALLBACK(on_scan_close_clicked), ctx);
-    g_signal_connect_swapped(dialog, "closed", G_CALLBACK(on_scan_dialog_closed), ctx);
-
-    /* Present dialog and either integrate with the main loader or
-     * perform a local scan depending on `call_reload`. */
-    if (call_reload && settings_dialog_is_active(data) && data->reload_callback) {
-        /* Copy requested dirs into context for filtering notifications (canonicalized) */
-        ctx->scan_dirs = g_new0(char *, n_dirs + 1);
-        for (int i = 0; i < n_dirs; i++) ctx->scan_dirs[i] = normalize_scan_path(dirs[i]);
-        ctx->n_scan_dirs = n_dirs;
-
-        /* Register context so main loader can notify it */
-        g_mutex_lock(&active_scan_contexts_mutex);
-        active_scan_contexts = g_list_prepend(active_scan_contexts, ctx);
-        g_mutex_unlock(&active_scan_contexts_mutex);
-
-        adw_dialog_present(ADW_DIALOG(dialog), GTK_WIDGET(data->dialog));
-
-        /* Kick off the main loader after a short delay so the dialog has time
-         * to actually paint and appear on screen before the background thread
-         * starts posting work. g_idle_add fires before GTK finishes rendering
-         * the new window, so the dialog would stay invisible until all loading
-         * was done. A 150ms timeout gives GTK enough frames to present it. */
-        if (data->reload_callback) {
-            ReloadArgs *ra = g_new0(ReloadArgs, 1);
-            ra->cb = data->reload_callback;
-            ra->data = data->user_data;
-            g_timeout_add(150, idle_reload_callback, ra);
-        }
-
-        /* Free the dirs array passed in by caller (we duplicated the strings into ctx) */
-        for (int i = 0; i < n_dirs; i++) g_free(dirs[i]);
-        g_free(dirs);
-        return;
-    }
-
-    /* Present dialog for local scanning (not integrated). */
-    adw_dialog_present(ADW_DIALOG(dialog), GTK_WIDGET(data->dialog));
-
-    /* Start scanning thread */
-    ScanThreadArgs *args = g_new0(ScanThreadArgs, 1);
-    args->ctx = ctx;
-    args->n_dirs = n_dirs;
-    args->dirs = g_new0(char *, n_dirs + 1);
-    for (int i = 0; i < n_dirs; i++)
-        args->dirs[i] = g_strdup(dirs[i]);
-    args->dirs[n_dirs] = NULL;
-
-    scan_context_ref(ctx);
-    GThread *t = g_thread_new("settings-scan", scan_thread_func, args);
-    g_thread_unref(t);
-
-    /* Free the dirs array passed in by caller (we duplicated the strings) */
-    for (int i = 0; i < n_dirs; i++) g_free(dirs[i]);
-    g_free(dirs);
-}
 
 /* ---- Dictionary callbacks ---- */
 
@@ -1913,7 +1733,21 @@ static void on_add_dictionary_file_response(GObject *source, GAsyncResult *resul
     GError *error = NULL;
     GListModel *files = gtk_file_dialog_open_multiple_finish(chooser, result, &error);
     if (files) {
-        show_scan_dialog_for_files(data, files, FALSE);
+        guint n = g_list_model_get_n_items(files);
+        if (n > 0) {
+            char **paths = g_new0(char *, n + 1);
+            for (guint i = 0; i < n; i++) {
+                GObject *obj = g_list_model_get_item(files, i);
+                paths[i] = g_file_get_path(G_FILE(obj));
+                char *name = settings_resolve_dictionary_name(paths[i]);
+                settings_add_dictionary(data->settings, name, paths[i]);
+                g_free(name);
+                g_object_unref(obj);
+            }
+            extern void force_next_dictionary_directory_rescan(void);
+            force_next_dictionary_directory_rescan();
+            show_scan_dialog_for_paths(data, paths, n, FALSE, FALSE);
+        }
         g_object_unref(files);
     } else if (error) {
         g_error_free(error);
@@ -1964,7 +1798,16 @@ static void on_import_dictionary_files_response(GObject *source, GAsyncResult *r
     GError *error = NULL;
     GListModel *files = gtk_file_dialog_open_multiple_finish(chooser, result, &error);
     if (files) {
-        show_scan_dialog_for_files(data, files, TRUE);
+        guint n = g_list_model_get_n_items(files);
+        if (n > 0) {
+            char **paths = g_new0(char *, n + 1);
+            for (guint i = 0; i < n; i++) {
+                GObject *obj = g_list_model_get_item(files, i);
+                paths[i] = g_file_get_path(G_FILE(obj));
+                g_object_unref(obj);
+            }
+            show_scan_dialog_for_paths(data, paths, n, TRUE, TRUE);
+        }
         g_object_unref(files);
     } else if (error) {
         g_error_free(error);
@@ -3159,7 +3002,7 @@ GtkWidget* settings_dialog_new(GtkWindow *parent, AppSettings *settings,
             char **dirs = g_new0(char*, n + 1);
             for (int i = 0; i < n; i++) dirs[i] = g_strdup(g_ptr_array_index(data->settings->dictionary_dirs, i));
             dirs[n] = NULL;
-            show_scan_dialog_for_dirs(data, dirs, n, TRUE);
+            show_scan_dialog_for_paths(data, dirs, n, TRUE, FALSE);
         }
     }
 

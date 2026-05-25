@@ -35,6 +35,22 @@ static void reset_idle_timeout(void) {
     idle_timeout_id = g_timeout_add_seconds(10, on_idle_timeout, NULL);
 }
 
+static void on_settings_changed(GFileMonitor *monitor, GFile *file, GFile *other_file, GFileMonitorEvent event_type, gpointer user_data) {
+    (void)monitor; (void)file; (void)other_file; (void)user_data;
+    if (event_type == G_FILE_MONITOR_EVENT_CHANGED || 
+        event_type == G_FILE_MONITOR_EVENT_CREATED || 
+        event_type == G_FILE_MONITOR_EVENT_DELETED) {
+        if (active_dicts) {
+            g_ptr_array_free(active_dicts, TRUE);
+            active_dicts = NULL;
+        }
+        if (app_settings) {
+            settings_free(app_settings);
+            app_settings = NULL;
+        }
+    }
+}
+
 static void load_dictionaries(void) {
     if (active_dicts) return;
     
@@ -334,6 +350,14 @@ int main(int argc, char *argv[]) {
     loop = g_main_loop_new(NULL, FALSE);
     reset_idle_timeout();
     
+    /* Setup file monitor to clear cache on settings change */
+    char *settings_path = g_build_filename(g_get_user_data_dir(), "diction", "settings.json", NULL);
+    GFile *settings_file = g_file_new_for_path(settings_path);
+    GFileMonitor *settings_monitor = g_file_monitor_file(settings_file, G_FILE_MONITOR_NONE, NULL, NULL);
+    if (settings_monitor) {
+        g_signal_connect(settings_monitor, "changed", G_CALLBACK(on_settings_changed), NULL);
+    }
+    
     g_bus_own_name(G_BUS_TYPE_SESSION,
                    "io.github.fastrizwaan.diction.SearchProvider",
                    G_BUS_NAME_OWNER_FLAGS_NONE,
@@ -344,6 +368,10 @@ int main(int argc, char *argv[]) {
                    NULL);
                    
     g_main_loop_run(loop);
+    
+    if (settings_monitor) g_object_unref(settings_monitor);
+    g_object_unref(settings_file);
+    g_free(settings_path);
     
     if (active_dicts) {
         g_ptr_array_free(active_dicts, TRUE);

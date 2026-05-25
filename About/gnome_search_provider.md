@@ -41,7 +41,9 @@ Even if a user has hundreds of large dictionaries enabled, the search provider g
 
 1. **Lazy Database Connections**: When the DBus provider wakes up, it does not load dictionary texts into RAM. It merely executes a zero-copy virtual memory map (`mmap`) of the dictionary files and opens connections to their `.hw.sqlite` index caches. Establishing hundreds of SQLite connections sequentially takes mere milliseconds and is imperceptible to human reaction times.
 2. **Early-Exit Short-circuiting**: GNOME Shell only requests a handful of results to display in the overview. The provider is hard-coded to stop scanning dictionaries the moment it finds 5 matching results. If your query is satisfied by the first few dictionaries, the provider completely skips querying the remaining databases.
-3. **The 10-Second Warm Buffer**: The background process includes a 10-second inactivity timeout. When a user types their first keystroke, the SQLite databases initialize. As they continue typing subsequent keystrokes, the provider is already warm, executing instantaneous binary searches across the open connections without any initialization overhead. Once the user stops searching, the timeout expires and kills the DBus daemon to free all resources.
+4. **The 10-Second Warm Buffer**: The background process includes a 10-second inactivity timeout. When a user types their first keystroke, the SQLite databases initialize. As they continue typing subsequent keystrokes, the provider is already warm, executing instantaneous binary searches across the open connections without any initialization overhead. Once the user stops searching, the timeout expires and kills the DBus daemon to free all resources.
+5. **What happens after the timeout?**: If you search for "hello", wait 15 seconds (so the daemon dies), and then click the search result, **it will still work perfectly**. GNOME Shell remembers the ID of the result. When you click it, GNOME Shell spins up the provider just in time to execute the `ActivateResult` DBus method. The same applies if you wait 20 seconds and type another letter: GNOME Shell will simply wake the provider back up instantaneously. The fast-loading architecture ensures this wakeup is seamless.
+6. **Will 200 dictionaries slow it down?**: No. Because it relies entirely on memory mapping (`mmap`) and SQLite index queries rather than parsing text into RAM, it scales beautifully. Furthermore, because of the "Early-Exit Short-circuiting" mentioned above, once it finds 5 matching results for your query, it stops opening connections to the remaining 195 dictionaries, ensuring a constant O(1) response time regardless of the size of your library.
 
 ## Usage & Testing
 
@@ -55,6 +57,11 @@ ninja -C build install
 GNOME Shell caches the search providers directory on startup. If you install, update, or remove the Diction Search Provider, GNOME Shell must be restarted to pick up the `.ini` file changes.
 - **Wayland (Important)**: You **must log out and log back in**. GNOME Shell on Wayland cannot be restarted gracefully without ending your session.
 - **X11**: Press `Alt+F2`, type `r`, and press Enter.
+
+### Stale Results and Cache Invalidation
+Previously, if you added or removed a dictionary, you might continue to see stale results in the overview until the 10-second background daemon timed out and restarted. 
+
+**This is now resolved**: The search provider daemon employs a `GFileMonitor` to actively watch your `settings.json` file. The exact moment you add or remove a dictionary in the main UI, the background provider detects the change, flushes its cache, and reloads the active dictionaries in real-time. You will never see stale results.
 
 ## Packaging and Flatpak Integration
 

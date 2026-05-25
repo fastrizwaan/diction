@@ -50,12 +50,12 @@ typedef void (*DictLoaderCallback)(DictEntry *entry, DictLoaderEventType event, 
 DictEntry* dict_loader_scan_directory(const char *dirpath);
 
 /* Streaming version: calls callback for each loaded dictionary */
-void dict_loader_scan_directory_streaming(const char *dirpath, 
-                                           DictLoaderCallback callback, 
-                                           void *user_data,
-                                           volatile gint *cancel_flag,
-                                           gint expected_generation,
-                                           GCancellable *cancellable);
+void dict_loader_scan_paths_streaming(char **paths, int n_paths,
+                                      DictLoaderCallback callback, 
+                                      void *user_data,
+                                      volatile gint *cancel_flag,
+                                      gint expected_generation,
+                                      GCancellable *cancellable);
 
 /* Lifecycle management: ref/unref */
 void dict_entry_ref(DictEntry *entry);

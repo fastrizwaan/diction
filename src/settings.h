@@ -66,7 +66,7 @@ void settings_dialog_run(GtkWidget *dialog);
 #endif
 
 // Helper functions
-void settings_add_directory(AppSettings *settings, const char *path);
+gboolean settings_add_directory(AppSettings *settings, const char *path);
 void settings_remove_directory(AppSettings *settings, const char *path);
 void settings_add_dictionary(AppSettings *settings, const char *name, const char *path);
 void settings_remove_dictionary(AppSettings *settings, const char *id);

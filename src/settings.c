@@ -1336,21 +1336,38 @@ void settings_free(AppSettings *settings) {
 }
 
 // Helper functions
-void settings_add_directory(AppSettings *settings, const char *path) {
+gboolean settings_add_directory(AppSettings *settings, const char *path) {
     if (!settings || !path || !*path) {
-        return;
+        return FALSE;
     }
 
     g_mutex_lock(&settings->mutex);
-    // Check if already exists
+    
+    // 1. If path is already inside an existing directory, do nothing.
     for (guint i = 0; i < settings->dictionary_dirs->len; i++) {
-        if (strcmp(g_ptr_array_index(settings->dictionary_dirs, i), path) == 0) {
+        const char *existing = g_ptr_array_index(settings->dictionary_dirs, i);
+        if (path_is_inside_dir(path, existing)) {
             g_mutex_unlock(&settings->mutex);
-            return;
+            return FALSE;
         }
     }
+
+    // 2. If existing directories are inside the new path, remove them (since the new path covers them).
+    // Use an array to store indices to remove safely.
+    for (gint i = settings->dictionary_dirs->len - 1; i >= 0; i--) {
+        const char *existing = g_ptr_array_index(settings->dictionary_dirs, i);
+        if (path_is_inside_dir(existing, path)) {
+            g_ptr_array_remove_index(settings->dictionary_dirs, i);
+        }
+    }
+
     g_ptr_array_add(settings->dictionary_dirs, g_strdup(path));
     g_mutex_unlock(&settings->mutex);
+    
+    // Always save settings right away so the directory isn't lost on close
+    settings_save(settings);
+    
+    return TRUE;
 }
 
 void settings_remove_directory(AppSettings *settings, const char *path) {

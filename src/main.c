@@ -3599,6 +3599,7 @@ static int append_exact_matches_html(GString *html_res, const char *query, gbool
         char *rendered = render_entry_def_to_html(m->dict, m->pos, dark_mode, color_theme, render_style, fts_highlight_query);
         if (rendered) {
             m->dict->has_matches = TRUE;
+            char *escaped_hw = safe_markup_escape_n(m->display_hw, -1);
             
             if (m->dict != current_dict) {
                 if (current_dict != NULL) {
@@ -3611,16 +3612,21 @@ static int append_exact_matches_html(GString *html_res, const char *query, gbool
                 g_string_append_printf(html_res, 
                     "<section id='dict-%s' class='%s-entry'>"
                     "<div class='%s-header'>"
+                    "<span class='%s-lemma'>%s</span>"
                     "<span class='%s-dict'>%s %s</span>"
                     "</div>",
                     m->dict->dict_id ? m->dict->dict_id : "", render_style, 
-                    render_style, render_style, emoji ? emoji : "📖", escaped_dn);
+                    render_style, render_style, escaped_hw,
+                    render_style, emoji ? emoji : "📖", escaped_dn);
 
                 g_free(escaped_dn);
                 current_dict = m->dict;
+            } else {
+                g_string_append_printf(html_res, "<h3 class=\"bgl-hw\" style=\"margin-top:12px;margin-bottom:6px;font-size:1.15em;border-top:1px solid rgba(128,128,128,0.2);padding-top:12px;\">%s</h3>", escaped_hw);
             }
 
             g_string_append_printf(html_res, "<div class='%s-entry-body'>%s</div>", render_style, rendered);
+            g_free(escaped_hw);
             g_free(rendered);
             found_count++;
         }

@@ -457,25 +457,20 @@ static size_t transcode_bgl_blocks(const char *data, size_t data_size, DictCache
                     fix_heb_string(&display_hw, NULL);
                 }
 
-                /* Prepend the formatted display headword to the definition */
-                char *formatted_def = g_strdup_printf("<h3 class=\"bgl-hw\">%s</h3>\n%s", display_hw, def_utf8);
-                size_t formatted_def_len = strlen(formatted_def);
-                
                 uint64_t hw_off = 0;
                 uint64_t def_off = 0;
                 dict_cache_builder_add_headword(builder, hw_utf8, decoded_hw_len, &hw_off);
-                dict_cache_builder_add_definition(builder, formatted_def, formatted_def_len, &def_off);
+                dict_cache_builder_add_definition(builder, def_utf8, decoded_def_len, &def_off);
                 
                 entries[word_count].h_off = hw_off;
                 entries[word_count].h_len = decoded_hw_len;
                 entries[word_count].d_off = def_off;
-                entries[word_count].d_len = formatted_def_len;
+                entries[word_count].d_len = decoded_def_len;
                 word_count++;
                 
                 g_free(hw_utf8);
                 g_free(def_utf8);
                 g_free(display_hw);
-                g_free(formatted_def);
             }
         }
     }

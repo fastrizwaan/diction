@@ -308,6 +308,15 @@ static size_t transcode_bgl_blocks(const char *data, size_t data_size, DictCache
     const char *source_charset = is_utf8 ? "UTF-8" : (source_charset_override ? source_charset_override : default_charset);
     const char *target_charset = is_utf8 ? "UTF-8" : (target_charset_override ? target_charset_override : default_charset);
 
+    if (dict_name) {
+        size_t name_len = strlen(dict_name);
+        char *utf8_name = bgl_decode_string(dict_name, name_len, source_charset, NULL);
+        if (utf8_name) {
+            g_free(dict_name);
+            dict_name = utf8_name;
+        }
+    }
+
     while (p < end) {
         if (cancel_flag && g_atomic_int_get(cancel_flag) != expected) break;
 

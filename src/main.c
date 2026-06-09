@@ -167,9 +167,46 @@ static char *safe_markup_escape_n(const char *buf, gssize len) {
     }
     char *valid = g_utf8_make_valid(tmp, -1);
     g_free(tmp);
-    char *escaped = g_markup_escape_text(valid, -1);
+    
+    GString *out = g_string_sized_new(strlen(valid) + 16);
+    const char *p = valid;
+    while (*p) {
+        if (*p == '<') {
+            if (g_str_has_prefix(p, "<sup>") || g_str_has_prefix(p, "<sub>") || 
+                g_str_has_prefix(p, "<i>") || g_str_has_prefix(p, "<b>")) {
+                const char *end = strchr(p, '>');
+                g_string_append_len(out, p, end - p + 1);
+                p = end + 1;
+                continue;
+            } else if (g_str_has_prefix(p, "</sup>") || g_str_has_prefix(p, "</sub>") || 
+                       g_str_has_prefix(p, "</i>") || g_str_has_prefix(p, "</b>")) {
+                const char *end = strchr(p, '>');
+                g_string_append_len(out, p, end - p + 1);
+                p = end + 1;
+                continue;
+            }
+        }
+        
+        if (*p == '<') g_string_append(out, "&lt;");
+        else if (*p == '>') g_string_append(out, "&gt;");
+        else if (*p == '&') g_string_append(out, "&amp;");
+        else if (*p == '"') g_string_append(out, "&quot;");
+        else if (*p == '\'') g_string_append(out, "&apos;");
+        else g_string_append_c(out, *p);
+        p++;
+    }
+    
+    if (!pango_parse_markup(out->str, -1, 0, NULL, NULL, NULL, NULL)) {
+        /* If the preserved tags resulted in invalid markup (e.g. mismatched tags),
+         * fallback to a fully escaped string. */
+        g_string_free(out, TRUE);
+        char *fully_escaped = g_markup_escape_text(valid, -1);
+        g_free(valid);
+        return fully_escaped;
+    }
+
     g_free(valid);
-    return escaped;
+    return g_string_free(out, FALSE);
 }
 
 static void render_idle_page_to_webview(WebKitWebView *target_wv,
@@ -3030,7 +3067,13 @@ static void related_list_item_bind(GtkSignalListItemFactory *factory, GtkListIte
         return;
     }
 
-    gtk_label_set_text(GTK_LABEL(label), valid_text);
+    char *markup_text = safe_markup_escape_n(valid_text, -1);
+    if (pango_parse_markup(markup_text, -1, 0, NULL, NULL, NULL, NULL)) {
+        gtk_label_set_markup(GTK_LABEL(label), markup_text);
+    } else {
+        gtk_label_set_text(GTK_LABEL(label), valid_text);
+    }
+    g_free(markup_text);
     
     g_signal_handlers_disconnect_by_func(star_btn, on_sidebar_favorite_clicked, NULL);
     const char *favorite_word = (payload && payload->word) ? payload->word : valid_text;
@@ -3459,7 +3502,17 @@ static int compare_exact_match_items(gconstpointer a, gconstpointer b) {
     const ExactMatch *mb = *(const ExactMatch **)b;
     int cmp = g_strcmp0(ma->clean_hw, mb->clean_hw);
     if (cmp != 0) return cmp;
-    /* Tie-breaker: sort by dictionary order */
+    
+    /* Tie-breaker 1: Group by dictionary pointer (since they are collected sequentially) */
+    if (ma->dict != mb->dict) {
+        return (ma->dict < mb->dict) ? -1 : 1;
+    }
+    
+    /* Tie-breaker 2: Maintain original sequential order within the same dictionary */
+    if (ma->pos != mb->pos) {
+        return (ma->pos < mb->pos) ? -1 : 1;
+    }
+    
     return 0; 
 }
 
@@ -3539,33 +3592,46 @@ static int append_exact_matches_html(GString *html_res, const char *query, gbool
 
     g_ptr_array_sort(matches, compare_exact_match_items);
 
+    DictEntry *current_dict = NULL;
+
     for (guint i = 0; i < matches->len; i++) {
         ExactMatch *m = g_ptr_array_index(matches, i);
         char *rendered = render_entry_def_to_html(m->dict, m->pos, dark_mode, color_theme, render_style, fts_highlight_query);
         if (rendered) {
             m->dict->has_matches = TRUE;
-            char *escaped_hw = safe_markup_escape_n(m->display_hw, -1);
-            char *escaped_dn = g_markup_escape_text(m->dict->name, -1);
-            const char *emoji = dict_format_emoji(m->dict->format);
+            
+            if (m->dict != current_dict) {
+                if (current_dict != NULL) {
+                    g_string_append(html_res, "</section>");
+                }
+                
+                char *escaped_hw = safe_markup_escape_n(m->display_hw, -1);
+                char *escaped_dn = g_markup_escape_text(m->dict->name, -1);
+                const char *emoji = dict_format_emoji(m->dict->format);
 
-            g_string_append_printf(html_res, 
-                "<section id='dict-%s' class='%s-entry'>"
-                "<div class='%s-header'>"
-                "<span class='%s-lemma'>%s</span>"
-                "<span class='%s-dict'>%s %s</span>"
-                "</div>"
-                "<div class='%s-entry-body'>%s</div>"
-                "</section>",
-                m->dict->dict_id ? m->dict->dict_id : "", render_style, 
-                render_style, render_style, escaped_hw,
-                render_style, emoji ? emoji : "📖", escaped_dn,
-                render_style, rendered);
+                g_string_append_printf(html_res, 
+                    "<section id='dict-%s' class='%s-entry'>"
+                    "<div class='%s-header'>"
+                    "<span class='%s-lemma'>%s</span>"
+                    "<span class='%s-dict'>%s %s</span>"
+                    "</div>",
+                    m->dict->dict_id ? m->dict->dict_id : "", render_style, 
+                    render_style, render_style, escaped_hw,
+                    render_style, emoji ? emoji : "📖", escaped_dn);
 
-            g_free(escaped_hw);
-            g_free(escaped_dn);
+                g_free(escaped_hw);
+                g_free(escaped_dn);
+                current_dict = m->dict;
+            }
+
+            g_string_append_printf(html_res, "<div class='%s-entry-body'>%s</div>", render_style, rendered);
             g_free(rendered);
             found_count++;
         }
+    }
+
+    if (current_dict != NULL) {
+        g_string_append(html_res, "</section>");
     }
 
     if (limited && *limited) {

@@ -116,6 +116,68 @@ static char *bgl_decode_string(const char *data, size_t len, const char *charset
     return out_buf;
 }
 
+static char *bgl_postfix_to_superscript(const char *in) {
+    if (!in || !*in) return g_strdup("");
+    size_t len = strlen(in);
+    if (len >= 3 && in[len - 1] == '$') {
+        int x = (int)len - 2;
+        while (x >= 0) {
+            if (in[x] == '$') break;
+            x--;
+        }
+        if (x >= 0) {
+            GString *s = g_string_new("");
+            g_string_append_len(s, in, x);
+            g_string_append(s, "<sup>");
+            g_string_append_len(s, in + x + 1, len - x - 2);
+            g_string_append(s, "</sup>");
+            return g_string_free(s, FALSE);
+        }
+    }
+    return g_strdup(in);
+}
+
+static void fix_heb_string(char **str_ptr, size_t *len_ptr) {
+    if (!str_ptr || !*str_ptr) return;
+    char *str = *str_ptr;
+    glong ulen = 0;
+    gunichar *ustr = g_utf8_to_ucs4_fast(str, -1, &ulen);
+    if (!ustr) return;
+    gboolean changed = FALSE;
+    for (glong i = 0; i < ulen; i++) {
+        if ((ustr[i] >= 224 && ustr[i] <= 250) || (ustr[i] >= 192 && ustr[i] <= 210)) {
+            ustr[i] += 1488 - 224;
+            changed = TRUE;
+        }
+    }
+    if (changed) {
+        char *new_str = g_ucs4_to_utf8(ustr, ulen, NULL, NULL, NULL);
+        if (new_str) {
+            g_free(str);
+            *str_ptr = new_str;
+            if (len_ptr) *len_ptr = strlen(new_str);
+        }
+    }
+    g_free(ustr);
+}
+
+static void fix_heb_article(char *str, size_t *len_ptr) {
+    if (!str || !len_ptr || *len_ptr == 0) return;
+    size_t len = *len_ptr;
+    while (len > 0) {
+        unsigned char c = (unsigned char)str[len - 1];
+        if (c <= 32 || (c >= 65 && c <= 90)) {
+            len--;
+        } else {
+            break;
+        }
+    }
+    if (len < *len_ptr) {
+        str[len] = '\0';
+        *len_ptr = len;
+    }
+}
+
 static char *format_bgl_definition(const unsigned char *def_data, size_t def_len, const char *target_charset, size_t *out_len) {
     if (def_len == 0) { *out_len = 0; return g_strdup(""); }
     
@@ -343,7 +405,10 @@ static size_t transcode_bgl_blocks(const char *data, size_t data_size, DictCache
 
                 trim_whitespace(hw_utf8, &decoded_hw_len);
 
-                /* Strip BGL $123$ numeric postfixes if present */
+                /* Generate superscript formatted display headword */
+                char *display_hw = bgl_postfix_to_superscript(hw_utf8);
+
+                /* Strip BGL $123$ numeric postfixes for the index search key */
                 if (decoded_hw_len > 0 && hw_utf8[decoded_hw_len - 1] == '$') {
                     if (decoded_hw_len >= 2) {
                         int x = (int)decoded_hw_len - 2;
@@ -359,24 +424,49 @@ static size_t transcode_bgl_blocks(const char *data, size_t data_size, DictCache
                             x--;
                         }
                     }
+                } else if (decoded_hw_len >= 13 && g_str_has_suffix(hw_utf8, "</sup>")) {
+                    /* Strip explicit <sup>1</sup> literal tags that are embedded directly in the BGL file */
+                    int x = (int)decoded_hw_len - 7;
+                    while (x >= 5) {
+                        if (strncmp(&hw_utf8[x - 5], "<sup>", 5) == 0) {
+                            hw_utf8[x - 5] = '\0';
+                            decoded_hw_len = (size_t)(x - 5);
+                            trim_whitespace(hw_utf8, &decoded_hw_len);
+                            break;
+                        }
+                        x--;
+                    }
                 }
                 
                 size_t decoded_def_len = 0;
                 char *def_utf8 = format_bgl_definition(def_data, def_len, target_charset, &decoded_def_len);
+
+                /* Apply Hebrew text normalisation if the dictionary is Hebrew */
+                if (source_charset && (strcmp(source_charset, "WINDOWS-1255") == 0 || strcmp(source_charset, "CP1255") == 0 || strcmp(source_charset, "ISO-8859-8") == 0)) {
+                    fix_heb_string(&def_utf8, &decoded_def_len);
+                    fix_heb_article(def_utf8, &decoded_def_len);
+                    fix_heb_string(&display_hw, NULL);
+                }
+
+                /* Prepend the formatted display headword to the definition */
+                char *formatted_def = g_strdup_printf("<h3 class=\"bgl-hw\">%s</h3>\n%s", display_hw, def_utf8);
+                size_t formatted_def_len = strlen(formatted_def);
                 
                 uint64_t hw_off = 0;
                 uint64_t def_off = 0;
                 dict_cache_builder_add_headword(builder, hw_utf8, decoded_hw_len, &hw_off);
-                dict_cache_builder_add_definition(builder, def_utf8, decoded_def_len, &def_off);
+                dict_cache_builder_add_definition(builder, formatted_def, formatted_def_len, &def_off);
                 
                 entries[word_count].h_off = hw_off;
                 entries[word_count].h_len = decoded_hw_len;
                 entries[word_count].d_off = def_off;
-                entries[word_count].d_len = decoded_def_len;
+                entries[word_count].d_len = formatted_def_len;
                 word_count++;
                 
                 g_free(hw_utf8);
                 g_free(def_utf8);
+                g_free(display_hw);
+                g_free(formatted_def);
             }
         }
     }

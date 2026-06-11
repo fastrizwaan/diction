@@ -4044,26 +4044,29 @@ static gboolean on_random_word_found_idle(gpointer user_data) {
 static gpointer random_word_thread_worker(gpointer data) {
     (void)data;
     g_mutex_lock(&dict_loader_mutex);
-    int count = 0;
+    guint64 total_count = 0;
     for (DictEntry *e = all_dicts; e; e = e->next) {
         if (e->dict && e->dict->index && flat_index_count(e->dict->index) > 0 && dict_entry_in_active_scope(e)) {
-            count++;
+            total_count += flat_index_count(e->dict->index);
         }
     }
     
     DictEntry *target_e = NULL;
-    if (count > 0) {
-        int target_idx = rand() % count;
+    if (total_count > 0) {
+        guint64 target_idx = (guint64)(g_random_double() * total_count);
+        if (target_idx >= total_count) target_idx = total_count - 1; /* Safety */
+        
+        guint64 cur_count = 0;
         DictEntry *curr = all_dicts;
-        int cur_count = 0;
         while (curr) {
             if (curr->dict && curr->dict->index && flat_index_count(curr->dict->index) > 0 && dict_entry_in_active_scope(curr)) {
-                if (cur_count == target_idx) {
+                guint64 dict_count = flat_index_count(curr->dict->index);
+                if (target_idx >= cur_count && target_idx < cur_count + dict_count) {
                     target_e = curr;
                     dict_entry_ref(target_e);
                     break;
                 }
-                cur_count++;
+                cur_count += dict_count;
             }
             curr = curr->next;
         }

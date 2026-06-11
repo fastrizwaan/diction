@@ -527,7 +527,7 @@ static gboolean build_stardict_cache(DictCacheBuilder *builder,
     return TRUE;
 }
 
-static DictMmap *open_cached_stardict(const char *cache_path, char *bookname, char *resource_dir, const char *dict_path) {
+static DictMmap *open_cached_stardict(const char *cache_path, char *bookname, char *resource_dir, const char *dict_path, const char *ifo_path) {
     int fd = open(cache_path, O_RDONLY);
     if (fd < 0) {
         g_free(bookname);
@@ -559,7 +559,7 @@ static DictMmap *open_cached_stardict(const char *cache_path, char *bookname, ch
     dict->size = st.st_size;
     dict->name = bookname;
     dict->resource_dir = resource_dir;
-    char *hw_path = dict_hw_index_path_for(dict_path);
+    char *hw_path = dict_hw_index_path_for(ifo_path);
     dict->index = flat_index_open(hw_path);
     g_free(hw_path);
     if (dict_cache_is_compressed(dict->data, dict->size)) {
@@ -645,7 +645,7 @@ DictMmap* parse_stardict(const char *ifo_path, volatile gint *cancel_flag, gint 
     const char *sources[] = { ifo_path, idx_path, dict_path };
 
     if (is_cache_valid_for_sources(cache_path, sources, G_N_ELEMENTS(sources))) {
-        DictMmap *cached = open_cached_stardict(cache_path, bookname, resource_dir, dict_path);
+        DictMmap *cached = open_cached_stardict(cache_path, bookname, resource_dir, dict_path, ifo_path);
         g_free(cache_path);
         g_free(idx_path);
         g_free(dict_path);
@@ -858,7 +858,7 @@ DictMmap* parse_stardict(const char *ifo_path, volatile gint *cancel_flag, gint 
         dict_cache_builder_finalize_index_only(builder, entries, (uint64_t)entry_count, 0, sametypesequence);
 
         /* Build SQLite headword index */
-        char *hw_path = dict_hw_index_path_for(dict_path);
+        char *hw_path = dict_hw_index_path_for(ifo_path);
         {
             int hw_fd = open(cache_path, O_RDONLY);
             if (hw_fd >= 0) {
@@ -875,7 +875,7 @@ DictMmap* parse_stardict(const char *ifo_path, volatile gint *cancel_flag, gint 
                                     entries[i].d_off,
                                     entries[i].d_len);
                             }
-                            dict_hw_builder_set_metadata(hw, "source_path", dict_path);
+                            dict_hw_builder_set_metadata(hw, "source_path", ifo_path);
                             dict_hw_builder_finalize(hw);
                             struct stat hw_src_st;
                             if (stat(dict_path, &hw_src_st) == 0) {
@@ -919,7 +919,7 @@ DictMmap* parse_stardict(const char *ifo_path, volatile gint *cancel_flag, gint 
         return NULL;
     }
 
-    DictMmap *dict = open_cached_stardict(cache_path, bookname, resource_dir, dict_path);
+    DictMmap *dict = open_cached_stardict(cache_path, bookname, resource_dir, dict_path, ifo_path);
     g_free(dict_path);
     g_free(cache_path);
     settings_scan_progress_notify(ifo_path, 100);

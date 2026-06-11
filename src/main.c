@@ -2587,6 +2587,7 @@ static char *resolve_audio_resource_from_dictionaries(const char *resource_dir,
         g_mutex_unlock(&dict_loader_mutex);
 
         if (e->dict && e->dict->resource_dir && g_strcmp0(e->dict->resource_dir, resource_dir) == 0) {
+            dict_mmap_ensure_resources(e->dict);
             if (e->dict->resource_reader) {
                 fprintf(stderr, "[AUDIO DEBUG] Searching ResourceReader for '%s'\n", sound_file);
                 audio_path = resource_reader_get(e->dict->resource_reader, sound_file);
@@ -2683,6 +2684,7 @@ static void on_decide_policy(WebKitWebView *v, WebKitPolicyDecision *d, WebKitPo
                 /* Backward-compatible fallback and lazy loading */
                 if (active_entry && active_entry->dict) {
                     char *audio_path = NULL;
+                    dict_mmap_ensure_resources(active_entry->dict);
                     if (active_entry->dict->resource_reader) {
                         audio_path = resource_reader_get(active_entry->dict->resource_reader, sound_file);
                     }
@@ -3224,6 +3226,7 @@ static char* render_entry_def_to_html(DictEntry *entry, size_t pos, int dark_mod
         }
     }
 
+    dict_mmap_ensure_resources(entry->dict);
     dict_render_set_resource_reader(entry->dict->resource_reader);
     size_t hw_len = 0;
     char *hw_text = flat_index_get_headword(entry->dict->index, final_pos, &hw_len);

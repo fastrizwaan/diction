@@ -114,6 +114,15 @@ char *normalize_headword_for_search(const char *value, gboolean unescape_dsl) {
             continue;
         }
 
+        /* HTML tags */
+        if (ch == '<') {
+            const char *end_tag = strchr(p, '>');
+            if (end_tag) {
+                p = end_tag + 1;
+                continue;
+            }
+        }
+
         /* 2. Common noise and Unicode diacritics - matches flat-index.c ignore list */
         if (g_unichar_isspace(ch) || 
             ch == '*' || 
@@ -126,6 +135,8 @@ char *normalize_headword_for_search(const char *value, gboolean unescape_dsl) {
             ch == ';' || ch == ':' || ch == '.' || ch == ',' ||
             ch == '!' || ch == '?' || ch == '_' || ch == '/' ||
             ch == '|' || ch == '~' ||
+            ch == 0x00B9 || ch == 0x00B2 || ch == 0x00B3 || /* Superscript 1, 2, 3 */
+            (ch >= 0x2070 && ch <= 0x2079) ||               /* Superscript 0, 4-9 */
             g_unichar_type(ch) == G_UNICODE_NON_SPACING_MARK) {
             p = next;
             continue;

@@ -729,22 +729,43 @@ static char *rewrite_stylesheet_for_theme(const char *css, gboolean dark_mode) {
 }
 
 static void buf_append_escaped_html(StrBuf *b, const char *s, size_t n) {
-    for (size_t i = 0; i < n; i++) {
+    for (size_t i = 0; i < n; ) {
+        if (s[i] == '<') {
+            if (i + 4 <= n && (strncmp(s + i, "<sup>", 5) == 0 || strncmp(s + i, "<sub>", 5) == 0)) {
+                buf_append_str(b, strncmp(s + i, "<sup>", 5) == 0 ? "<sup>" : "<sub>");
+                i += 5; continue;
+            } else if (i + 5 <= n && (strncmp(s + i, "</sup>", 6) == 0 || strncmp(s + i, "</sub>", 6) == 0)) {
+                buf_append_str(b, strncmp(s + i, "</sup>", 6) == 0 ? "</sup>" : "</sub>");
+                i += 6; continue;
+            } else if (i + 2 <= n && (strncmp(s + i, "<i>", 3) == 0 || strncmp(s + i, "<b>", 3) == 0)) {
+                buf_append_str(b, strncmp(s + i, "<i>", 3) == 0 ? "<i>" : "<b>");
+                i += 3; continue;
+            } else if (i + 3 <= n && (strncmp(s + i, "</i>", 4) == 0 || strncmp(s + i, "</b>", 4) == 0)) {
+                buf_append_str(b, strncmp(s + i, "</i>", 4) == 0 ? "</i>" : "</b>");
+                i += 4; continue;
+            }
+        }
+        
         switch (s[i]) {
             case '&':
                 buf_append_str(b, "&amp;");
+                i++;
                 break;
             case '<':
                 buf_append_str(b, "&lt;");
+                i++;
                 break;
             case '>':
                 buf_append_str(b, "&gt;");
+                i++;
                 break;
             case '"':
                 buf_append_str(b, "&quot;");
+                i++;
                 break;
             default:
                 buf_append(b, &s[i], 1);
+                i++;
                 break;
         }
     }
@@ -846,6 +867,13 @@ char *normalize_headword_for_render(const char *text, size_t length, gboolean ke
                 g_string_append_c(out, '\\');
                 p++;
             }
+            continue;
+        }
+
+        gunichar ch = g_utf8_get_char(p);
+        if (ch == 0x00B9 || ch == 0x00B2 || ch == 0x00B3 || /* Superscript 1, 2, 3 */
+            (ch >= 0x2070 && ch <= 0x2079)) {               /* Superscript 0, 4-9 */
+            p = g_utf8_next_char(p);
             continue;
         }
 

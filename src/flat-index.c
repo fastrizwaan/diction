@@ -45,6 +45,11 @@ static size_t skip_dsl_noise(const char *s, size_t max_len, bool raw) {
     if (ch == '{') { size_t t = brace_tag_len(s, max_len); if (t) return t; if (raw) return 1; }
     if (raw && ch == '}') return 1;
 
+    if (ch == '<') {
+        const char *end_tag = memchr(s, '>', max_len);
+        if (end_tag) return (end_tag - s) + 1;
+    }
+
     if (g_unichar_isspace(ch) || ch == '*' ||
         ch == 0x00B7 || ch == 0x02C8 || ch == 0x02CC ||
         ch == 0x2018 || ch == 0x2019 || ch == 0x201C || ch == 0x201D ||
@@ -53,6 +58,8 @@ static size_t skip_dsl_noise(const char *s, size_t max_len, bool raw) {
         ch == ';' || ch == ':' || ch == '.' || ch == ',' ||
         ch == '!' || ch == '?' || ch == '_' || ch == '/' ||
         ch == '|' || ch == '~' ||
+        ch == 0x00B9 || ch == 0x00B2 || ch == 0x00B3 || /* Superscript 1, 2, 3 */
+        (ch >= 0x2070 && ch <= 0x2079) ||               /* Superscript 0, 4-9 */
         g_unichar_type(ch) == G_UNICODE_NON_SPACING_MARK)
         return cl;
     return 0;
@@ -267,7 +274,7 @@ FlatIndex* flat_index_open(const char *db_path)
         }
     }
 
-    sqlite3_prepare_v2(db, "SELECT rowid-1 FROM entries WHERE normalized = ? LIMIT 1;", -1, (sqlite3_stmt**)&idx->stmt_search, NULL);
+    sqlite3_prepare_v2(db, "SELECT rowid-1 FROM entries WHERE normalized = ? ORDER BY rowid ASC LIMIT 1;", -1, (sqlite3_stmt**)&idx->stmt_search, NULL);
     sqlite3_prepare_v2(db, "SELECT headword, d_off, d_len FROM entries WHERE rowid = ?+1;", -1, (sqlite3_stmt**)&idx->stmt_get, NULL);
     sqlite3_prepare_v2(db, "SELECT rowid-1 FROM entries WHERE normalized >= ? LIMIT 1;", -1, (sqlite3_stmt**)&idx->stmt_prefix, NULL);
 

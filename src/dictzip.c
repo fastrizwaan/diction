@@ -20,7 +20,7 @@ struct DictZip {
         unsigned char *buf;
         size_t len;
         uint64_t last_used;
-    } cache[8];
+    } cache[256];
     uint64_t cache_clock;
     GMutex dz_mutex;
 };
@@ -72,7 +72,7 @@ DictZip* dictzip_open(const char *path) {
             for (uint32_t i = 0; i < dz->chcnt; i++) {
                 dz->lens[i] = ru16(p + 4 + 6 + 2 * i);
             }
-            for (uint32_t i = 0; i < 8; i++) {
+            for (uint32_t i = 0; i < 256; i++) {
                 dz->cache[i].idx = (uint32_t)-1;
                 dz->cache[i].buf = NULL;
                 dz->cache[i].last_used = 0;
@@ -139,7 +139,7 @@ unsigned char* dictzip_read(DictZip *dz, uint64_t offset, uint32_t length, size_
         unsigned char *block_data = NULL;
 
         int cache_hit = -1;
-        for (int j = 0; j < 8; j++) {
+        for (int j = 0; j < 256; j++) {
             if (dz->cache[j].idx == i && dz->cache[j].buf) {
                 cache_hit = j;
                 break;
@@ -191,7 +191,7 @@ unsigned char* dictzip_read(DictZip *dz, uint64_t offset, uint32_t length, size_
             /* LRU replacement */
             int target = 0;
             uint64_t oldest = dz->cache[0].last_used;
-            for (int j = 1; j < 8; j++) {
+            for (int j = 1; j < 256; j++) {
                 if (dz->cache[j].last_used < oldest) {
                     oldest = dz->cache[j].last_used;
                     target = j;
@@ -236,7 +236,7 @@ void dictzip_close(DictZip *dz) {
     if (dz->f) fclose(dz->f);
     free(dz->lens);
     free(dz->offs);
-    for (int i = 0; i < 8; i++) free(dz->cache[i].buf);
+    for (int i = 0; i < 256; i++) free(dz->cache[i].buf);
     g_mutex_clear(&dz->dz_mutex);
     free(dz);
 }

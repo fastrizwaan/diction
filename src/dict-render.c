@@ -2988,12 +2988,6 @@ char* dsl_render_body_only(const char *dsl_text,
 
     if (format == DICT_FORMAT_MDX || format == DICT_FORMAT_STARDICT || format == DICT_FORMAT_BGL || 
         format == DICT_FORMAT_SLOB || format == DICT_FORMAT_XDXF || format == DICT_FORMAT_SDICT) {
-        if (format == DICT_FORMAT_SLOB && headword && strcmp(headword, "noon") == 0) {
-            fprintf(stderr, "SLOB RAW HTML FOR noon: %.*s\n", (int)length, dsl_text);
-        }
-        if (format == DICT_FORMAT_SLOB && headword && strcmp(headword, "brizhdevod") == 0) {
-            fprintf(stderr, "SLOB RAW HTML FOR brizhdevod: %.*s\n", (int)length, dsl_text);
-        }
         gboolean treat_as_html = (format == DICT_FORMAT_MDX || format == DICT_FORMAT_STARDICT || 
                                   format == DICT_FORMAT_BGL || format == DICT_FORMAT_SLOB || 
                                   format == DICT_FORMAT_SDICT || looks_like_html(dsl_text, length));

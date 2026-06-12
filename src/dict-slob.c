@@ -152,6 +152,73 @@ static unsigned char* slob_decompress(SlobCompression comp, const unsigned char 
     return NULL;
 }
 
+typedef struct {
+    DictMmap *dm;
+} SlobResourceBackend;
+
+static char* slob_res_get(ResourceReader *reader, const char *name) {
+    SlobResourceBackend *backend = resource_reader_get_backend(reader);
+    if (!backend || !backend->dm || !backend->dm->index) return NULL;
+
+    const char *extract_dir = resource_reader_get_dir(reader);
+    if (!extract_dir) return NULL;
+
+    char *dest_path = g_build_filename(extract_dir, name, NULL);
+    if (g_file_test(dest_path, G_FILE_TEST_EXISTS)) {
+        return dest_path;
+    }
+
+    size_t pos = flat_index_search(backend->dm->index, name);
+    if (pos != (size_t)-1) {
+        const TreeEntry *entry = flat_index_get(backend->dm->index, pos);
+        if (!entry) return NULL;
+        size_t len = 0;
+        char *to_free = NULL;
+        const char *data = NULL;
+        
+        if (backend->dm->chunk_reader) {
+            char *chunk_data = dict_chunk_reader_get_definition(backend->dm->chunk_reader, entry->d_off, entry->d_len);
+            if (chunk_data) {
+                data = chunk_data;
+                len = entry->d_len;
+                to_free = chunk_data;
+            }
+        } else {
+            if (entry->d_off + entry->d_len <= backend->dm->size) {
+                data = backend->dm->data + entry->d_off;
+                len = entry->d_len;
+            }
+        }
+        
+        if (data && len > 0) {
+            dict_cache_prepare_target_path(dest_path, len);
+            FILE *f = fopen(dest_path, "wb");
+            if (f) {
+                fwrite(data, 1, len, f);
+                fclose(f);
+                g_free(to_free);
+                return dest_path;
+            }
+        }
+        g_free(to_free);
+    }
+    
+    g_free(dest_path);
+    return NULL;
+}
+
+static gboolean slob_res_has(ResourceReader *reader, const char *name) {
+    SlobResourceBackend *backend = resource_reader_get_backend(reader);
+    if (!backend || !backend->dm || !backend->dm->index) return FALSE;
+
+    return flat_index_search(backend->dm->index, name) != (size_t)-1;
+}
+
+static void slob_res_close(ResourceReader *reader) {
+    SlobResourceBackend *backend = resource_reader_get_backend(reader);
+    g_free(backend);
+}
+
 DictMmap* parse_slob_file(const char *path, volatile gint *cancel_flag, gint expected) {
     (void)cancel_flag; (void)expected;
     int fd = open(path, O_RDONLY);
@@ -391,6 +458,12 @@ DictMmap* parse_slob_file(const char *path, volatile gint *cancel_flag, gint exp
         dm->is_compressed = TRUE;
         dm->chunk_reader = dict_chunk_reader_new(dm->data, dm->size, (const DictCacheHeader*)dm->data);
     }
+
+    char *res_dir = g_build_filename(g_get_user_cache_dir(), "diction", "slob_res", dm->name, NULL);
+    SlobResourceBackend *backend = g_new0(SlobResourceBackend, 1);
+    backend->dm = dm;
+    dm->resource_reader = resource_reader_new(res_dir, backend, slob_res_get, slob_res_has, slob_res_close);
+    g_free(res_dir);
 
     settings_scan_progress_notify(path, 100);
     g_free(cache_path);

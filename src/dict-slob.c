@@ -120,20 +120,35 @@ static unsigned char* slob_decompress(SlobCompression comp, const unsigned char 
         return dst;
     }
     if (comp == SLOB_COMP_LZMA2) {
-        size_t cap = src_len * 5 + 1024;
+        size_t cap = src_len * 20 + 1024;
         unsigned char *dst = g_malloc(cap);
-        size_t in_pos = 0, out_pos = 0;
-        uint64_t memlimit = UINT64_MAX;
-        lzma_ret ret = lzma_stream_buffer_decode(&memlimit, 0, NULL, (uint8_t*)src, &in_pos, src_len, (uint8_t*)dst, &out_pos, cap);
-        if (ret == LZMA_BUF_ERROR) {
-            /* Retry with larger buffer for LZMA2 if needed */
-            cap *= 4;
-            dst = g_realloc(dst, cap);
-            in_pos = 0; out_pos = 0;
-            ret = lzma_stream_buffer_decode(&memlimit, 0, NULL, (uint8_t*)src, &in_pos, src_len, (uint8_t*)dst, &out_pos, cap);
-        }
+        lzma_options_lzma opt;
+        lzma_lzma_preset(&opt, LZMA_PRESET_DEFAULT);
+        lzma_filter filters[2] = {
+            { .id = LZMA_FILTER_LZMA2, .options = &opt },
+            { .id = LZMA_VLI_UNKNOWN, .options = NULL }
+        };
+        lzma_stream strm = LZMA_STREAM_INIT;
+        lzma_ret ret = lzma_raw_decoder(&strm, filters);
         if (ret != LZMA_OK) { g_free(dst); return NULL; }
-        *out_len = out_pos;
+        
+        strm.next_in = src;
+        strm.avail_in = src_len;
+        strm.next_out = dst;
+        strm.avail_out = cap;
+        
+        ret = lzma_code(&strm, LZMA_FINISH);
+        while ((ret == LZMA_OK || ret == LZMA_BUF_ERROR) && strm.avail_out == 0) {
+            cap *= 2;
+            dst = g_realloc(dst, cap);
+            strm.next_out = dst + strm.total_out;
+            strm.avail_out = cap - strm.total_out;
+            ret = lzma_code(&strm, LZMA_FINISH);
+        }
+        lzma_end(&strm);
+        
+        if (ret != LZMA_STREAM_END && ret != LZMA_OK) { g_free(dst); return NULL; }
+        *out_len = strm.total_out;
         return dst;
     }
     if (comp == SLOB_COMP_BZ2) {

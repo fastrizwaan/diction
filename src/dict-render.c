@@ -346,11 +346,21 @@ static char *adjust_color_value_for_theme(const char *value, gboolean dark_mode,
         }
 
         if (is_background) {
+            if (dark_mode) {
+                if (g_ascii_strcasecmp(trimmed, "black") == 0 ||
+                    g_ascii_strcasecmp(trimmed, "#000") == 0 ||
+                    g_ascii_strcasecmp(trimmed, "#000000") == 0 ||
+                    g_ascii_strcasecmp(trimmed, "rgb(0,0,0)") == 0 ||
+                    g_ascii_strcasecmp(trimmed, "rgb(0, 0, 0)") == 0) {
+                    g_free(trimmed);
+                    return g_strdup("transparent");
+                }
+            }
             if (g_ascii_strcasecmp(trimmed, "white") == 0 ||
                 g_ascii_strcasecmp(trimmed, "ivory") == 0 ||
                 g_ascii_strcasecmp(trimmed, "lightyellow") == 0) {
                 g_free(trimmed);
-                return g_strdup("#2b2b2b");
+                return g_strdup("transparent");
             }
         } else {
             const char *adjusted = get_dark_mode_color(trimmed);
@@ -360,9 +370,11 @@ static char *adjust_color_value_for_theme(const char *value, gboolean dark_mode,
             }
             if (g_ascii_strcasecmp(trimmed, "black") == 0 ||
                 g_ascii_strcasecmp(trimmed, "dimgray") == 0 ||
-                g_ascii_strcasecmp(trimmed, "dimgrey") == 0) {
+                g_ascii_strcasecmp(trimmed, "dimgrey") == 0 ||
+                g_ascii_strcasecmp(trimmed, "gray") == 0 ||
+                g_ascii_strcasecmp(trimmed, "grey") == 0) {
                 g_free(trimmed);
-                return g_strdup("#d8d8d8");
+                return g_strdup("var(--body-color)");
             }
         }
     } else if (!is_background) {
@@ -2542,6 +2554,7 @@ char* dict_render_shared_styles(int dark_mode, const char *theme_name, const cha
         "table{max-width:100%;border-collapse:collapse;}"
         "td,th{vertical-align:top;border:1px solid var(--table-border);}"
         "pre,code{white-space:pre-wrap;border-radius:6px;padding:0.2em 0.35em;background:var(--code-bg);color:var(--code-fg);}"
+        ".rendered-entry-body > pre:first-child:last-child,.slobdict > pre:first-child:last-child{background:transparent;border-radius:0;padding:0;color:inherit;font-family:inherit;}"
         ".dict-link, a, a:link, a:visited, a:active, kref, ref, .reference, .xdxf-kref{color:var(--link-color) !important;text-decoration:none;cursor:pointer;}");
     buf_append_str(&b, "a:hover, .dict-link:hover, kref:hover, ref:hover, .xdxf-kref:hover{text-decoration:underline !important;}");
     

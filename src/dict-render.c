@@ -3000,10 +3000,12 @@ char* dsl_render_body_only(const char *dsl_text,
     }
 
     if (format == DICT_FORMAT_MDX || format == DICT_FORMAT_STARDICT || format == DICT_FORMAT_BGL || 
-        format == DICT_FORMAT_SLOB || format == DICT_FORMAT_XDXF || format == DICT_FORMAT_SDICT) {
+        format == DICT_FORMAT_SLOB || format == DICT_FORMAT_XDXF || format == DICT_FORMAT_SDICT ||
+        format == DICT_FORMAT_ZIM) {
         gboolean treat_as_html = (format == DICT_FORMAT_MDX || format == DICT_FORMAT_STARDICT || 
                                   format == DICT_FORMAT_BGL || format == DICT_FORMAT_SLOB || 
-                                  format == DICT_FORMAT_SDICT || looks_like_html(dsl_text, length));
+                                  format == DICT_FORMAT_SDICT || format == DICT_FORMAT_ZIM ||
+                                  looks_like_html(dsl_text, length));
         gboolean treat_as_tagged_plain = (!treat_as_html && looks_like_tagged_plain_markup(dsl_text, length));
 
         if (!treat_as_html && !treat_as_tagged_plain) {

@@ -351,6 +351,8 @@ DictFormat dict_detect_format(const char *path) {
         return DICT_FORMAT_BGL;
     if (ends_with_ci(path, ".slob"))
         return DICT_FORMAT_SLOB;
+    if (ends_with_ci(path, ".zim") || ends_with_ci(path, ".zimaa"))
+        return DICT_FORMAT_ZIM;
     if (ends_with_ci(path, ".xdxf") || ends_with_ci(path, ".xdxf.dz"))
         return DICT_FORMAT_XDXF;
     if (ends_with_ci(path, ".index"))
@@ -504,6 +506,9 @@ DictMmap* dict_load_any(const char *path, DictFormat fmt, volatile gint *cancel_
             break;
         case DICT_FORMAT_SDICT:
             dict = parse_sdict_file(path, cancel_flag, expected_generation);
+            break;
+        case DICT_FORMAT_ZIM:
+            dict = parse_zim_file(path, cancel_flag, expected_generation);
             break;
 
         default:

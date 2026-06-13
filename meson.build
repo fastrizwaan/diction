@@ -50,6 +50,7 @@ engine_srcs = [
   'src/dict-dictd.c',
   'src/text-utils.c',
   'src/dict-sdict.c',
+  'src/dict-zim.c',
   'src/dict-dsl-scanner.c',
   'src/dict-dsl-index.c',
   'src/safe-fs.c'
@@ -144,4 +145,11 @@ install_subdir(
   'vscode-themes',
   install_dir: join_paths(get_option('datadir'), 'diction', 'themes'),
   strip_directory: true
+)
+
+executable('test_zim', 'scratch/test_zim.c',
+  include_directories: include_directories('src'),
+  c_args: '-DDICTION_NO_GTK',
+  dependencies: [ dependency('glib-2.0'), dependency('gio-unix-2.0'), gdk_pixbuf_dep, zlib_dep, json_dep, archive_dep, zstd_dep, lzma_dep, bz2_dep, lzo_dep, xml_dep, sqlite3_dep ],
+  link_with: static_library('test_engine', engine_srcs, dependencies: [ dependency('glib-2.0'), dependency('gio-unix-2.0'), gdk_pixbuf_dep, zlib_dep, json_dep, archive_dep, zstd_dep, lzma_dep, bz2_dep, lzo_dep, xml_dep, sqlite3_dep ], c_args: '-DDICTION_NO_GTK', include_directories: include_directories('src'))
 )

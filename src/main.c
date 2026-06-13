@@ -1343,6 +1343,10 @@ static void sidebar_search_task_func(GTask *task, gpointer source_object, gpoint
                 size_t hw_len = 0;
                 char *hw = flat_index_get_headword(state->current_dict->dict->index, state->current_pos - 1, &hw_len);
                 if (hw) {
+                    if (hw[0] == '\x01' || hw[0] == '~') {
+                        g_free(hw);
+                        continue;
+                    }
                     if (!fast_strncasestr(hw, hw_len, state->query)) {
                         g_free(hw);
                         
@@ -1369,6 +1373,11 @@ static void sidebar_search_task_func(GTask *task, gpointer source_object, gpoint
 
         size_t raw_len = 0;
         char *word = flat_index_get_headword(state->current_dict->dict->index, state->current_pos - 1, &raw_len);
+        if (!word) continue;
+        if (word[0] == '\x01' || word[0] == '~') {
+            g_free(word);
+            continue;
+        }
         char *clean_word = normalize_headword_for_search(word, TRUE);
         if (!clean_word || text_has_replacement_char(clean_word)) {
             g_free(word);
@@ -4090,7 +4099,16 @@ static gpointer random_word_thread_worker(gpointer data) {
             clean_hw = normalize_headword_for_render(found_word, hw_len, FALSE);
 
             if (clean_hw && *clean_hw && !text_has_replacement_char(clean_hw)) {
-                break;
+                if ((unsigned char)clean_hw[0] == 0x01 || (unsigned char)clean_hw[0] == 0x02) {
+                    /* Skip internal resource prefixes */
+                } else if ((g_str_has_prefix(clean_hw, "I/") || g_str_has_prefix(clean_hw, "-/")) && 
+                           (g_str_has_suffix(clean_hw, ".webp") || g_str_has_suffix(clean_hw, ".png") || 
+                            g_str_has_suffix(clean_hw, ".jpg") || g_str_has_suffix(clean_hw, ".css") || 
+                            g_str_has_suffix(clean_hw, ".js"))) {
+                    /* Skip old ZIM index pollution artifacts */
+                } else {
+                    break;
+                }
             }
 
             g_free(found_word);
@@ -5205,6 +5223,10 @@ static void collect_dictionary_candidate_paths_with_find(const char *dirpath,
     g_ptr_array_add(argv_array, g_strdup("-iname")); g_ptr_array_add(argv_array, g_strdup("*.bgl"));
     g_ptr_array_add(argv_array, g_strdup("-o"));
     g_ptr_array_add(argv_array, g_strdup("-iname")); g_ptr_array_add(argv_array, g_strdup("*.slob"));
+    g_ptr_array_add(argv_array, g_strdup("-o"));
+    g_ptr_array_add(argv_array, g_strdup("-iname")); g_ptr_array_add(argv_array, g_strdup("*.zim"));
+    g_ptr_array_add(argv_array, g_strdup("-o"));
+    g_ptr_array_add(argv_array, g_strdup("-iname")); g_ptr_array_add(argv_array, g_strdup("*.zimaa"));
     g_ptr_array_add(argv_array, g_strdup("-o"));
     g_ptr_array_add(argv_array, g_strdup("-iname")); g_ptr_array_add(argv_array, g_strdup("*.xdxf"));
     g_ptr_array_add(argv_array, g_strdup("-o"));

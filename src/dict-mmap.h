@@ -51,6 +51,7 @@ char* stardict_transcode_article(const char *raw_data, size_t size, const char *
 DictMmap* parse_slob_file(const char *path, volatile gint *cancel_flag, gint expected);
 DictMmap* parse_xdxf_file(const char *path, volatile gint *cancel_flag, gint expected);
 DictMmap* parse_sdict_file(const char *path, volatile gint *cancel_flag, gint expected);
+DictMmap* parse_zim_file(const char *path, volatile gint *cancel_flag, gint expected);
 const char* mdx_get_definition_on_the_fly(DictMmap *dict, const FlatTreeEntry *entry, size_t *out_len, char **out_to_free);
 const char* xdxf_get_definition_on_the_fly(DictMmap *dict, const FlatTreeEntry *entry, size_t *out_len, char **out_to_free);
 void mdx_free_context(void *ctx_ptr);

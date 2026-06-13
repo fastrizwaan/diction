@@ -53,16 +53,19 @@ static char* canonicalize_and_strip_path(const char *path) {
     
     /* Strip single extensions */
     len = strlen(p);
-    if (len > 4) {
-        if (g_ascii_strcasecmp(p + len - 4, ".dsl") == 0 ||
-            g_ascii_strcasecmp(p + len - 4, ".mdx") == 0 ||
-            g_ascii_strcasecmp(p + len - 4, ".ifo") == 0 ||
-            g_ascii_strcasecmp(p + len - 4, ".idx") == 0 ||
-            g_ascii_strcasecmp(p + len - 4, ".bgl") == 0 ||
-            g_ascii_strcasecmp(p + len - 4, ".xdxf") == 0 ||
-            g_ascii_strcasecmp(p + len - 4, ".slob") == 0) {
-            p[len - 4] = '\0';
-        }
+    if (len > 6 && g_ascii_strcasecmp(p + len - 6, ".index") == 0) {
+        p[len - 6] = '\0';
+    } else if (len > 5 && g_ascii_strcasecmp(p + len - 5, ".xdxf") == 0) {
+        p[len - 5] = '\0';
+    } else if (len > 5 && g_ascii_strcasecmp(p + len - 5, ".slob") == 0) {
+        p[len - 5] = '\0';
+    } else if (len > 4 && (g_ascii_strcasecmp(p + len - 4, ".dsl") == 0 ||
+                           g_ascii_strcasecmp(p + len - 4, ".mdx") == 0 ||
+                           g_ascii_strcasecmp(p + len - 4, ".ifo") == 0 ||
+                           g_ascii_strcasecmp(p + len - 4, ".idx") == 0 ||
+                           g_ascii_strcasecmp(p + len - 4, ".bgl") == 0 ||
+                           g_ascii_strcasecmp(p + len - 4, ".dct") == 0)) {
+        p[len - 4] = '\0';
     }
     
     return p;

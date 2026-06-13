@@ -104,14 +104,27 @@ DictMmap* parse_dictd_file(const char *index_path, volatile gint *cancel_flag, g
                     }
                     
                     /* Try to read dictionary name from cache if available */
-                    /* (Normally the cache builder should handle this, but let's be safe) */
-                    dict->name = g_path_get_basename(index_path);
-                    char *dot = strrchr(dict->name, '.');
-                    if (dot) *dot = '\0';
-
-                    g_free(dict_path);
-                    g_free(cache_path);
-                    return dict;
+                    const char *m_name = flat_index_get_metadata(dict->index, "dict_name");
+                    if (m_name) {
+                        dict->name = g_strdup(m_name);
+                    } else {
+                        dict->name = g_path_get_basename(index_path);
+                        char *dot = strrchr(dict->name, '.');
+                        if (dot) *dot = '\0';
+                    }
+                    if (!dict->index || dict->index->count == 0) {
+                        fprintf(stderr, "[DICTD] Cache invalid structure. Rebuilding completely.\n");
+                        flat_index_close(dict->index);
+                        if (dict->chunk_reader) dict_chunk_reader_free(dict->chunk_reader);
+                        munmap((void*)dict->data, dict->size);
+                        close(dict->fd);
+                        g_free(dict);
+                        /* fallthrough to rebuild */
+                    } else {
+                        g_free(dict_path);
+                        g_free(cache_path);
+                        return dict;
+                    }
                 }
                 close(fd);
             }
@@ -179,13 +192,33 @@ DictMmap* parse_dictd_file(const char *index_path, volatile gint *cancel_flag, g
 
         if (strcmp(headword, "00-database-short") == 0 || strcmp(headword, "00databaseshort") == 0) {
             size_t raw_len = 0;
-            unsigned char *raw_def = dictzip_read(dz, offset, (uint32_t)size, &raw_len);
+            unsigned char *raw_def = NULL;
+            if (dz) {
+                raw_def = dictzip_read(dz, offset, (uint32_t)size, &raw_len);
+            } else if (fdict) {
+                raw_def = malloc(size + 2);
+                if (raw_def) {
+                    fseek(fdict, (long)offset, SEEK_SET);
+                    if (fread(raw_def, 1, size, fdict) == size) {
+                        raw_def[size] = '\0';
+                        raw_def[size + 1] = '\0';
+                        raw_len = size;
+                    } else {
+                        free(raw_def);
+                        raw_def = NULL;
+                    }
+                }
+            }
             if (raw_def) {
                 char *p = (char*)raw_def;
-                while (*p && (*p == ' ' || *p == '\t' || *p == '\n')) p++;
+                while (*p && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) p++;
+                if (g_str_has_prefix(p, "00-database-short")) p += 17;
+                else if (g_str_has_prefix(p, "00databaseshort")) p += 15;
+                else if (strncmp(p, headword, strlen(headword)) == 0) p += strlen(headword);
+                while (*p && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) p++;
                 char *end = p;
                 while (*end && *end != '\n' && *end != '\r') end++;
-                bookname = g_strndup(p, (size_t)(end - p));
+                if (end > p) bookname = g_strndup(p, (size_t)(end - p));
                 free(raw_def);
             }
         }
@@ -209,7 +242,23 @@ DictMmap* parse_dictd_file(const char *index_path, volatile gint *cancel_flag, g
         
         DictdIndexEntry *ie = &g_array_index(index_entries, DictdIndexEntry, i);
         size_t raw_len = 0;
-        unsigned char *raw_def = dictzip_read(dz, ie->offset, (uint32_t)ie->size, &raw_len);
+        unsigned char *raw_def = NULL;
+        if (dz) {
+            raw_def = dictzip_read(dz, ie->offset, (uint32_t)ie->size, &raw_len);
+        } else if (fdict) {
+            raw_def = malloc(ie->size + 2);
+            if (raw_def) {
+                fseek(fdict, (long)ie->offset, SEEK_SET);
+                if (fread(raw_def, 1, ie->size, fdict) == ie->size) {
+                    raw_def[ie->size] = '\0';
+                    raw_def[ie->size + 1] = '\0';
+                    raw_len = ie->size;
+                } else {
+                    free(raw_def);
+                    raw_def = NULL;
+                }
+            }
+        }
         if (!raw_def) continue;
 
         uint64_t h_off, d_off;
@@ -261,6 +310,9 @@ DictMmap* parse_dictd_file(const char *index_path, volatile gint *cancel_flag, g
                                     entries[i].d_len);
                             }
                             dict_hw_builder_set_metadata(hw, "source_path", index_path);
+                            if (bookname) {
+                                dict_hw_builder_set_metadata(hw, "dict_name", bookname);
+                            }
                             dict_hw_builder_finalize(hw);
                             struct stat hw_src_st;
                             if (stat(index_path, &hw_src_st) == 0) {
@@ -280,6 +332,16 @@ DictMmap* parse_dictd_file(const char *index_path, volatile gint *cancel_flag, g
     g_free(entries);
     if (dz) dictzip_close(dz);
     if (fdict) fclose(fdict);
+
+    if (cancel_flag && g_atomic_int_get(cancel_flag) != expected) {
+        unlink(cache_path);
+        if (hw_path) unlink(hw_path);
+        g_free(hw_path);
+        g_free(dict_path);
+        g_free(cache_path);
+        g_free(bookname);
+        return NULL;
+    }
 
     /* Open the newly built cache */
     int fd = open(cache_path, O_RDONLY);

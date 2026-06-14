@@ -125,14 +125,19 @@ GList* wiki_prefix_search(DictMmap *dict, const char *prefix, GError **error) {
 char* wiki_clean_html(const char *base_url, const char *raw_html) {
     if (!raw_html) return NULL;
 
-    GRegex *regex = g_regex_new("<a\\s+[^>]*href=\"/wiki/([^\"]+)\"", G_REGEX_CASELESS, 0, NULL);
+    GRegex *regex = g_regex_new("<a\\s+[^>]*href=\"/wiki/(?!(?:File|Image|Special|Media|Fichier|Datei|Archivo|Ficheiro):)([^\"]+)\"", G_REGEX_CASELESS, 0, NULL);
     char *step1 = g_regex_replace(regex, raw_html, -1, 0, "<a href=\"dict://\\1\"", 0, NULL);
     g_regex_unref(regex);
 
-    GRegex *proto_regex = g_regex_new("(href|src|srcset)=\"//", G_REGEX_CASELESS, 0, NULL);
-    char *step2 = g_regex_replace(proto_regex, step1, -1, 0, "\\1=\"https://", 0, NULL);
-    g_regex_unref(proto_regex);
+    GRegex *redlink_regex = g_regex_new("<a\\s+[^>]*href=\"/w/index\\.php\\?title=([^&\"]+)([^&\"]*redlink=1[^\"]*)\"", G_REGEX_CASELESS, 0, NULL);
+    char *step1b = g_regex_replace(redlink_regex, step1, -1, 0, "<a href=\"dict://\\1\\2\"", 0, NULL);
+    g_regex_unref(redlink_regex);
     g_free(step1);
+
+    GRegex *proto_regex = g_regex_new("(href|src|srcset)=\"//", G_REGEX_CASELESS, 0, NULL);
+    char *step2 = g_regex_replace(proto_regex, step1b, -1, 0, "\\1=\"https://", 0, NULL);
+    g_regex_unref(proto_regex);
+    g_free(step1b);
 
     char *base_domain = g_strdup(base_url);
     char *proto_end = strstr(base_domain, "://");
@@ -153,7 +158,10 @@ char* wiki_clean_html(const char *base_url, const char *raw_html) {
     g_free(base_domain);
     g_free(step2);
 
-    return step3;
+    char *wrapped = g_strdup_printf("<div class=\"mwiki\">%s</div>", step3);
+    g_free(step3);
+
+    return wrapped;
 }
 
 char* wiki_fetch_article(DictMmap *dict, const char *query, GError **error) {

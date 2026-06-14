@@ -2679,6 +2679,12 @@ static void on_decide_policy(WebKitWebView *v, WebKitPolicyDecision *d, WebKitPo
         WebKitNavigationAction *na = webkit_navigation_policy_decision_get_navigation_action(nd);
         WebKitURIRequest *req = webkit_navigation_action_get_request(na);
         const char *uri = webkit_uri_request_get_uri(req);
+        if (uri && (g_str_has_prefix(uri, "http://") || g_str_has_prefix(uri, "https://"))) {
+            fprintf(stderr, "[EXTERNAL LINK CLICKED]: '%s'\n", uri);
+            g_app_info_launch_default_for_uri(uri, NULL, NULL);
+            webkit_policy_decision_ignore(d);
+            return;
+        }
         if (g_str_has_prefix(uri, "dict://")) {
             char *unescaped = g_uri_unescape_string(uri + 7, NULL);
             fprintf(stderr, "[LINK CLICKED]: '%s'\n", unescaped ? unescaped : uri + 7);
@@ -2694,21 +2700,24 @@ static void on_decide_policy(WebKitWebView *v, WebKitPolicyDecision *d, WebKitPo
         } else if (g_strcmp0(uri, "file:///") != 0) {
             fprintf(stderr, "[LINK CLICKED]: '%s'\n", uri);
         }
-        if (g_str_has_prefix(uri, "dict://")) {
-            const char *word = uri + 7;
+        if (g_str_has_prefix(uri, "dict://") || g_str_has_prefix(uri, "entry://") || g_str_has_prefix(uri, "bword://")) {
+            const char *word = g_str_has_prefix(uri, "dict://") ? uri + 7 : uri + 8;
             char *unescaped = g_uri_unescape_string(word, NULL);
             const char *final_word = unescaped ? unescaped : word;
-            gtk_editable_set_text(GTK_EDITABLE(user_data), final_word);
-            execute_search_now_for_query(final_word, TRUE);
-            g_free(unescaped);
-            webkit_policy_decision_ignore(d);
-            return;
-        } else if (g_str_has_prefix(uri, "entry://") || g_str_has_prefix(uri, "bword://")) {
-            const char *word = uri + 8;
-            char *unescaped = g_uri_unescape_string(word, NULL);
-            const char *final_word = unescaped ? unescaped : word;
-            gtk_editable_set_text(GTK_EDITABLE(user_data), final_word);
-            execute_search_now_for_query(final_word, TRUE);
+            
+            char *clean_word = g_strdup(final_word);
+            char *amp = strchr(clean_word, '&');
+            if (amp) *amp = '\0';
+            char *qmark = strchr(clean_word, '?');
+            if (qmark) *qmark = '\0';
+            
+            for (char *p = clean_word; *p; p++) {
+                if (*p == '_') *p = ' ';
+            }
+            
+            gtk_editable_set_text(GTK_EDITABLE(user_data), clean_word);
+            execute_search_now_for_query(clean_word, TRUE);
+            g_free(clean_word);
             g_free(unescaped);
             webkit_policy_decision_ignore(d);
             return;
@@ -3832,23 +3841,23 @@ static void on_search_webview_task_ready(GObject *source_object, GAsyncResult *r
         webkit_web_view_load_html(data->target_wv, data->html_result, "file:///");
         
         char *display_title = normalize_headword_for_render(data->used_query, data->used_query ? strlen(data->used_query) : 0, FALSE);
-        set_tab_metadata(data->target_wv, data->used_query, data->is_sidebar_click ? display_title : data->used_query, 1);
+        set_tab_metadata(data->target_wv, data->query_raw, data->is_sidebar_click ? display_title : data->query_raw, 1);
         g_free(display_title);
 
         /* Auto-highlight the matching word in the search sidebar */
         select_related_word(data->used_query);
         if (data->push_history && data->target_wv == get_current_web_view()) {
-            update_history_word(data->used_query);
-            push_to_nav_history(data->used_query, data->current_search_query, data->is_fts_tab);
+            update_history_word(data->query_raw);
+            push_to_nav_history(data->query_raw, data->current_search_query, data->is_fts_tab);
         }
     } else {
         if (!data->is_sidebar_click) {
             queue_fts_highlight_for_web_view(data->target_wv, NULL);
-            set_tab_metadata(data->target_wv, data->query, "No Match", 1);
-            char *escaped_query = safe_markup_escape_n(data->query, -1);
+            set_tab_metadata(data->target_wv, data->query_raw, "No Match", 1);
+            char *escaped_query = safe_markup_escape_n(data->query_raw, -1);
             char *message = g_strdup_printf(
                 "No exact match for <b>%s</b> in any dictionary.",
-                escaped_query ? escaped_query : data->query);
+                escaped_query ? escaped_query : data->query_raw);
             render_idle_page_to_webview(data->target_wv, "No Match", message);
             g_free(message);
             g_free(escaped_query);

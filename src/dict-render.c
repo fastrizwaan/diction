@@ -1137,17 +1137,6 @@ static char *build_sound_uri(const char *resource_dir, const char *source_dir, c
     return uri;
 }
 
-static char *build_remote_sound_uri(const char *url) {
-    if (!url) {
-        return g_strdup("");
-    }
-
-    char *escaped_url = g_uri_escape_string(url, NULL, FALSE);
-    char *uri = g_strdup_printf("sound:///play?url=%s", escaped_url);
-    g_free(escaped_url);
-    return uri;
-}
-
 static gboolean file_has_extension_ci(const char *path, const char *ext) {
     if (!path || !ext) {
         return FALSE;
@@ -1378,48 +1367,6 @@ static char *get_html_attribute_value(const char *tag, const char *attr_name) {
     }
 
     return NULL;
-}
-
-static char *extract_wiktionary_audio_url(const char *tag) {
-    char *onclick = get_html_attribute_value(tag, "onclick");
-    if (!onclick) {
-        return NULL;
-    }
-
-    char *call = strstr(onclick, "kyw.a(this,");
-    if (!call) {
-        g_free(onclick);
-        return NULL;
-    }
-
-    char *arg = strchr(call, ',');
-    if (!arg) {
-        g_free(onclick);
-        return NULL;
-    }
-
-    arg++;
-    while (*arg && g_ascii_isspace(*arg)) {
-        arg++;
-    }
-
-    if (*arg != '\'' && *arg != '"') {
-        g_free(onclick);
-        return NULL;
-    }
-
-    char quote = *arg++;
-    char *end = strchr(arg, quote);
-    if (!end || end == arg) {
-        g_free(onclick);
-        return NULL;
-    }
-
-    char *token = g_strndup(arg, end - arg);
-    char *url = g_strdup_printf("https://upload.wikimedia.org/wikipedia/commons/%s.ogg", token);
-    g_free(token);
-    g_free(onclick);
-    return url;
 }
 
 static char *rewrite_css_urls(const char *css, const char *resource_dir, const char *source_dir) {
@@ -2631,10 +2578,7 @@ char* dict_render_shared_styles(int dark_mode, const char *theme_name, const cha
         "{font-size:1.05em;font-weight:bold;margin:0.2em 0 0.1em 0;}");
     buf_append_str(&b, ".rendered-entry-body h3,.rendered-entry h3,.wic h3"
         "{font-size:1.0em;font-weight:bold;margin:0.2em 0 0.1em 0;}");
-    /* Wiktionary .fvr 'or X / or Y' alternative word list */
-    buf_append_str(&b, ".fvr{display:block;font-size:0.88em;font-weight:normal;margin:0.1em 0;padding:0;}");
-    buf_append_str(&b, ".fvr li{display:block;list-style:none;margin:0;padding:0;}");
-    buf_append_str(&b, ".fvr li::before{content:'or\\00a0';font-style:italic;opacity:0.75;}");
+
     buf_append_str(&b, ".dsl-media-image{display:block;max-width:100%;height:auto;margin:0.35em 0;}");
     buf_append_str(&b, ".trn, .sense{color:var(--trn-color);line-height:1.4;}");
     buf_append_str(&b, ".ex, em{color:var(--ex-color);font-style:italic;}");
@@ -3007,37 +2951,6 @@ char* dict_render_shared_styles(int dark_mode, const char *theme_name, const cha
         buf_append_str(&b, ".thssib,.thssib a,.thssib a:link,.thssib a:visited{color:var(--link-color) !important;}");
         buf_append_str(&b, ".thssib{margin:0.3em 0 0 0.2em;font-size:0.9em;}");
 
-        /* ── Wiktionary-style etymology toggle (.eol / .ywp / kyw.s()) ────────── */
-        /* .t9d is the h3 header row; .ywp is the toggle img; .eol is the content div */
-        buf_append_str(&b, ".t9d{display:flex;align-items:center;justify-content:space-between;"
-            "border-bottom:1px solid var(--border-color);padding:0.1em 0;margin:0.4em 0 0.2em 0;cursor:default;}");
-        buf_append_str(&b, ".ywp{cursor:pointer;width:1em;height:1em;opacity:0.7;"
-            "display:inline-block;user-select:none;flex-shrink:0;margin-left:0.4em;}");
-        buf_append_str(&b, ".ywp:hover{opacity:1;}");
-        buf_append_str(&b, ".eol{overflow:hidden;}");
-        buf_append_str(&b, ".eol.collapsed{display:none;}");
-        /* Replace broken c.png/q.png with CSS-drawn SVG arrows (WebKit supports
-           CSS 'content' override on img elements to replace broken/missing images) */
-        buf_append_str(&b,
-            "img.ywp{content:url(\"data:image/svg+xml,"
-            "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'>"
-            "<path d='M3 6L8 11L13 6' stroke='currentColor' stroke-width='2' fill='none' stroke-linecap='round'/>"
-            "</svg>\");width:14px;height:14px;cursor:pointer;opacity:0.8;flex-shrink:0;color:var(--link-color);}");
-        buf_append_str(&b, "img.ywp:hover{opacity:1;}");
-        buf_append_str(&b,
-            "img.gph{content:url(\"data:image/svg+xml,"
-            "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'>"
-            "<path d='M3 6L8 11L13 6' stroke='currentColor' stroke-width='2' fill='none' stroke-linecap='round'/>"
-            "</svg>\");width:12px;height:12px;cursor:pointer;opacity:0.75;vertical-align:middle;margin-left:0.25em;color:var(--link-color);}");
-        buf_append_str(&b, "img.gph:hover{opacity:1;}");
-        buf_append_str(&b, ".ypu{display:none;margin:0.4em 0 0.2em 0.5em;border-left:1px solid var(--border-color);padding-left:0.5em;}");
-
-        /* ── Wiktionary image float (.ymp) ─── matches MDict reference border-box style */
-        buf_append_str(&b,
-            ".ymp{display:inline-block;border:1px solid var(--border-color);padding:3px;"
-            "margin:0.4em 0.8em 0.4em 0;background:var(--bg-color);vertical-align:top;"
-            "text-align:center;border-radius:2px;box-shadow:var(--paper-shadow);}");
-        buf_append_str(&b, ".ymp img{display:block;max-width:100%;height:auto;margin:0 auto;}");
         buf_append_str(&b,
             ".gdi{font-size:0.82em;text-align:center;margin:4px 0 2px 0;"
             "color:var(--com-color);font-style:italic;}");
@@ -3063,32 +2976,7 @@ char* dict_render_shared_styles(int dark_mode, const char *theme_name, const cha
                 "  el.classList.toggle('open',!open);"
                 "  return false;"
                 "}"
-                /* kyw — Wiktionary toggle handlers */
-                "var kyw={"
-                /* kyw.s(img): toggle next-sibling section (Etymology .eol) */
-                "  s:function(img){"
-                "    if(typeof event!=='undefined'&&event&&event.preventDefault)event.preventDefault();"
-                "    var h=img.parentElement;"
-                "    var box=h?h.nextElementSibling:null;"
-                "    while(box&&box.nodeType===1&&(box.tagName==='SCRIPT'||box.tagName==='BR'))box=box.nextElementSibling;"
-                "    if(!box||box.nodeType!==1)return false;"
-                "    var open=box.style.display!=='none';"
-                "    box.style.display=open?'none':'';"
-                "    img.style.transform=open?'rotate(180deg)':'';"
-                "    return false;"
-                "  },"
-                /* kyw.q(img): toggle immediately-following sibling div (quotations .ypu) */
-                "  q:function(img){"
-                "    if(typeof event!=='undefined'&&event&&event.preventDefault)event.preventDefault();"
-                "    var box=img.nextSibling;"
-                "    while(box&&box.nodeType!==1)box=box.nextSibling;"
-                "    if(!box)return false;"
-                "    var open=box.style.display!=='none'&&box.style.display!=='';"
-                "    box.style.display=open?'none':'block';"
-                "    img.classList.toggle('open',!open);"
-                "    return false;"
-                "  }"
-                "};"
+
                 "</script>");
     }
 
@@ -3304,10 +3192,7 @@ char* dsl_render_body_only(const char *dsl_text,
                     goto loop_cleanup;
                 } else if (strcmp(tag_name, "img") == 0) {
                     /* Images - handle src and srcset */
-                    char *wiktionary_audio_url = extract_wiktionary_audio_url(tag);
-                    char *img_tag = wiktionary_audio_url ? remove_html_attribute(tag, "onclick") : g_strdup(tag);
-                    char *processed_tag = process_html_tag_attribute(img_tag, "src", resource_dir, source_dir, dark_mode);
-                    g_free(img_tag);
+                    char *processed_tag = process_html_tag_attribute(tag, "src", resource_dir, source_dir, dark_mode);
                     char *with_srcset = process_html_srcset_attribute(processed_tag, resource_dir, source_dir);
                     g_free(processed_tag);
                     if (format == DICT_FORMAT_MDX) {
@@ -3316,18 +3201,7 @@ char* dsl_render_body_only(const char *dsl_text,
                         processed_tag = process_html_common_attributes(with_srcset, resource_dir, source_dir, dark_mode);
                     }
                     g_free(with_srcset);
-                    if (wiktionary_audio_url) {
-                        char *sound_uri = build_remote_sound_uri(wiktionary_audio_url);
-                        buf_append_str(&b, "<a class='dict-audio' href='");
-                        buf_append_str(&b, sound_uri);
-                        buf_append_str(&b, "'>");
-                        buf_append_str(&b, processed_tag);
-                        buf_append_str(&b, "</a>");
-                        g_free(sound_uri);
-                        g_free(wiktionary_audio_url);
-                    } else {
-                        buf_append_str(&b, processed_tag);
-                    }
+                    buf_append_str(&b, processed_tag);
                     g_free(processed_tag);
                     goto loop_cleanup;
                 } else if (strcmp(tag_name, "style") == 0) {

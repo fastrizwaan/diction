@@ -17,6 +17,7 @@ typedef enum {
     DICT_FORMAT_DICTD,
     DICT_FORMAT_SDICT,
     DICT_FORMAT_ZIM,
+    DICT_FORMAT_WIKI,
     DICT_FORMAT_UNKNOWN
 } DictFormat;
 

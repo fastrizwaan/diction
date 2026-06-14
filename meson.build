@@ -24,6 +24,7 @@ lzma_dep = dependency('liblzma')
 bz2_dep = cc.find_library('bz2', required: true)
 lzo_dep = dependency('lzo2')
 sqlite3_dep = dependency('sqlite3')
+soup_dep = dependency('libsoup-3.0')
 
 engine_srcs = [
   'src/splay-tree.c',
@@ -51,6 +52,7 @@ engine_srcs = [
   'src/text-utils.c',
   'src/dict-sdict.c',
   'src/dict-zim.c',
+  'src/dict-wiki.c',
   'src/dict-dsl-scanner.c',
   'src/dict-dsl-index.c',
   'src/safe-fs.c'
@@ -80,13 +82,13 @@ executable('diction-search-provider',
   ['src/search-provider.c', search_provider_dbus] + engine_srcs,
   include_directories: include_directories('src'),
   c_args: '-DDICTION_NO_GTK',
-  dependencies: [ dependency('glib-2.0'), dependency('gio-unix-2.0'), gdk_pixbuf_dep, zlib_dep, json_dep, archive_dep, zstd_dep, lzma_dep, bz2_dep, lzo_dep, xml_dep, sqlite3_dep ],
+  dependencies: [ dependency('glib-2.0'), dependency('gio-unix-2.0'), gdk_pixbuf_dep, zlib_dep, json_dep, archive_dep, zstd_dep, lzma_dep, bz2_dep, lzo_dep, xml_dep, sqlite3_dep, soup_dep ],
   install: true
 )
 
 executable('diction', srcs,
   include_directories: include_directories('src'),
-  dependencies: [ gtk_dep, adw_dep, webkit_dep, zlib_dep, json_dep, archive_dep, zstd_dep, lzma_dep, bz2_dep, lzo_dep, xml_dep, sqlite3_dep ],
+  dependencies: [ gtk_dep, adw_dep, webkit_dep, zlib_dep, json_dep, archive_dep, zstd_dep, lzma_dep, bz2_dep, lzo_dep, xml_dep, sqlite3_dep, soup_dep ],
   install: true,
 )
 
@@ -150,6 +152,6 @@ install_subdir(
 executable('test_zim', 'scratch/test_zim.c',
   include_directories: include_directories('src'),
   c_args: '-DDICTION_NO_GTK',
-  dependencies: [ dependency('glib-2.0'), dependency('gio-unix-2.0'), gdk_pixbuf_dep, zlib_dep, json_dep, archive_dep, zstd_dep, lzma_dep, bz2_dep, lzo_dep, xml_dep, sqlite3_dep ],
-  link_with: static_library('test_engine', engine_srcs, dependencies: [ dependency('glib-2.0'), dependency('gio-unix-2.0'), gdk_pixbuf_dep, zlib_dep, json_dep, archive_dep, zstd_dep, lzma_dep, bz2_dep, lzo_dep, xml_dep, sqlite3_dep ], c_args: '-DDICTION_NO_GTK', include_directories: include_directories('src'))
+  dependencies: [ dependency('glib-2.0'), dependency('gio-unix-2.0'), gdk_pixbuf_dep, zlib_dep, json_dep, archive_dep, zstd_dep, lzma_dep, bz2_dep, lzo_dep, xml_dep, sqlite3_dep, soup_dep ],
+  link_with: static_library('test_engine', engine_srcs, dependencies: [ dependency('glib-2.0'), dependency('gio-unix-2.0'), gdk_pixbuf_dep, zlib_dep, json_dep, archive_dep, zstd_dep, lzma_dep, bz2_dep, lzo_dep, xml_dep, sqlite3_dep, soup_dep ], c_args: '-DDICTION_NO_GTK', include_directories: include_directories('src'))
 )

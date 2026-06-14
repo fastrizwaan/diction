@@ -283,6 +283,7 @@ static void queue_fts_highlight_for_web_view(WebKitWebView *wv, const char *quer
 
 typedef struct {
     char *query;
+    char *query_raw;
     char *query_key;
     char *query_compact_key;
     guint query_len;
@@ -371,6 +372,7 @@ static void sidebar_search_state_unref(SidebarSearchState *state) {
     if (!g_atomic_int_dec_and_test(&state->ref_count)) return;
     
     g_free(state->query);
+    g_free(state->query_raw);
     g_free(state->query_key);
     g_free(state->query_compact_key);
     if (state->seen_words) {
@@ -1111,6 +1113,45 @@ static void sidebar_search_task_func(GTask *task, gpointer source_object, gpoint
         for (guint idx = 0; state->search_entries && idx < state->search_entries->len && added < max_seed_rows; idx++) {
             if (g_atomic_int_get(&state->cancelled)) break;
             DictEntry *entry = g_ptr_array_index(state->search_entries, idx);
+
+            if (entry->format == DICT_FORMAT_WIKI) {
+                GError *err = NULL;
+                GList *results = wiki_prefix_search(entry->dict, state->query_raw ? state->query_raw : state->query, &err);
+                if (err) {
+                    g_printerr("Wiki prefix search failed: %s\n", err->message);
+                    g_clear_error(&err);
+                }
+                for (GList *l = results; l && added < max_seed_rows; l = l->next) {
+                    if (g_atomic_int_get(&state->cancelled)) break;
+                    char *title = (char*)l->data;
+                    char *clean = normalize_headword_for_search(title, TRUE);
+                    if (!clean) {
+                        g_free(title);
+                        continue;
+                    }
+                    char *key = g_utf8_casefold(clean, -1);
+                    g_free(clean);
+
+                    if (!g_hash_table_contains(state->seen_words, key)) {
+                        RelatedRowPayload *payload = g_new0(RelatedRowPayload, 1);
+                        payload->type = RELATED_ROW_CANDIDATE;
+                        payload->word = g_strdup(title);
+                        payload->sort_key = g_utf8_casefold(title, -1);
+                        payload->fuzzy_score = 1.0;
+
+                        g_hash_table_add(state->seen_words, key);
+                        g_ptr_array_add(seed_msg->labels[SEARCH_BUCKET_EXACT], g_strdup(title));
+                        g_ptr_array_add(seed_msg->payloads[SEARCH_BUCKET_EXACT], payload);
+                        added++;
+                    } else {
+                        g_free(key);
+                    }
+                    g_free(title);
+                }
+                g_list_free(results);
+                continue;
+            }
+
             size_t pos = flat_index_search_prefix_fast(entry->dict->index, state->query);
             
             while (pos != (size_t)-1 && added < max_seed_rows) {
@@ -1513,6 +1554,7 @@ static void populate_search_sidebar_with_mode(const char *query, gboolean force_
     }
 
     sidebar_search_state->query = clean ? clean : g_strdup("");
+    sidebar_search_state->query_raw = g_strdup(query);
     sidebar_search_state->query_key = g_utf8_casefold(sidebar_search_state->query, -1);
     sidebar_search_state->query_len = utf8_length_or_bytes(sidebar_search_state->query_key);
     sidebar_search_state->query_compact_key = collapse_search_separators(sidebar_search_state->query_key);
@@ -2655,33 +2697,27 @@ static void on_decide_policy(WebKitWebView *v, WebKitPolicyDecision *d, WebKitPo
         if (g_str_has_prefix(uri, "dict://")) {
             const char *word = uri + 7;
             char *unescaped = g_uri_unescape_string(word, NULL);
-            char *clean_link = normalize_headword_for_search(unescaped ? unescaped : word, TRUE);
-            const char *final_word = clean_link ? clean_link : (unescaped ? unescaped : word);
+            const char *final_word = unescaped ? unescaped : word;
             gtk_editable_set_text(GTK_EDITABLE(user_data), final_word);
             execute_search_now_for_query(final_word, TRUE);
-            g_free(clean_link);
             g_free(unescaped);
             webkit_policy_decision_ignore(d);
             return;
         } else if (g_str_has_prefix(uri, "entry://") || g_str_has_prefix(uri, "bword://")) {
             const char *word = uri + 8;
             char *unescaped = g_uri_unescape_string(word, NULL);
-            char *clean_link = normalize_headword_for_search(unescaped ? unescaped : word, TRUE);
-            const char *final_word = clean_link ? clean_link : (unescaped ? unescaped : word);
+            const char *final_word = unescaped ? unescaped : word;
             gtk_editable_set_text(GTK_EDITABLE(user_data), final_word);
             execute_search_now_for_query(final_word, TRUE);
-            g_free(clean_link);
             g_free(unescaped);
             webkit_policy_decision_ignore(d);
             return;
         } else if (g_str_has_prefix(uri, "gdlookup://localhost/")) {
             const char *word = uri + 21;
             char *unescaped = g_uri_unescape_string(word, NULL);
-            char *clean_link = normalize_headword_for_search(unescaped ? unescaped : word, TRUE);
-            const char *final_word = clean_link ? clean_link : (unescaped ? unescaped : word);
+            const char *final_word = unescaped ? unescaped : word;
             gtk_editable_set_text(GTK_EDITABLE(user_data), final_word);
             execute_search_now_for_query(final_word, TRUE);
-            g_free(clean_link);
             g_free(unescaped);
             webkit_policy_decision_ignore(d);
             return;
@@ -3192,7 +3228,21 @@ static void schedule_execute_search(void) {
 
 
 
-static char* render_entry_def_to_html(DictEntry *entry, size_t pos, int dark_mode, const char *color_theme, const char *render_style, const char *fts_highlight_query) {
+static char* render_entry_def_to_html(DictEntry *entry, size_t pos, const char *wiki_word, int dark_mode, const char *color_theme, const char *render_style, const char *fts_highlight_query) {
+    if (entry->format == DICT_FORMAT_WIKI) {
+        if (!wiki_word) return NULL;
+        GError *err = NULL;
+        char *html = wiki_fetch_article(entry->dict, wiki_word, &err);
+        if (err) {
+            g_printerr("Failed to fetch wiki article '%s': %s\n", wiki_word, err->message);
+            g_clear_error(&err);
+        }
+        if (!html) {
+            html = g_strdup_printf("<p style='color: gray; font-style: italic;'>Article '%s' not found or failed to load.</p>", wiki_word);
+        }
+        return html;
+    }
+
     const FlatTreeEntry *res = flat_index_get(entry->dict->index, pos);
     if (!res) return NULL;
 
@@ -3537,7 +3587,7 @@ static void exact_match_free(gpointer data) {
     g_free(m);
 }
 
-static int append_exact_matches_html(GString *html_res, const char *query, gboolean *limited, int dark_mode, const char *color_theme, const char *render_style, const char *fts_highlight_query) {
+static int append_exact_matches_html(GString *html_res, const char *query, const char *query_raw, gboolean *limited, int dark_mode, const char *color_theme, const char *render_style, const char *fts_highlight_query) {
     int found_count = 0;
     GPtrArray *matches = g_ptr_array_new_with_free_func(exact_match_free);
     if (limited) *limited = FALSE;
@@ -3560,33 +3610,48 @@ static int append_exact_matches_html(GString *html_res, const char *query, gbool
         /* Use binary-only search — avoids the O(N) alias fallback scan that
          * would otherwise linearly scan ALL entries of this dict. The outer loop
          * already iterates every dictionary, so the fallback is pure waste. */
-        size_t pos = flat_index_search_fast(e->dict->index, query);
-        while (pos != (size_t)-1) {
-            const FlatTreeEntry *res = flat_index_get(e->dict->index, pos);
-            if (!res) break;
-            
-            size_t hw_len = 0;
-            char *raw_hw = flat_index_get_headword(e->dict->index, pos, &hw_len);
-            if (!flat_index_entry_matches_query(raw_hw, res, query, qlen)) {
-                g_free(raw_hw);
-                break;
-            }
-
+        if (e->format == DICT_FORMAT_WIKI) {
             ExactMatch *m = g_new0(ExactMatch, 1);
             m->dict = e;
             dict_entry_ref(e);
-            m->pos = pos;
-            m->raw_hw = raw_hw;
+            m->pos = 0;
+            m->raw_hw = g_strdup(query_raw ? query_raw : query);
             m->clean_hw = normalize_headword_for_search(m->raw_hw, TRUE);
-            m->display_hw = normalize_headword_for_render(m->raw_hw, hw_len, FALSE);
+            m->display_hw = g_strdup(query_raw ? query_raw : query);
             
             g_ptr_array_add(matches, m);
             if (matches->len >= MAX_EXACT_RENDERED_MATCHES) {
                 if (limited) *limited = TRUE;
-                break;
             }
-            pos++;
-            if (pos >= flat_index_count(e->dict->index)) break;
+        } else {
+            size_t pos = flat_index_search_fast(e->dict->index, query);
+            while (pos != (size_t)-1) {
+                const FlatTreeEntry *res = flat_index_get(e->dict->index, pos);
+                if (!res) break;
+                
+                size_t hw_len = 0;
+                char *raw_hw = flat_index_get_headword(e->dict->index, pos, &hw_len);
+                if (!flat_index_entry_matches_query(raw_hw, res, query, qlen)) {
+                    g_free(raw_hw);
+                    break;
+                }
+
+                ExactMatch *m = g_new0(ExactMatch, 1);
+                m->dict = e;
+                dict_entry_ref(e);
+                m->pos = pos;
+                m->raw_hw = raw_hw;
+                m->clean_hw = normalize_headword_for_search(m->raw_hw, TRUE);
+                m->display_hw = normalize_headword_for_render(m->raw_hw, hw_len, FALSE);
+                
+                g_ptr_array_add(matches, m);
+                if (matches->len >= MAX_EXACT_RENDERED_MATCHES) {
+                    if (limited) *limited = TRUE;
+                    break;
+                }
+                pos++;
+                if (pos >= flat_index_count(e->dict->index)) break;
+            }
         }
 
         g_mutex_lock(&dict_loader_mutex);
@@ -3608,7 +3673,7 @@ static int append_exact_matches_html(GString *html_res, const char *query, gbool
 
     for (guint i = 0; i < matches->len; i++) {
         ExactMatch *m = g_ptr_array_index(matches, i);
-        char *rendered = render_entry_def_to_html(m->dict, m->pos, dark_mode, color_theme, render_style, fts_highlight_query);
+        char *rendered = render_entry_def_to_html(m->dict, m->pos, m->raw_hw, dark_mode, color_theme, render_style, fts_highlight_query);
         if (rendered) {
             m->dict->has_matches = TRUE;
             char *escaped_hw = safe_markup_escape_n(m->display_hw, -1);
@@ -3715,7 +3780,7 @@ static void search_webview_task_thread(GTask *task, gpointer source_object, gpoi
     g_mutex_unlock(&dict_loader_mutex);
 
     data->exact_limited = FALSE;
-    data->found_count = append_exact_matches_html(html_res, data->query, &data->exact_limited,
+    data->found_count = append_exact_matches_html(html_res, data->query, data->query_raw, &data->exact_limited,
                                                   data->dark_mode, data->color_theme, data->render_style, data->fts_highlight_query_copy);
     
     data->used_query = g_strdup(data->query);
@@ -3725,7 +3790,7 @@ static void search_webview_task_thread(GTask *task, gpointer source_object, gpoi
         if (data->fallback_query) {
             g_string_truncate(html_res, 0);
             data->exact_limited = FALSE;
-            data->found_count = append_exact_matches_html(html_res, data->fallback_query, &data->exact_limited,
+            data->found_count = append_exact_matches_html(html_res, data->fallback_query, data->fallback_query, &data->exact_limited,
                                                           data->dark_mode, data->color_theme, data->render_style, data->fts_highlight_query_copy);
             if (data->found_count > 0) {
                 g_free(data->used_query);
@@ -6754,7 +6819,7 @@ static int run_cli_search(const char *query, const char *in_dict) {
             g_print("Headword: %s\n", raw_hw);
             g_free(raw_hw);
 
-            char *rendered = render_entry_def_to_html(e, pos, 0, "default", "diction", NULL);
+            char *rendered = render_entry_def_to_html(e, pos, NULL, 0, "default", "diction", NULL);
             if (rendered) {
                 /* Simple HTML tag stripping for CLI */
                 GRegex *regex = g_regex_new("<[^>]*>", 0, 0, NULL);

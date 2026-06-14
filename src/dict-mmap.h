@@ -39,6 +39,10 @@ typedef struct DictMmap {
     gboolean is_xdxf;
     int xdxf_standard;
     int xdxf_lousy_format;
+
+    /* Wiki fields */
+    char *wiki_url;
+    char *wiki_lang;
 } DictMmap;
 
 /* Load/mmap a dictionary. `cancel_flag` may be NULL; if non-NULL the
@@ -52,6 +56,10 @@ DictMmap* parse_slob_file(const char *path, volatile gint *cancel_flag, gint exp
 DictMmap* parse_xdxf_file(const char *path, volatile gint *cancel_flag, gint expected);
 DictMmap* parse_sdict_file(const char *path, volatile gint *cancel_flag, gint expected);
 DictMmap* parse_zim_file(const char *path, volatile gint *cancel_flag, gint expected);
+DictMmap* parse_wiki_file(const char *path, volatile gint *cancel_flag, gint expected);
+GList* wiki_prefix_search(DictMmap *dict, const char *prefix, GError **error);
+char* wiki_fetch_article(DictMmap *dict, const char *query, GError **error);
+char* wiki_clean_html(const char *base_url, const char *raw_html);
 const char* mdx_get_definition_on_the_fly(DictMmap *dict, const FlatTreeEntry *entry, size_t *out_len, char **out_to_free);
 const char* xdxf_get_definition_on_the_fly(DictMmap *dict, const FlatTreeEntry *entry, size_t *out_len, char **out_to_free);
 void mdx_free_context(void *ctx_ptr);

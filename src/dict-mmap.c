@@ -40,6 +40,8 @@ void dict_mmap_close(DictMmap *dict) {
         g_free(dict->target_lang);
         g_free(dict->icon_path);
         g_free(dict->stardict_sts);
+        g_free(dict->wiki_url);
+        g_free(dict->wiki_lang);
         g_free(dict);
     }
 }

@@ -2760,6 +2760,41 @@ char* dict_render_shared_styles(int dark_mode, const char *theme_name, const cha
     buf_append_str(&b, ".orth,.gen,.pron{display:inline;}");
     buf_append_str(&b, ".form.plur{display:block;margin-top:0.2em;}");
     buf_append_str(&b, ".plur .orth{font-style:italic;font-weight:normal;}");
+    if (dark_mode) {
+        buf_append_str(&b,
+            "/* MediaWiki/Wikipedia Dark Mode Overrides */\n"
+            ".infobox, .vertical-navbox, .navbox, .sisterproject, .sister-project, .mw-sidebar, "
+            ".thumbinner, .thumb, .wikitable, .wikt-sister-projects, .wikt-sister-project, .sisterproject-bar, "
+            ".sib-proj, .sisterprojectlinks, .sisterlinks, .metadata, .mbox-small, .ambox, .catlinks, "
+            ".infobox td, .infobox th, .navbox td, .navbox th, .wikitable td, .wikitable th, "
+            ".sisterproject td, .sisterproject th, "
+            "table.infobox, table.navbox, table.wikitable, table.sisterproject, "
+            ".mw-collapsed, .mw-collapsible, .toc, .toccolours {\n"
+            "  background-color: #242426 !important;\n"
+            "  background: #242426 !important;\n"
+            "  color: var(--body-color) !important;\n"
+            "  border-color: #444446 !important;\n"
+            "}\n"
+            ".infobox th, .navbox th, .wikitable th, .navbox-title, .navbox-group, .infobox-header, "
+            ".infobox-subheader, .infobox-above, .infobox-below, .infobox-title, .tocheader {\n"
+            "  background-color: #2e2e32 !important;\n"
+            "  background: #2e2e32 !important;\n"
+            "  color: var(--heading-color) !important;\n"
+            "}\n"
+            ".infobox a, .navbox a, .wikitable a, .sisterproject a, .sister-project a, .mw-sidebar a, "
+            ".mw-collapsible a, .toc a {\n"
+            "  color: var(--link-color) !important;\n"
+            "}\n"
+            "/* Reset any inline text colors to match our theme in these blocks */\n"
+            ".infobox *, .navbox *, .sisterproject *, .sister-project *, .mw-sidebar *, .toc *, .thumb * {\n"
+            "  color: inherit;\n"
+            "}\n"
+            "/* Re-apply links inside them */\n"
+            ".infobox a *, .navbox a *, .sisterproject a *, .sister-project a *, .mw-sidebar a *, .toc a * {\n"
+            "  color: var(--link-color) !important;\n"
+            "}\n"
+        );
+    }
     buf_append_str(&b, "</style>");
     /* Base styles now use variables, no need for conditional style blocks here */
 

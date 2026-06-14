@@ -353,6 +353,8 @@ DictFormat dict_detect_format(const char *path) {
         return DICT_FORMAT_SLOB;
     if (ends_with_ci(path, ".zim") || ends_with_ci(path, ".zimaa"))
         return DICT_FORMAT_ZIM;
+    if (ends_with_ci(path, ".wiki"))
+        return DICT_FORMAT_WIKI;
     if (ends_with_ci(path, ".xdxf") || ends_with_ci(path, ".xdxf.dz"))
         return DICT_FORMAT_XDXF;
     if (ends_with_ci(path, ".index"))
@@ -374,6 +376,7 @@ extern DictMmap* parse_stardict(const char *ifo_path, volatile gint *cancel_flag
 extern DictMmap* parse_slob_file(const char *path, volatile gint *cancel_flag, gint expected);
 extern DictMmap* parse_dictd_file(const char *index_path, volatile gint *cancel_flag, gint expected);
 extern DictMmap* parse_sdict_file(const char *path, volatile gint *cancel_flag, gint expected);
+extern DictMmap* parse_wiki_file(const char *path, volatile gint *cancel_flag, gint expected);
 
 void dict_mmap_ensure_icon(DictMmap *dict) {
     if (!dict || dict->icon_path) return;
@@ -509,6 +512,9 @@ DictMmap* dict_load_any(const char *path, DictFormat fmt, volatile gint *cancel_
             break;
         case DICT_FORMAT_ZIM:
             dict = parse_zim_file(path, cancel_flag, expected_generation);
+            break;
+        case DICT_FORMAT_WIKI:
+            dict = parse_wiki_file(path, cancel_flag, expected_generation);
             break;
 
         default:

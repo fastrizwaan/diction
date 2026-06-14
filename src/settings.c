@@ -8,6 +8,7 @@
 #include <gio/gio.h>
 #include "dict-mmap.h"
 #include "dict-cache.h"
+#include "dict-loader.h"
 
 /* Parsers used by settings_resolve_dictionary_name() */
 extern DictMmap* parse_stardict(const char *ifo_path, volatile gint *cancel_flag, gint expected);
@@ -1217,7 +1218,86 @@ AppSettings* settings_load(void) {
 
     g_object_unref(parser);
     g_free(path);
+
+    extern void settings_ensure_default_wikis(AppSettings *settings);
+    settings_ensure_default_wikis(settings);
+
     return settings;
+}
+
+void settings_ensure_default_wikis(AppSettings *settings) {
+    char *dicts_dir = get_dictionary_data_dir();
+    g_mkdir_with_parents(dicts_dir, 0755);
+
+    gboolean has_dir = FALSE;
+    for (guint i = 0; i < settings->dictionary_dirs->len; i++) {
+        const char *dir = g_ptr_array_index(settings->dictionary_dirs, i);
+        if (g_strcmp0(dir, dicts_dir) == 0) {
+            has_dir = TRUE;
+            break;
+        }
+    }
+    if (!has_dir) {
+        g_ptr_array_add(settings->dictionary_dirs, g_strdup(dicts_dir));
+    }
+
+    struct {
+        const char *filename;
+        const char *name;
+        const char *url;
+        const char *lang;
+    } default_wikis[] = {
+        {"wikipedia_en.wiki", "Wikipedia (EN)", "https://en.wikipedia.org", "en"},
+        {"wiktionary_en.wiki", "Wiktionary (EN)", "https://en.wiktionary.org", "en"}
+    };
+
+    gboolean modified = !has_dir;
+
+    for (int i = 0; i < 2; i++) {
+        char *path = g_build_filename(dicts_dir, default_wikis[i].filename, NULL);
+        if (!g_file_test(path, G_FILE_TEST_EXISTS)) {
+            char *content = g_strdup_printf(
+                "[Wiki]\n"
+                "Name=%s\n"
+                "Url=%s\n"
+                "Lang=%s\n",
+                default_wikis[i].name,
+                default_wikis[i].url,
+                default_wikis[i].lang
+            );
+            GError *err = NULL;
+            if (g_file_set_contents(path, content, -1, &err)) {
+                modified = TRUE;
+            } else {
+                g_warning("Failed to write default wiki file %s: %s", path, err->message);
+                g_clear_error(&err);
+            }
+            g_free(content);
+        }
+
+        gboolean has_dict = FALSE;
+        for (guint j = 0; j < settings->dictionaries->len; j++) {
+            DictConfig *cfg = g_ptr_array_index(settings->dictionaries, j);
+            if (g_strcmp0(cfg->path, path) == 0) {
+                has_dict = TRUE;
+                break;
+            }
+        }
+        if (!has_dict) {
+            DictConfig *cfg = dict_config_new(default_wikis[i].name, path, "directory");
+            cfg->enabled = TRUE;
+            cfg->format = DICT_FORMAT_WIKI;
+            g_ptr_array_add(settings->dictionaries, cfg);
+            modified = TRUE;
+        }
+        g_free(path);
+    }
+
+    g_free(dicts_dir);
+
+    if (modified) {
+        settings_save(settings);
+    }
 }
 
 void settings_save(AppSettings *settings) {

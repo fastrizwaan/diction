@@ -1247,13 +1247,27 @@ void settings_ensure_default_wikis(AppSettings *settings) {
         const char *url;
         const char *lang;
     } default_wikis[] = {
-        {"wikipedia_en.wiki", "Wikipedia (EN)", "https://en.wikipedia.org", "en"},
-        {"wiktionary_en.wiki", "Wiktionary (EN)", "https://en.wiktionary.org", "en"}
+        {"wikipedia_en.wiki", "Wikipedia (EN)", "https://en.wikipedia.org", "en"}
     };
 
     gboolean modified = !has_dir;
 
-    for (int i = 0; i < 2; i++) {
+    char *wiktionary_path = g_build_filename(dicts_dir, "wiktionary_en.wiki", NULL);
+    if (g_file_test(wiktionary_path, G_FILE_TEST_EXISTS)) {
+        g_unlink(wiktionary_path);
+        modified = TRUE;
+    }
+    for (guint j = 0; j < settings->dictionaries->len; j++) {
+        DictConfig *cfg = g_ptr_array_index(settings->dictionaries, j);
+        if (g_strcmp0(cfg->path, wiktionary_path) == 0) {
+            g_ptr_array_remove_index(settings->dictionaries, j);
+            modified = TRUE;
+            break;
+        }
+    }
+    g_free(wiktionary_path);
+
+    for (int i = 0; i < (int)G_N_ELEMENTS(default_wikis); i++) {
         char *path = g_build_filename(dicts_dir, default_wikis[i].filename, NULL);
         if (!g_file_test(path, G_FILE_TEST_EXISTS)) {
             char *content = g_strdup_printf(

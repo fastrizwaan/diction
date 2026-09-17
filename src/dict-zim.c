@@ -301,11 +301,12 @@ DictMmap* parse_zim_file(const char *path, volatile gint *cancel_flag, gint expe
 
         for (uint32_t i = 0; i < hdr.article_count; i++) {
             if (cancel_flag && g_atomic_int_get(cancel_flag) != expected) {
-                dict_cache_builder_free(builder); g_free(temp_refs); g_free(redir_refs); munmap(map, st_file.st_size); close(fd); g_free(title); g_strfreev(mime_types); return NULL;
+                dict_cache_builder_free(builder); g_free(temp_refs); g_free(redir_refs); unlink(cache_path); g_free(cache_path); munmap(map, st_file.st_size); close(fd); g_free(title); g_strfreev(mime_types); return NULL;
             }
             if (i % 1000 == 0) settings_scan_progress_notify(path, (int)(i * 20 / hdr.article_count));
             
             uint64_t dir_offset = read_u64le(p + hdr.url_ptr_pos + i * 8);
+            if (dir_offset >= (uint64_t)st_file.st_size || dir_offset + 16 > (uint64_t)st_file.st_size) continue;
             const unsigned char *dir_p = p + dir_offset;
             
             uint16_t mimetype = read_u16le(dir_p); dir_p += 2;
@@ -387,8 +388,11 @@ DictMmap* parse_zim_file(const char *path, volatile gint *cancel_flag, gint expe
 
         for (uint32_t i = 0; i < hdr.cluster_count; i++) {
             if (cancel_flag && g_atomic_int_get(cancel_flag) != expected) {
+                for (uint32_t c = i; c < hdr.cluster_count; c++) {
+                    if (cluster_to_refs[c]) g_list_free(cluster_to_refs[c]);
+                }
                 g_free(cluster_to_refs); g_free(bin_cache_offsets); g_free(bin_cache_lens); g_free(temp_refs); g_free(redir_refs);
-                dict_cache_builder_free(builder); unlink(cache_path); munmap(map, st_file.st_size); close(fd); g_free(title); g_strfreev(mime_types); return NULL;
+                dict_cache_builder_free(builder); unlink(cache_path); g_free(cache_path); munmap(map, st_file.st_size); close(fd); g_free(title); g_strfreev(mime_types); return NULL;
             }
             if (i % 10 == 0) settings_scan_progress_notify(path, 20 + (int)(i * 70 / hdr.cluster_count));
             if (!cluster_to_refs[i]) continue;

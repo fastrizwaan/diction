@@ -172,7 +172,10 @@ static const char* dict_get_definition_raw(DictMmap *dict, const FlatTreeEntry *
     }
 
     /* 4. Fallback (if using old in-memory ->data logic) */
-    return dict->data + entry->d_off;
+    if (dict->data) {
+        return dict->data + entry->d_off;
+    }
+    return NULL;
 }
 
 const char* dict_get_definition(DictMmap *dict, const FlatTreeEntry *entry, size_t *out_len, char **out_to_free) {
@@ -645,18 +648,12 @@ static void discover_with_find(const char *dirpath, GList **candidates_out, vola
         expanded = g_canonicalize_filename(dirpath, NULL);
     }
 
-    char *quoted_dir = g_shell_quote(expanded);
-    char *cmd = g_strdup_printf("find %s -maxdepth 10 -type f", quoted_dir);
-
-    gchar **argv = NULL;
-    g_shell_parse_argv(cmd, NULL, &argv, NULL);
+    const char *argv[] = { "find", expanded, "-maxdepth", "10", "-type", "f", NULL };
     
     GError *err = NULL;
     GSubprocessLauncher *launcher = g_subprocess_launcher_new(G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_SILENCE);
     GSubprocess *sub = g_subprocess_launcher_spawnv(launcher, (const gchar * const *)argv, &err);
-    g_strfreev(argv);
     g_object_unref(launcher);
-    
     g_free(expanded);
     
     if (!sub) {
@@ -730,20 +727,28 @@ DictEntry* dict_loader_scan_directory(const char *dirpath) {
     for (GList *l = candidates; l && loaded_count < MAX_DICTS; l = l->next) {
 
         DictCandidate *c = l->data;
+        char *final_path = g_strdup(c->path);
+        DictFormat final_fmt = c->format;
         DictMmap *loaded = dict_load_any(c->path, c->format, NULL, 0);
         if (!loaded) {
             char *fallback = dsl_fallback_variant(c->path);
             if (fallback) {
-                loaded = dict_load_any(fallback, c->format, NULL, 0);
-                g_free(fallback);
+                final_fmt = dict_detect_format(fallback);
+                loaded = dict_load_any(fallback, final_fmt, NULL, 0);
+                if (loaded) {
+                    g_free(final_path);
+                    final_path = fallback;
+                } else {
+                    g_free(fallback);
+                }
             }
         }
         if (loaded) {
             DictEntry *entry = g_new0(DictEntry, 1);
             entry->name = g_strdup(loaded->name && *loaded->name ? loaded->name : c->name);
-            entry->path = g_strdup(c->path);
+            entry->path = final_path;
             entry->dict_id = settings_make_dictionary_id(entry->path);
-            entry->format = c->format;
+            entry->format = final_fmt;
             entry->dict = loaded;
             entry->ref_count = 1; entry->magic = 0xDEADC0DE;
             if (loaded->icon_path) entry->icon_path = g_strdup(loaded->icon_path);
@@ -752,6 +757,8 @@ DictEntry* dict_loader_scan_directory(const char *dirpath) {
             if (tail) tail->next = entry;
             tail = entry;
             loaded_count++;
+        } else {
+            g_free(final_path);
         }
 
         dict_candidate_free(c);
@@ -826,22 +833,30 @@ void dict_loader_scan_paths_streaming(char **paths, int n_paths, DictLoaderCallb
         callback(NULL, DICT_LOADER_EVENT_STARTED, user_data);
 
         fprintf(stderr, "[SCANNER] Loading %s...\n", c->path);
+        char *final_path = g_strdup(c->path);
+        DictFormat final_fmt = c->format;
         DictMmap *loaded = dict_load_any(c->path, c->format, cancel_flag, expected_generation);
         fprintf(stderr, "[SCANNER] Finished %s -> %s\n", c->path, loaded ? "SUCCESS" : "FAILED");
         if (!loaded) {
             char *fallback = dsl_fallback_variant(c->path);
             if (fallback) {
-                loaded = dict_load_any(fallback, c->format, cancel_flag, expected_generation);
-                g_free(fallback);
+                final_fmt = dict_detect_format(fallback);
+                loaded = dict_load_any(fallback, final_fmt, cancel_flag, expected_generation);
+                if (loaded) {
+                    g_free(final_path);
+                    final_path = fallback;
+                } else {
+                    g_free(fallback);
+                }
             }
         }
 
         if (loaded) {
             DictEntry *entry = g_new0(DictEntry, 1);
             entry->name = g_strdup(loaded->name && *loaded->name ? loaded->name : c->name);
-            entry->path = g_strdup(c->path);
+            entry->path = final_path;
             entry->dict_id = settings_make_dictionary_id(entry->path);
-            entry->format = c->format;
+            entry->format = final_fmt;
             entry->dict = loaded;
             entry->ref_count = 1; entry->magic = 0xDEADC0DE;
             if (loaded->icon_path) entry->icon_path = g_strdup(loaded->icon_path);
@@ -849,7 +864,7 @@ void dict_loader_scan_paths_streaming(char **paths, int n_paths, DictLoaderCallb
             callback(entry, DICT_LOADER_EVENT_FINISHED, user_data);
             loaded_count++;
         } else {
-
+            g_free(final_path);
             callback(NULL, DICT_LOADER_EVENT_FAILED, user_data);
         }
         

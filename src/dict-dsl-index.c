@@ -86,7 +86,7 @@ gboolean build_dsl_index_only_cache(const char *dsl_path, volatile gint *cancel_
                 entry_count++; \
             } \
         } else { \
-            for (size_t _i = 0; _i < hw_count; _i++) free(hws[_i]); \
+            for (size_t _i = 0; _i < hw_count; _i++) g_free(hws[_i]); \
         } \
         hw_count = 0; \
         in_def = 0; \
@@ -147,7 +147,7 @@ gboolean build_dsl_index_only_cache(const char *dsl_path, volatile gint *cancel_
                         if (hw_count > 0 && !has_alnum) {
                             char *old = hws[hw_count - 1];
                             hws[hw_count - 1] = g_strdup_printf("%s ; %.*s", old, (int)sub_len, lptr + sub_off);
-                            free(old);
+                            g_free(old);
                         } else {
                             if (hw_count >= hw_cap) {
                                 hw_cap = hw_cap == 0 ? 16 : hw_cap * 2;
@@ -174,6 +174,7 @@ gboolean build_dsl_index_only_cache(const char *dsl_path, volatile gint *cancel_
     dsl_scanner_close(s);
 
     if (entry_count == 0 || (cancel_flag && g_atomic_int_get(cancel_flag) != expected)) {
+        for (size_t i = 0; i < entry_count; i++) g_free(entries[i].headword);
         free(entries);
         dict_hw_builder_free(hw);
         unlink(hw_path);

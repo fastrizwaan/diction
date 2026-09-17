@@ -608,7 +608,9 @@ static void build_xdxf_index_only_cache(const char *xml_path, const char *orig_p
 
     dict_hw_builder_set_metadata(hw, "source_path", orig_path);
     dict_hw_builder_set_metadata(hw, "xdxf_standard", standard == XDXF_STANDARD_LOUSY ? "1" : "0");
-    dict_hw_builder_set_metadata(hw, "xdxf_lousy_format", g_strdup_printf("%d", lousy_format));
+    char lousy_str[16];
+    g_snprintf(lousy_str, sizeof(lousy_str), "%d", lousy_format);
+    dict_hw_builder_set_metadata(hw, "xdxf_lousy_format", lousy_str);
     if (name) dict_hw_builder_set_metadata(hw, "name", name);
     if (slang) dict_hw_builder_set_metadata(hw, "source_lang", slang);
     if (tlang) dict_hw_builder_set_metadata(hw, "target_lang", tlang);
@@ -709,7 +711,9 @@ DictMmap* parse_xdxf_file(const char *path, volatile gint *cancel_flag, gint exp
     } else if (g_file_test(res_dir, G_FILE_TEST_IS_DIR)) {
         dict->resource_dir = g_strdup(res_dir);
     }
-    dict->source_dir = g_canonicalize_filename(g_path_get_dirname(path), NULL);
+    char *source_parent = g_path_get_dirname(path);
+    dict->source_dir = g_canonicalize_filename(source_parent, NULL);
+    g_free(source_parent);
 
     g_free(hw_path);
     g_free(res_dir);

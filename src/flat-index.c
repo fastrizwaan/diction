@@ -240,7 +240,11 @@ FlatIndex* flat_index_open(const char *db_path)
     apply_pragmas(db);
 
     sqlite3_stmt *st = NULL;
-    sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM entries;", -1, &st, NULL);
+    if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM entries;", -1, &st, NULL) != SQLITE_OK || !st) {
+        if (st) sqlite3_finalize(st);
+        sqlite3_close(db);
+        return NULL;
+    }
     if (sqlite3_step(st) != SQLITE_ROW) {
         sqlite3_finalize(st); sqlite3_close(db); return NULL;
     }
@@ -274,9 +278,12 @@ FlatIndex* flat_index_open(const char *db_path)
         }
     }
 
-    sqlite3_prepare_v2(db, "SELECT rowid-1 FROM entries WHERE normalized = ? ORDER BY rowid ASC LIMIT 1;", -1, (sqlite3_stmt**)&idx->stmt_search, NULL);
-    sqlite3_prepare_v2(db, "SELECT headword, d_off, d_len FROM entries WHERE rowid = ?+1;", -1, (sqlite3_stmt**)&idx->stmt_get, NULL);
-    sqlite3_prepare_v2(db, "SELECT rowid-1 FROM entries WHERE normalized >= ? LIMIT 1;", -1, (sqlite3_stmt**)&idx->stmt_prefix, NULL);
+    if (sqlite3_prepare_v2(db, "SELECT rowid-1 FROM entries WHERE normalized = ? ORDER BY rowid ASC LIMIT 1;", -1, (sqlite3_stmt**)&idx->stmt_search, NULL) != SQLITE_OK ||
+        sqlite3_prepare_v2(db, "SELECT headword, d_off, d_len FROM entries WHERE rowid = ?+1;", -1, (sqlite3_stmt**)&idx->stmt_get, NULL) != SQLITE_OK ||
+        sqlite3_prepare_v2(db, "SELECT rowid-1 FROM entries WHERE normalized >= ? LIMIT 1;", -1, (sqlite3_stmt**)&idx->stmt_prefix, NULL) != SQLITE_OK) {
+        flat_index_close(idx);
+        return NULL;
+    }
 
     return idx;
 }
@@ -415,10 +422,8 @@ size_t flat_index_search(const FlatIndex *idx, const char *query)
     size_t r = search_exact(idx, query);
     if (r != (size_t)-1) return r;
 
-    /* If not found, try a limited linear scan for aliases if the index is small,
-     * or if we are already loaded. 
-     * For large non-loaded indices, we skip linear scan to avoid UI freeze. */
-    if (idx->is_loaded || idx->count < 10000) {
+    /* If not found, try a linear scan for aliases if the index headwords are loaded in memory. */
+    if (idx->is_loaded && idx->headword_buf) {
         size_t ql = strlen(query);
         for (size_t i = 0; i < idx->count; i++) {
             const FlatTreeEntry *e = flat_index_get(idx, i);
@@ -446,8 +451,8 @@ size_t flat_index_search_prefix(const FlatIndex *idx, const char *prefix)
     size_t r = search_prefix(idx, prefix);
     if (r != (size_t)-1) return r;
 
-    /* Limited linear scan for prefix alias matching */
-    if (idx->is_loaded || idx->count < 5000) {
+    /* Linear scan for prefix alias matching if headwords are loaded in memory */
+    if (idx->is_loaded && idx->headword_buf) {
         size_t pl = strlen(prefix);
         for (size_t i = 0; i < idx->count; i++) {
             const FlatTreeEntry *e = flat_index_get(idx, i);
@@ -467,37 +472,57 @@ size_t flat_index_search_prefix_fast(const FlatIndex *idx, const char *prefix)
     return search_prefix(idx, prefix);
 }
 
+bool flat_index_get_entry(const FlatIndex *idx, size_t pos, FlatTreeEntry *out_entry)
+{
+    if (!idx || !out_entry || pos >= idx->count) return false;
+    if (idx->is_loaded) {
+        *out_entry = idx->entries[pos];
+        return true;
+    }
+
+    sqlite3_stmt *st = (sqlite3_stmt*)idx->stmt_get;
+    if (!st) return false;
+    g_mutex_lock((GMutex*)&idx->mutex);
+    sqlite3_reset(st);
+    sqlite3_bind_int64(st, 1, (sqlite3_int64)pos);
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        out_entry->d_off = (uint32_t)sqlite3_column_int64(st, 1);
+        out_entry->d_len = (uint32_t)sqlite3_column_int64(st, 2);
+        out_entry->h_off = 0;
+        out_entry->h_len = (uint32_t)sqlite3_column_bytes(st, 0);
+        g_mutex_unlock((GMutex*)&idx->mutex);
+        return true;
+    }
+    g_mutex_unlock((GMutex*)&idx->mutex);
+    return false;
+}
+
+#define FLAT_INDEX_TL_RING_SIZE 16
+typedef struct {
+    FlatTreeEntry entries[FLAT_INDEX_TL_RING_SIZE];
+    uint32_t next_idx;
+} FlatIndexThreadRing;
+
 const FlatTreeEntry* flat_index_get(const FlatIndex *idx, size_t pos)
 {
     if (!idx || pos >= idx->count) return NULL;
     if (idx->is_loaded) return &idx->entries[pos];
 
-    /* Fetch on demand from SQLite. 
-     * Use thread-local storage for the entry itself. */
-    static GPrivate te_private = G_PRIVATE_INIT(g_free);
-    FlatTreeEntry *te = g_private_get(&te_private);
-    if (!te) {
-        te = g_new0(FlatTreeEntry, 1);
-        g_private_set(&te_private, te);
+    /* Fetch on demand from SQLite using a thread-local ring buffer.
+     * A ring buffer ensures that multiple entries retrieved concurrently
+     * within the same thread (e.g., in qsort comparators or pairwise operations)
+     * remain independent and valid without memory corruption. */
+    static GPrivate ring_private = G_PRIVATE_INIT(g_free);
+    FlatIndexThreadRing *ring = g_private_get(&ring_private);
+    if (!ring) {
+        ring = g_new0(FlatIndexThreadRing, 1);
+        g_private_set(&ring_private, ring);
     }
 
-    sqlite3_stmt *st = (sqlite3_stmt*)idx->stmt_get;
-    g_mutex_lock((GMutex*)&idx->mutex);
-    sqlite3_reset(st);
-    sqlite3_bind_int64(st, 1, (sqlite3_int64)pos);
-    if (sqlite3_step(st) == SQLITE_ROW) {
-        te->d_off = (uint32_t)sqlite3_column_int64(st, 1);
-        te->d_len = (uint32_t)sqlite3_column_int64(st, 2);
-        
-        /* Note: We cannot return the headword here without a buffer.
-         * Callers who need the headword should use flat_index_get_headword. */
-        te->h_off = 0;
-        te->h_len = (uint32_t)sqlite3_column_bytes(st, 0);
-        
-        g_mutex_unlock((GMutex*)&idx->mutex);
+    FlatTreeEntry *te = &ring->entries[ring->next_idx++ % FLAT_INDEX_TL_RING_SIZE];
+    if (flat_index_get_entry(idx, pos, te)) {
         return te;
     }
-    g_mutex_unlock((GMutex*)&idx->mutex);
     return NULL;
 }
 

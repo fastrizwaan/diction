@@ -13,6 +13,7 @@ size_t convert_utf16le_to_utf8(const unsigned char *in_buf, size_t in_len, unsig
                 wc = 0x10000 + ((wc & 0x3FF) << 10) + (wc2 & 0x3FF);
             }
         }
+        if (wc >= 0xD800 && wc <= 0xDFFF) { wc = 0xFFFD; }
         if (wc < 0x80) { out_buf[out++] = wc; }
         else if (wc < 0x800) {
             out_buf[out++] = 0xC0 | (wc >> 6);
@@ -50,6 +51,7 @@ size_t convert_utf16be_to_utf8(const unsigned char *in_buf, size_t in_len, unsig
                 wc = 0x10000 + ((wc & 0x3FF) << 10) + (wc2 & 0x3FF);
             }
         }
+        if (wc >= 0xD800 && wc <= 0xDFFF) { wc = 0xFFFD; }
         if (wc < 0x80) { out_buf[out++] = wc; }
         else if (wc < 0x800) {
             out_buf[out++] = 0xC0 | (wc >> 6);

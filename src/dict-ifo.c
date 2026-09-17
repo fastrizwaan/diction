@@ -530,24 +530,18 @@ static gboolean build_stardict_cache(DictCacheBuilder *builder,
 static DictMmap *open_cached_stardict(const char *cache_path, char *bookname, char *resource_dir, const char *dict_path, const char *ifo_path) {
     int fd = open(cache_path, O_RDONLY);
     if (fd < 0) {
-        g_free(bookname);
-        g_free(resource_dir);
         return NULL;
     }
 
     struct stat st;
     if (fstat(fd, &st) != 0 || st.st_size < 16) {
         close(fd);
-        g_free(bookname);
-        g_free(resource_dir);
         return NULL;
     }
 
     const char *data = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
     if (data == MAP_FAILED) {
         close(fd);
-        g_free(bookname);
-        g_free(resource_dir);
         return NULL;
     }
 
@@ -646,10 +640,19 @@ DictMmap* parse_stardict(const char *ifo_path, volatile gint *cancel_flag, gint 
 
     if (is_cache_valid_for_sources(cache_path, sources, G_N_ELEMENTS(sources))) {
         DictMmap *cached = open_cached_stardict(cache_path, bookname, resource_dir, dict_path, ifo_path);
-        g_free(cache_path);
-        g_free(idx_path);
-        g_free(dict_path);
-        return cached;
+        if (cached) {
+            if (!cached->index || cached->index->count == 0) {
+                cached->name = NULL;
+                cached->resource_dir = NULL;
+                dict_mmap_close(cached);
+                cached = NULL;
+            } else {
+                g_free(cache_path);
+                g_free(idx_path);
+                g_free(dict_path);
+                return cached;
+            }
+        }
     }
 
     /* RAM-saving strategy:
@@ -920,6 +923,10 @@ DictMmap* parse_stardict(const char *ifo_path, volatile gint *cancel_flag, gint 
     }
 
     DictMmap *dict = open_cached_stardict(cache_path, bookname, resource_dir, dict_path, ifo_path);
+    if (!dict) {
+        g_free(bookname);
+        g_free(resource_dir);
+    }
     g_free(dict_path);
     g_free(cache_path);
     settings_scan_progress_notify(ifo_path, 100);

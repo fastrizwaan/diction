@@ -535,11 +535,10 @@ static gint cmp_indices_by_doff(gconstpointer a, gconstpointer b, gpointer user_
     FlatIndex *index = user_data;
     uint32_t ia = *(const uint32_t*)a;
     uint32_t ib = *(const uint32_t*)b;
-    const FlatTreeEntry *ea = flat_index_get(index, ia);
-    const FlatTreeEntry *eb = flat_index_get(index, ib);
-    if (!ea || !eb) return 0;
-    if (ea->d_off < eb->d_off) return -1;
-    if (ea->d_off > eb->d_off) return 1;
+    FlatTreeEntry ea, eb;
+    if (!flat_index_get_entry(index, ia, &ea) || !flat_index_get_entry(index, ib, &eb)) return 0;
+    if (ea.d_off < eb.d_off) return -1;
+    if (ea.d_off > eb.d_off) return 1;
     return 0;
 }
 
@@ -1618,6 +1617,8 @@ void settings_scan_notify(const char *name, const char *path, int event_type) {
  * dictionary path. Percent should be 0..100. This posts an idle to update
  * the UI row subtitle for the matching path. */
 void settings_scan_progress_notify(const char *path, int percent) {
+    if (!path) return;
+
     /* Use a static hash table to avoid redundant progress updates and expensive
      * path normalization in the caller's thread if nothing changed. */
     static GHashTable *last_percents = NULL;

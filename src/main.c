@@ -4219,9 +4219,6 @@ static void on_random_clicked(GtkButton *btn, gpointer user_data) {
 }
 
 static void maybe_show_startup_random_word(void) {
-    return; // DEBUG: Disable startup random word
-
-
     const char *current = gtk_editable_get_text(GTK_EDITABLE(search_entry));
     if (current && *current) {
         startup_random_word_pending = FALSE;
@@ -4230,23 +4227,13 @@ static void maybe_show_startup_random_word(void) {
 
     int loaded_count = 0;
     g_mutex_lock(&dict_loader_mutex);
-    DictEntry *e = all_dicts;
-    while (e) {
-        dict_entry_ref(e);
-        g_mutex_unlock(&dict_loader_mutex);
-
+    for (DictEntry *e = all_dicts; e; e = e->next) {
         if (e->dict && e->dict->index && flat_index_count(e->dict->index) > 0 && dict_entry_in_active_scope(e)) {
             loaded_count++;
-            dict_entry_unref(e);
             break;
         }
-
-        g_mutex_lock(&dict_loader_mutex);
-        DictEntry *next = e->next;
-        dict_entry_unref(e);
-        e = next;
     }
-    if (e == NULL) g_mutex_unlock(&dict_loader_mutex);
+    g_mutex_unlock(&dict_loader_mutex);
 
     if (loaded_count == 0) {
         return;

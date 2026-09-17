@@ -66,18 +66,20 @@ static size_t dsl_convert_utf16be_to_utf8(const unsigned char *in_buf, size_t in
 
 DslScanner* dsl_scanner_open(const char *path) {
     DslScanner *s = calloc(1, sizeof(DslScanner));
+    if (!s) return NULL;
     s->buf_cap = 1048576; // Start with 1MB buffer
     s->buf = malloc(s->buf_cap);
+    if (!s->buf) { free(s); return NULL; }
     
     size_t len = strlen(path);
     if (len > 3 && strcasecmp(path + len - 3, ".dz") == 0) {
         s->is_compressed = 1;
         s->gz = gzopen(path, "rb");
-        if (!s->gz) { free(s); return NULL; }
+        if (!s->gz) { free(s->buf); free(s); return NULL; }
     } else {
         s->is_compressed = 0;
         s->f = fopen(path, "rb");
-        if (!s->f) { free(s); return NULL; }
+        if (!s->f) { free(s->buf); free(s); return NULL; }
     }
     
     unsigned char bom[4];
@@ -91,6 +93,7 @@ DslScanner* dsl_scanner_open(const char *path) {
     if (bom_len < 2) {
         if (s->is_compressed) gzclose(s->gz);
         else fclose(s->f);
+        free(s->buf);
         free(s);
         return NULL;
     }
@@ -184,12 +187,13 @@ int dsl_scanner_read_line(DslScanner *s, char *out_utf8, size_t out_max, size_t 
         *out_uncomp_offset = s->uncomp_offset;
         *out_uncomp_len = raw_len;
 
+        size_t max_content = out_max > 0 ? out_max - 1 : 0;
         if (s->is_utf16le) {
-            *out_len = dsl_convert_utf16le_to_utf8(s->buf + s->buf_pos, raw_len, (unsigned char*)out_utf8, out_max);
+            *out_len = dsl_convert_utf16le_to_utf8(s->buf + s->buf_pos, raw_len, (unsigned char*)out_utf8, max_content);
         } else if (s->is_utf16be) {
-            *out_len = dsl_convert_utf16be_to_utf8(s->buf + s->buf_pos, raw_len, (unsigned char*)out_utf8, out_max);
+            *out_len = dsl_convert_utf16be_to_utf8(s->buf + s->buf_pos, raw_len, (unsigned char*)out_utf8, max_content);
         } else {
-            *out_len = raw_len < out_max ? raw_len : out_max;
+            *out_len = raw_len < max_content ? raw_len : max_content;
             memcpy(out_utf8, s->buf + s->buf_pos, *out_len);
         }
         
@@ -198,7 +202,7 @@ int dsl_scanner_read_line(DslScanner *s, char *out_utf8, size_t out_max, size_t 
         
         if (*out_len > 0 && out_utf8[*out_len - 1] == '\n') (*out_len)--;
         if (*out_len > 0 && out_utf8[*out_len - 1] == '\r') (*out_len)--;
-        out_utf8[*out_len] = '\0';
+        if (out_max > 0) out_utf8[*out_len] = '\0';
         
         return 1;
     }

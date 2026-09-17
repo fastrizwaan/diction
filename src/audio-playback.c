@@ -38,22 +38,31 @@ static gboolean looks_like_url(const char *path) {
     return path && (g_str_has_prefix(path, "http://") || g_str_has_prefix(path, "https://"));
 }
 
+static gboolean program_exists_in_path(const char *prog) {
+    char *p = g_find_program_in_path(prog);
+    if (p) {
+        g_free(p);
+        return TRUE;
+    }
+    return FALSE;
+}
+
 static gboolean play_audio_via_pcm_pipeline(const char *audio_path) {
-    if (!g_find_program_in_path("ffmpeg")) {
+    if (!program_exists_in_path("ffmpeg")) {
         return FALSE;
     }
 
     char *quoted = g_shell_quote(audio_path);
     gboolean ok = FALSE;
 
-    if (g_find_program_in_path("pw-play")) {
+    if (program_exists_in_path("pw-play")) {
         char *cmd = g_strdup_printf(
             "ffmpeg -nostdin -loglevel error -i %s -f s16le -acodec pcm_s16le -ac 2 -ar 48000 - | "
             "pw-play --raw --format s16 --channels 2 --rate 48000 -",
             quoted);
         ok = spawn_audio_shell_command(cmd, "ffmpeg | pw-play");
         g_free(cmd);
-    } else if (g_find_program_in_path("aplay")) {
+    } else if (program_exists_in_path("aplay")) {
         char *cmd = g_strdup_printf(
             "ffmpeg -nostdin -loglevel error -i %s -f s16le -acodec pcm_s16le -ac 2 -ar 48000 - | "
             "aplay -q -f S16_LE -c 2 -r 48000 -",
@@ -67,7 +76,7 @@ static gboolean play_audio_via_pcm_pipeline(const char *audio_path) {
 }
 
 static gboolean play_audio_via_gstreamer(const char *audio_path, gboolean is_spx) {
-    if (!g_find_program_in_path("gst-launch-1.0")) {
+    if (!program_exists_in_path("gst-launch-1.0")) {
         return FALSE;
     }
 
@@ -118,28 +127,28 @@ void audio_play_file(const char *audio_path) {
         }
     }
 
-    if (g_find_program_in_path("ffplay")) {
+    if (program_exists_in_path("ffplay")) {
         const char *argv[] = { "ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", audio_path, NULL };
         if (spawn_audio_argv(argv, "ffplay")) {
             return;
         }
     }
 
-    if (g_find_program_in_path("mpg123")) {
+    if (program_exists_in_path("mpg123")) {
         const char *argv[] = { "mpg123", "-q", audio_path, NULL };
         if (spawn_audio_argv(argv, "mpg123")) {
             return;
         }
     }
 
-    if (g_find_program_in_path("play")) {
+    if (program_exists_in_path("play")) {
         const char *argv[] = { "play", "-q", audio_path, NULL };
         if (spawn_audio_argv(argv, "play")) {
             return;
         }
     }
 
-    if (g_find_program_in_path("paplay")) {
+    if (program_exists_in_path("paplay")) {
         const char *argv[] = { "paplay", audio_path, NULL };
         if (spawn_audio_argv(argv, "paplay")) {
             return;

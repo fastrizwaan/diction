@@ -67,6 +67,7 @@ size_t flat_index_search_prefix_fast(const FlatIndex *idx, const char *prefix);
 
 /* Positional access. */
 const FlatTreeEntry* flat_index_get(const FlatIndex *idx, size_t pos);
+bool flat_index_get_entry(const FlatIndex *idx, size_t pos, FlatTreeEntry *out_entry);
 const FlatTreeEntry* flat_index_successor(const FlatIndex *idx, size_t pos);
 const FlatTreeEntry* flat_index_random(const FlatIndex *idx);
 size_t flat_index_count(const FlatIndex *idx);

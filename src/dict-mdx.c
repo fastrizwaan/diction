@@ -1650,8 +1650,10 @@ DictMmap *parse_mdx_file(const char *path, volatile gint *cancel_flag, gint expe
         }
 
         /* If index is missing or invalid, we must rebuild everything */
-        munmap((void*)dict_data, dict_size);
-        dict_entry_unref((DictEntry*)dict);
+        dict->name = NULL;
+        dict->source_lang = NULL;
+        dict->target_lang = NULL;
+        dict_mmap_close(dict);
     }
 
     /* ───────────────────────────── */

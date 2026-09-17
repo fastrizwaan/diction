@@ -321,7 +321,7 @@ DictMmap* parse_slob_file(const char *path, volatile gint *cancel_flag, gint exp
         uint64_t refs_block_end = hdr.refs_offset + (uint64_t)hdr.refs_count * 8;
         for (uint32_t i = 0; i < hdr.refs_count; i++) {
             if (cancel_flag && g_atomic_int_get(cancel_flag) != expected) {
-                dict_cache_builder_free(builder); g_free(temp_refs); munmap(map, st_file.st_size); close(fd); g_free(title); return NULL;
+                dict_cache_builder_free(builder); g_free(temp_refs); unlink(cache_path); g_free(cache_path); munmap(map, st_file.st_size); close(fd); g_free(title); return NULL;
             }
             if (i % 500 == 0) {
                 settings_scan_progress_notify(path, (int)(i * 20 / hdr.refs_count)); /* 20% for ref scan */
@@ -354,8 +354,11 @@ DictMmap* parse_slob_file(const char *path, volatile gint *cancel_flag, gint exp
         const unsigned char *items_offsets_p = (unsigned char*)map + hdr.items_offset;
         for (uint32_t i = 0; i < hdr.items_count; i++) {
             if (cancel_flag && g_atomic_int_get(cancel_flag) != expected) {
+                for (uint32_t c = i; c < hdr.items_count; c++) {
+                    if (item_to_refs[c]) g_list_free(item_to_refs[c]);
+                }
                 g_free(item_to_refs); g_free(bin_cache_offsets); g_free(bin_cache_lens); g_free(temp_refs);
-                dict_cache_builder_free(builder); unlink(cache_path); munmap(map, st_file.st_size); close(fd); g_free(title); return NULL;
+                dict_cache_builder_free(builder); unlink(cache_path); g_free(cache_path); munmap(map, st_file.st_size); close(fd); g_free(title); return NULL;
             }
             if (i % 100 == 0) {
                 settings_scan_progress_notify(path, 20 + (int)(i * 70 / hdr.items_count)); /* 70% for item decompression */
@@ -426,6 +429,7 @@ DictMmap* parse_slob_file(const char *path, volatile gint *cancel_flag, gint exp
                                     final_entries[i].d_len);
                             }
                             dict_hw_builder_set_metadata(hw, "source_path", path);
+                            if (title && *title) dict_hw_builder_set_metadata(hw, "dict_name", title);
                             dict_hw_builder_finalize(hw);
                             struct stat hw_src_st;
                             if (stat(path, &hw_src_st) == 0) {
@@ -465,10 +469,18 @@ DictMmap* parse_slob_file(const char *path, volatile gint *cancel_flag, gint exp
     dm->fd = -1;
     dm->data = (const char*)cache_map;
     dm->size = st_cache.st_size;
-    dm->name = title ? title : g_path_get_basename(path);
+    dm->name = title ? title : NULL;
     dm->source_dir = g_path_get_dirname(path);
     dm->index = flat_index_open(hw_path);
     g_free(hw_path);
+    if (dm->index) {
+        const char *m_name = flat_index_get_metadata(dm->index, "dict_name");
+        if (m_name && (!dm->name || !*dm->name)) {
+            g_free(dm->name);
+            dm->name = g_strdup(m_name);
+        }
+    }
+    if (!dm->name) dm->name = g_path_get_basename(path);
     if (dict_cache_is_compressed(dm->data, dm->size)) {
         dm->is_compressed = TRUE;
         dm->chunk_reader = dict_chunk_reader_new(dm->data, dm->size, (const DictCacheHeader*)dm->data);

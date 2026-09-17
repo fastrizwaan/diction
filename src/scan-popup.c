@@ -280,7 +280,6 @@ static gboolean delayed_clipboard_read_cb(gpointer data) {
         } else {
             read_regular_clipboard_manual();
         }
-        g_free(attempts);
         return G_SOURCE_REMOVE;
     }
 
@@ -320,5 +319,5 @@ void scan_popup_trigger_manual(void) {
 
     g_print("[DEBUG-SCAN] Falling back to GTK clipboard. Waiting for window focus...\n");
     gint *attempts = g_new0(gint, 1);
-    g_timeout_add(100, delayed_clipboard_read_cb, attempts);
+    g_timeout_add_full(G_PRIORITY_DEFAULT, 100, delayed_clipboard_read_cb, attempts, g_free);
 }

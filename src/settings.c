@@ -16,6 +16,10 @@ extern DictMmap* parse_mdx_file(const char *path, volatile gint *cancel_flag, gi
 extern DictMmap* parse_bgl_file(const char *path, volatile gint *cancel_flag, gint expected);
 extern DictMmap* parse_slob_file(const char *path, volatile gint *cancel_flag, gint expected);
 extern DictMmap* parse_sdict_file(const char *path, volatile gint *cancel_flag, gint expected);
+extern DictMmap* parse_xdxf_file(const char *path, volatile gint *cancel_flag, gint expected);
+extern DictMmap* parse_dictd_file(const char *path, volatile gint *cancel_flag, gint expected);
+extern DictMmap* parse_zim_file(const char *path, volatile gint *cancel_flag, gint expected);
+extern DictMmap* parse_wiki_file(const char *path, volatile gint *cancel_flag, gint expected);
 
 static GPtrArray *settings_collect_mdx_companion_paths(const char *mdx_path);
 static gboolean ends_with_ci(const char *text, const char *suffix);
@@ -65,6 +69,18 @@ char* settings_resolve_dictionary_name(const char *path) {
             break;
         case DICT_FORMAT_SDICT:
             dict = parse_sdict_file(path, NULL, 0);
+            break;
+        case DICT_FORMAT_XDXF:
+            dict = parse_xdxf_file(path, NULL, 0);
+            break;
+        case DICT_FORMAT_DICTD:
+            dict = parse_dictd_file(path, NULL, 0);
+            break;
+        case DICT_FORMAT_ZIM:
+            dict = parse_zim_file(path, NULL, 0);
+            break;
+        case DICT_FORMAT_WIKI:
+            dict = parse_wiki_file(path, NULL, 0);
             break;
         default:
             break;

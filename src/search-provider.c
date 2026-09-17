@@ -85,6 +85,8 @@ static void load_dictionaries(void) {
             DictConfig *cfg = g_ptr_array_index(app_settings->dictionaries, i);
             if (cfg && cfg->enabled && (g_strcmp0(cfg->source, "manual") == 0 || g_strcmp0(cfg->source, "imported") == 0)) {
                 DictEntry *entry = g_new0(DictEntry, 1);
+                entry->magic = 0xDEADC0DE;
+                entry->ref_count = 1;
                 entry->path = g_strdup(cfg->path);
                 entry->dict_id = g_strdup(cfg->id);
                 entry->name = g_strdup(cfg->name);
@@ -292,9 +294,8 @@ static gboolean handle_activate_result(
     char **parts = g_strsplit(identifier, "::", 2);
     if (g_strv_length(parts) == 2) {
         const char *term = parts[1];
-        char *command = g_strdup_printf("diction --search \"%s\"", term);
-        g_spawn_command_line_async(command, NULL);
-        g_free(command);
+        const char *argv[] = { "diction", "--search", term, NULL };
+        g_spawn_async(NULL, (char **)argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, NULL);
     }
     g_strfreev(parts);
     
@@ -316,9 +317,8 @@ static gboolean handle_launch_search(
     reset_idle_timeout();
     
     char *query = g_strjoinv(" ", (gchar **)terms);
-    char *command = g_strdup_printf("diction --scan \"%s\"", query);
-    g_spawn_command_line_async(command, NULL);
-    g_free(command);
+    const char *argv[] = { "diction", "--scan", query, NULL };
+    g_spawn_async(NULL, (char **)argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, NULL);
     g_free(query);
     
     diction_search_provider_search_provider2_complete_launch_search(object, invocation);

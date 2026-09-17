@@ -249,11 +249,20 @@ DictMmap* parse_sdict_file(const char *path, volatile gint *cancel_flag, gint ex
                     char *hw_path = dict_hw_index_path_for(path);
                     dict->index = flat_index_open(hw_path);
                     g_free(hw_path);
-                    dict->is_compressed = TRUE;
-                    dict->chunk_reader = dict_chunk_reader_new(dict->data, dict->size, (const DictCacheHeader*)dict->data);
-                    g_free(cache_path);
-                    fclose(f);
-                    return dict;
+
+                    if (!dict->index || dict->index->count == 0 || !flat_index_validate(dict->index)) {
+                        fprintf(stderr, "[SDICT] Cache index missing or invalid, rebuilding\n");
+                        dict->name = NULL;
+                        dict_mmap_close(dict);
+                    } else {
+                        const char *m_name = flat_index_get_metadata(dict->index, "dict_name");
+                        if (m_name && !dict->name) dict->name = g_strdup(m_name);
+                        dict->is_compressed = TRUE;
+                        dict->chunk_reader = dict_chunk_reader_new(dict->data, dict->size, (const DictCacheHeader*)dict->data);
+                        g_free(cache_path);
+                        fclose(f);
+                        return dict;
+                    }
                 } else {
                     fprintf(stderr, "[SDICT] Cache mmap failed: %s (size=%zu)\n", cache_path, (size_t)st.st_size);
                 }
@@ -407,6 +416,7 @@ DictMmap* parse_sdict_file(const char *path, volatile gint *cancel_flag, gint ex
                                 entries[i].d_len);
                         }
                         dict_hw_builder_set_metadata(hw, "source_path", path);
+                        if (bookname) dict_hw_builder_set_metadata(hw, "dict_name", bookname);
                         dict_hw_builder_finalize(hw);
                         struct stat hw_src_st;
                         if (stat(path, &hw_src_st) == 0) {
